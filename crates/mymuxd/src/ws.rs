@@ -24,6 +24,7 @@ use crate::tmux::{Hub, ServerEvent};
 enum ClientMsg {
     Resize { cols: u16, rows: u16 },
     Focus { pane: u32 },
+    SelectPane { dir: String },
     Split { pane: u32, dir: String },
     NewWindow,
     SelectWindow { id: u32 },
@@ -115,6 +116,7 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
                         match msg {
                             ClientMsg::Resize { cols, rows } => hub.resize(cols, rows).await,
                             ClientMsg::Focus { pane } => hub.focus(pane).await,
+                            ClientMsg::SelectPane { dir } => hub.select_pane_dir(&dir).await,
                             ClientMsg::Split { pane, dir } => hub.split(pane, dir == "h").await,
                             ClientMsg::NewWindow => hub.new_window().await,
                             ClientMsg::SelectWindow { id } => hub.select_window(id).await,

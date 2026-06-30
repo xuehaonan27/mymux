@@ -147,6 +147,18 @@ impl Hub {
         self.send_cmd(format!("select-pane -t %{pane}")).await;
     }
 
+    /// Move focus to the pane in a direction (`L`/`R`/`U`/`D`).
+    pub async fn select_pane_dir(&self, dir: &str) {
+        let flag = match dir {
+            "L" => "-L",
+            "R" => "-R",
+            "U" => "-U",
+            "D" => "-D",
+            _ => return,
+        };
+        self.send_cmd(format!("select-pane {flag}")).await;
+    }
+
     pub async fn resize(&self, cols: u16, rows: u16) {
         self.send_cmd(format!("refresh-client -C {cols}x{rows}")).await;
     }

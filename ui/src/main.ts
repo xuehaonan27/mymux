@@ -50,8 +50,9 @@ interface Pane {
 }
 const panes = new Map<number, Pane>();
 let activePane: number | null = null;
+let activeWindow: number | null = null;
+let windowList: WinInfo[] = [];
 let ws: WebSocket | undefined;
-let focusedOnce = false;
 
 function makePane(id: number): Pane {
   const el = document.createElement('div');
@@ -82,8 +83,11 @@ function focusPane(id: number) {
 }
 
 function setActivePane(id: number | null) {
+  const changed = id !== activePane;
   activePane = id;
   for (const [pid, p] of panes) p.el.classList.toggle('active', pid === id);
+  // Give the newly-active pane keyboard focus so typing and nav land there.
+  if (changed && id != null) panes.get(id)?.term.focus();
 }
 
 // Place each leaf pane at its exact cell rectangle; dispose panes that vanished.
@@ -138,14 +142,12 @@ function onState(json: string) {
     return;
   }
   if (msg.t !== 'state') return;
+  windowList = msg.windows;
+  activeWindow = msg.active_window;
   renderTabs(msg.windows);
-  setActivePane(msg.active_pane);
   if (msg.layout) applyLayout(msg.layout);
+  setActivePane(msg.active_pane);
   updateMeta(msg.windows.length);
-  if (!focusedOnce && msg.active_pane != null && panes.has(msg.active_pane)) {
-    panes.get(msg.active_pane)!.term.focus();
-    focusedOnce = true;
-  }
 }
 
 function onBinary(buf: ArrayBuffer) {
@@ -197,7 +199,6 @@ function connect() {
   };
   ws.onclose = () => {
     setStatus('closed');
-    focusedOnce = false;
     window.setTimeout(connect, 1000);
   };
   ws.onerror = () => ws?.close();
@@ -219,5 +220,101 @@ function cmdBtn(id: string, make: () => unknown) {
 cmdBtn('btn-newwin', () => ({ t: 'new_window' }));
 cmdBtn('btn-splith', () => (activePane != null ? { t: 'split', pane: activePane, dir: 'h' } : null));
 cmdBtn('btn-splitv', () => (activePane != null ? { t: 'split', pane: activePane, dir: 'v' } : null));
+
+// ---- Keybindings (M1.3): a Cmd/Ctrl+K leader for everything, plus a few
+// non-conflicting direct combos. The Tauri app (M2) can bind the rest of the
+// iTerm2-style direct combos that the browser reserves (Cmd+T/W/1-9). ----
+const hintEl = document.getElementById('hint')!;
+const isMac = /Mac|iPhone|iPad/.test(navigator.userAgent);
+const mod = (e: KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey);
+
+let leaderActive = false;
+function setLeader(on: boolean) {
+  leaderActive = on;
+  hintEl.classList.toggle('show', on);
+}
+
+function splitActive(dir: 'h' | 'v') {
+  if (activePane != null) sendJson({ t: 'split', pane: activePane, dir });
+}
+function closeActive() {
+  if (activePane != null) sendJson({ t: 'close_pane', pane: activePane });
+}
+function navPane(dir: 'L' | 'R' | 'U' | 'D') {
+  sendJson({ t: 'select_pane', dir });
+}
+function switchWindowIndex(i: number) {
+  const w = windowList[i];
+  if (w) sendJson({ t: 'select_window', id: w.id });
+}
+function switchWindowRel(delta: number) {
+  if (!windowList.length) return;
+  const idx = Math.max(0, windowList.findIndex((w) => w.id === activeWindow));
+  const next = windowList[(idx + delta + windowList.length) % windowList.length];
+  sendJson({ t: 'select_window', id: next.id });
+}
+function copySelection() {
+  const sel = activePane != null ? panes.get(activePane)?.term.getSelection() : '';
+  if (sel) navigator.clipboard?.writeText(sel).catch(() => {});
+}
+
+const ARROWS: Record<string, 'L' | 'R' | 'U' | 'D'> = {
+  ArrowLeft: 'L', ArrowRight: 'R', ArrowUp: 'U', ArrowDown: 'D',
+  h: 'L', l: 'R', k: 'U', j: 'D',
+};
+
+function handleLeaderKey(e: KeyboardEvent) {
+  const k = e.key;
+  if (k === 'Escape') return;
+  const lower = k.toLowerCase();
+  if (lower === 'c') return sendJson({ t: 'new_window' });
+  if (lower === 'x') return closeActive();
+  if (lower === 'd') return splitActive(e.shiftKey ? 'v' : 'h');
+  if (k === '|' || k === '\\') return splitActive('h');
+  if (k === '-') return splitActive('v');
+  if (k === 'n' || k === ']') return switchWindowRel(1);
+  if (k === 'p' || k === '[') return switchWindowRel(-1);
+  if (k >= '1' && k <= '9') return switchWindowIndex(parseInt(k, 10) - 1);
+  const d = ARROWS[k] ?? ARROWS[lower];
+  if (d) navPane(d);
+}
+
+document.addEventListener(
+  'keydown',
+  (e) => {
+    if (leaderActive) {
+      // Ignore modifier-only keydowns so "leader then Shift+D" works.
+      if (['Shift', 'Meta', 'Control', 'Alt'].includes(e.key)) {
+        e.preventDefault();
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      handleLeaderKey(e);
+      setLeader(false);
+      return;
+    }
+    if (!mod(e)) return;
+    const lower = e.key.toLowerCase();
+    if (lower === 'k' && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      setLeader(true);
+    } else if (lower === 'd' && !e.altKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      splitActive(e.shiftKey ? 'v' : 'h');
+    } else if (lower === 'c' && !e.shiftKey && !e.altKey) {
+      const sel = activePane != null ? panes.get(activePane)?.term.getSelection() : '';
+      if (sel) {
+        e.preventDefault();
+        e.stopPropagation();
+        copySelection();
+      }
+    }
+    // Cmd/Ctrl+V paste falls through to xterm, which applies bracketed paste.
+  },
+  true,
+);
 
 connect();

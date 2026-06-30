@@ -111,3 +111,27 @@ body {
   width: 0;
   height: 0;
 }
+
+/* Leader-key hint bar (shown while the Cmd/Ctrl+K prefix is armed). */
+.hint {
+  position: fixed;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  display: none;
+  padding: 6px 12px;
+  font: 11px ui-monospace, Menlo, monospace;
+  color: #c5cdd9;
+  background: #161b27;
+  border: 1px solid #2f81f7;
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  white-space: nowrap;
+  z-index: 10;
+}
+.hint.show {
+  display: block;
+}
+.hint b {
+  color: #2f81f7;
+}
