@@ -25,6 +25,8 @@ pub struct Model {
     pub windows: BTreeMap<WindowId, WindowInfo>,
     /// The pane that should currently receive keystrokes.
     pub active_pane: Option<PaneId>,
+    /// The window currently shown by the attached client.
+    pub active_window: Option<WindowId>,
 }
 
 impl Model {
@@ -47,27 +49,57 @@ impl Model {
                 self.panes.insert(*pane);
                 self.active_pane = Some(*pane);
                 self.windows.entry(*window).or_default().active_pane = Some(*pane);
+                if self.active_window.is_none() {
+                    self.active_window = Some(*window);
+                }
                 true
             }
             ControlEvent::LayoutChange { window, layout, .. } => {
                 self.windows.entry(*window).or_default().layout = layout.clone();
+                if self.active_window.is_none() {
+                    self.active_window = Some(*window);
+                }
                 true
             }
             ControlEvent::SessionChanged { name, .. } => {
                 self.session_name = Some(name.clone());
                 true
             }
-            ControlEvent::WindowAdd { window } => {
-                self.windows.entry(*window).or_default();
+            ControlEvent::SessionWindowChanged { window, .. } => {
+                self.active_window = Some(*window);
                 true
             }
-            ControlEvent::WindowClose { window } => self.windows.remove(window).is_some(),
+            ControlEvent::WindowAdd { window } => {
+                self.windows.entry(*window).or_default();
+                if self.active_window.is_none() {
+                    self.active_window = Some(*window);
+                }
+                true
+            }
+            ControlEvent::WindowClose { window } => {
+                let removed = self.windows.remove(window).is_some();
+                if self.active_window == Some(*window) {
+                    self.active_window = self.windows.keys().next().copied();
+                }
+                removed
+            }
             ControlEvent::WindowRenamed { window, name } => {
                 self.windows.entry(*window).or_default().name = Some(name.clone());
                 true
             }
             _ => false,
         }
+    }
+
+    /// Pane ids of the active window, in layout order (empty if unknown).
+    pub fn active_window_panes(&self) -> Vec<PaneId> {
+        let mut panes = Vec::new();
+        if let Some(w) = self.active_window {
+            if let Some(layout) = self.windows.get(&w).and_then(|wi| wi.layout.as_ref()) {
+                layout.root.for_each_pane(&mut |id, _| panes.push(id));
+            }
+        }
+        panes
     }
 }
 
@@ -91,5 +123,27 @@ mod tests {
         });
         assert_eq!(m.active_pane, Some(PaneId(1)));
         assert_eq!(m.windows[&WindowId(0)].active_pane, Some(PaneId(1)));
+    }
+
+    #[test]
+    fn tracks_active_window_and_panes() {
+        let mut m = Model::new();
+        m.apply(&ControlEvent::WindowAdd { window: WindowId(0) });
+        assert_eq!(m.active_window, Some(WindowId(0)));
+
+        let layout = crate::parse_layout("aaaa,80x24,0,0{40x24,0,0,0,39x24,41,0,1}");
+        assert!(layout.is_some());
+        m.apply(&ControlEvent::LayoutChange {
+            window: WindowId(0),
+            raw_layout: String::new(),
+            layout,
+        });
+        assert_eq!(m.active_window_panes(), vec![PaneId(0), PaneId(1)]);
+
+        m.apply(&ControlEvent::SessionWindowChanged {
+            session: crate::SessionId(0),
+            window: WindowId(1),
+        });
+        assert_eq!(m.active_window, Some(WindowId(1)));
     }
 }

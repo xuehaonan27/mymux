@@ -4,6 +4,7 @@
 //! WebSocket. M0 serves only `/ws`; the UI is served by Vite in dev and by the
 //! daemon itself from M2 on.
 
+mod state;
 mod tmux;
 mod ws;
 

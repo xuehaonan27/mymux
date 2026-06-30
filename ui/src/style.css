@@ -48,11 +48,64 @@ body {
 .dot.closed {
   background: #f85149;
 }
+
+#tabs {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.tab {
+  font: 11px ui-monospace, Menlo, monospace;
+  color: #9aa5b1;
+  background: #161b27;
+  border: 1px solid #232a38;
+  border-radius: 5px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.tab:hover {
+  color: #c5cdd9;
+}
+.tab.active {
+  color: #0b0e14;
+  background: #3fb950;
+  border-color: #3fb950;
+}
+.barbtn {
+  font: 11px ui-monospace, Menlo, monospace;
+  color: #9aa5b1;
+  background: #161b27;
+  border: 1px solid #232a38;
+  border-radius: 5px;
+  padding: 2px 7px;
+  cursor: pointer;
+}
+.barbtn:hover {
+  color: #c5cdd9;
+  border-color: #2f81f7;
+}
+
+/* Pane area: a positioning context; each pane is placed by exact cell geometry. */
 #term {
+  position: relative;
   flex: 1;
   min-height: 0;
-  padding: 4px 6px;
+  overflow: hidden;
 }
-.xterm {
+.pane {
+  position: absolute;
+  overflow: hidden;
+  background: #0b0e14;
+}
+.pane.active {
+  box-shadow: inset 0 0 0 1px #2f81f7;
+}
+.pane .xterm {
+  width: 100%;
   height: 100%;
+}
+/* Exact cell sizing — hide xterm's scrollbar so it doesn't eat a column. */
+.pane .xterm-viewport::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
