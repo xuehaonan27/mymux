@@ -1,0 +1,58 @@
+:root {
+  color-scheme: dark;
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #0b0e14;
+}
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+#bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #9aa5b1;
+  background: #11151f;
+  border-bottom: 1px solid #1e2430;
+}
+#bar .title {
+  font-weight: 600;
+  color: #c5cdd9;
+}
+#meta {
+  margin-left: auto;
+  color: #5c6773;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #5c6773;
+}
+.dot.connecting {
+  background: #d6a04c;
+}
+.dot.open {
+  background: #3fb950;
+}
+.dot.closed {
+  background: #f85149;
+}
+#term {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 6px;
+}
+.xterm {
+  height: 100%;
+}

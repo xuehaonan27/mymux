@@ -1,0 +1,9 @@
+[package]
+name = "mux-core"
+description = "tmux control-mode (-CC) protocol parser and session model for mymux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Intentionally dependency-free: this crate must always build offline.

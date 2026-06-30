@@ -1,0 +1,47 @@
+%begin 1782756497 262 0
+%end 1782756497 262 0
+%session-changed $0 main
+%begin 1782756497 266 1
+%end 1782756497 266 1
+%output %0 printf 'A
+%output %0 \007B\015\012
+%output %0 \033[?2004l\015
+%output %0 \033[?2004h> 
+%output %0 C\015\012
+%output %0 \033[?2004l\015
+%output %0 \033[?2004h> 
+%output %0 '\015\012
+%output %0 \033[?2004l\015
+%output %0 AB\015\012
+%output %0 C\015\012
+%output %0 \033[?2004hxuehaonan@dev:~/mymux$ 
+%begin 1782756498 268 1
+%end 1782756498 268 1
+%window-pane-changed @0 %1
+%layout-change @0 6b8b,100x30,0,0{50x30,0,0,0,49x30,51,0,1} 6b8b,100x30,0,0{50x30,0,0,0,49x30,51,0,1} *
+%output %0 \015\033[Kxuehaonan@dev:~/mymux$ 
+%output %1 \033[?2004hxuehaonan@dev:~/mymux$ 
+%begin 1782756499 271 1
+%end 1782756499 271 1
+%output %1 echo second-pane\015\012
+%output %1 \033[?2004l\015
+%output %1 second-pane\015\012
+%output %1 \033[?2004h
+%output %1 xuehaonan@dev:~/mymux$ 
+%begin 1782756499 272 1
+%end 1782756499 272 1
+%session-window-changed $0 @1
+%window-add @1
+%output %2 \033[?2004h
+%output %2 xuehaonan@dev:~/mymux$ 
+%begin 1782756500 275 1
+%end 1782756500 275 1
+%output %2 echo in-new-window\015\012
+%output %2 \033[?2004l\015in-new-window
+%output %2 \015\012\033[?2004h
+%output %2 xuehaonan@dev:~/mymux$ 
+%begin 1782756500 276 1
+@0 bash 6b8b,100x30,0,0{50x30,0,0,0,49x30,51,0,1}
+@1 logs b25f,80x24,0,0,2
+%end 1782756500 276 1
+%exit
