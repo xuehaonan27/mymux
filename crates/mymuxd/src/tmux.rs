@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
-use mux_core::{ControlEvent, Model, Parser};
+use mux_core::{parse_layout, ControlEvent, Model, Parser, WindowId};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::{broadcast, mpsc};
@@ -70,6 +70,10 @@ impl Hub {
         self.events_tx.subscribe()
     }
 
+    fn emit(&self, ev: ServerEvent) {
+        let _ = self.events_tx.send(ev);
+    }
+
     /// Spawn the `tmux -C` control client if it isn't running. Called on every
     /// connection, so it also respawns after a session has ended.
     pub fn ensure_started(self: &Arc<Self>) {
@@ -107,7 +111,7 @@ impl Hub {
         // A fresh session means stale model state; start clean.
         *self.model.lock().unwrap() = Model::new();
 
-        tokio::spawn(reader_loop(stdout, self.events_tx.clone(), self.model.clone()));
+        tokio::spawn(reader_loop(stdout, self.clone()));
         tokio::spawn(writer_loop(stdin, cmd_rx));
 
         let hub = self.clone();
@@ -209,13 +213,39 @@ impl Hub {
         }
         seeds
     }
+
+    /// Pull every window's name + layout from tmux. Control mode does not push a
+    /// `%layout-change` for a bare `new-window`, so the model would otherwise
+    /// have no geometry for freshly created windows.
+    pub async fn refresh_layouts(&self) {
+        let out = Command::new("tmux")
+            .args([
+                "-L", SOCKET, "list-windows", "-F",
+                "#{window_id} #{window_name} #{window_layout}",
+            ])
+            .output()
+            .await;
+        let Ok(o) = out else { return };
+        if !o.status.success() {
+            return;
+        }
+        let text = String::from_utf8_lossy(&o.stdout);
+        let mut m = self.model.lock().unwrap();
+        for line in text.lines() {
+            let mut it = line.splitn(3, ' ');
+            let (Some(id), Some(name), Some(layout)) = (it.next(), it.next(), it.next()) else {
+                continue;
+            };
+            if let Some(wid) = WindowId::parse(id) {
+                let info = m.windows.entry(wid).or_default();
+                info.name = Some(name.to_string());
+                info.layout = parse_layout(layout);
+            }
+        }
+    }
 }
 
-async fn reader_loop(
-    stdout: ChildStdout,
-    events_tx: broadcast::Sender<ServerEvent>,
-    model: Arc<Mutex<Model>>,
-) {
+async fn reader_loop(stdout: ChildStdout, hub: Arc<Hub>) {
     let mut reader = BufReader::new(stdout);
     let mut parser = Parser::new();
     let mut line: Vec<u8> = Vec::new();
@@ -238,22 +268,41 @@ async fn reader_loop(
             continue;
         };
 
-        // Fold into the model; push a fresh state snapshot if structure changed.
-        let changed = model.lock().unwrap().apply(&ev);
+        // Fold into the model; note whether structure changed / window switched.
+        let (changed, switched) = {
+            let mut m = hub.model.lock().unwrap();
+            let prev = m.active_window;
+            let changed = m.apply(&ev);
+            (changed, m.active_window != prev)
+        };
         if changed {
-            let json = build_state_json(&model.lock().unwrap());
-            let _ = events_tx.send(ServerEvent::State(json));
+            hub.emit(ServerEvent::State(hub.state_json()));
         }
+
+        let topology = switched || matches!(ev, ControlEvent::WindowAdd { .. });
 
         match ev {
             ControlEvent::Output { pane, data } => {
-                let _ = events_tx.send(ServerEvent::Output { pane: pane.0, data });
+                hub.emit(ServerEvent::Output { pane: pane.0, data });
             }
             ControlEvent::Exit { reason } => {
                 eprintln!("mymuxd: tmux %exit ({reason:?})");
                 break;
             }
             _ => {}
+        }
+
+        // A new or switched window: tmux doesn't push a layout for a bare
+        // new-window, and never replays a background window's screen. Pull
+        // layouts from tmux, push fresh state, then repaint the visible panes.
+        if topology {
+            // Inline (not spawned) so the refreshed layout lands in the model
+            // before any later event builds its state — kills empty-layout races.
+            hub.refresh_layouts().await;
+            hub.emit(ServerEvent::State(hub.state_json()));
+            for (pane, seed) in hub.snapshot_visible().await {
+                hub.emit(ServerEvent::Output { pane, data: seed });
+            }
         }
     }
 }

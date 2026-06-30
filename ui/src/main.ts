@@ -151,8 +151,11 @@ function onState(json: string) {
 function onBinary(buf: ArrayBuffer) {
   if (buf.byteLength < 4) return;
   const pane = new DataView(buf).getUint32(0, true);
-  const payload = new Uint8Array(buf, 4);
-  (panes.get(pane) ?? makePane(pane)).term.write(payload);
+  // Only render output for panes in the active window's layout. Output for a
+  // background pane is dropped (switching to that window triggers a fresh
+  // snapshot); creating a pane here would overlap, unpositioned.
+  const p = panes.get(pane);
+  if (p) p.term.write(new Uint8Array(buf, 4));
 }
 
 function sendJson(obj: unknown) {

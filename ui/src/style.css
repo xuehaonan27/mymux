@@ -91,6 +91,8 @@ body {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  /* Shows through the 1-cell gaps tmux leaves between panes, as separators. */
+  background: #1c2330;
 }
 .pane {
   position: absolute;
