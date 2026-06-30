@@ -33,6 +33,14 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
 
     let (mut sender, mut receiver) = socket.split();
 
+    // Paint the current screen for this freshly-connected client only, before we
+    // hand `sender` to the live-output task. Reconnect/reload now repaints the
+    // real screen instead of showing a blank terminal.
+    let seed = hub.snapshot().await;
+    if !seed.is_empty() {
+        let _ = sender.send(Message::Binary(seed.into())).await;
+    }
+
     // Pane output → client.
     let mut send_task = tokio::spawn(async move {
         loop {
@@ -48,9 +56,6 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
             }
         }
     });
-
-    // Paint the current screen for this freshly-attached client.
-    hub.repaint().await;
 
     // Client → tmux.
     loop {

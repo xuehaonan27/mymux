@@ -1,7 +1,11 @@
 //! The tmux side of the daemon: spawn one `tmux -C` control client, broadcast
 //! its pane output to all connected UIs, and forward UI input/resize back as
 //! tmux commands on the same pipe.
+//!
+//! The control client is **restartable**: if the session ends (e.g. the user
+//! types `exit`), the supervisor resets state so the next connection respawns it.
 
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
@@ -10,54 +14,72 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::{broadcast, mpsc};
 
+const SOCKET: &str = "mymux";
+const SESSION: &str = "mymux";
+
+/// tmux config sourced at server start (via `-f`) so the *first* pane is already
+/// a capable, truecolor terminal — Ink-based agent TUIs (Claude Code, Codex)
+/// render poorly under the default `screen` terminfo.
+const TMUX_CONF: &str = "\
+set -g default-terminal \"tmux-256color\"
+set -ga terminal-features \",*:RGB\"
+set -g exit-empty off
+setenv -g COLORTERM truecolor
+";
+
+#[derive(Default)]
+struct TmuxState {
+    running: bool,
+    /// Sender to the current tmux child's stdin; `None` when not running.
+    cmd_tx: Option<mpsc::Sender<String>>,
+}
+
 /// Shared bridge between the WebSocket clients and a single tmux control client.
 pub struct Hub {
     /// Raw pane bytes from tmux, fanned out to every connected UI.
     output_tx: broadcast::Sender<Vec<u8>>,
-    /// Commands to write on tmux's stdin (`send-keys`, `refresh-client`, ...).
-    cmd_tx: mpsc::Sender<String>,
-    /// Parked until the first connection spawns tmux.
-    cmd_rx: Mutex<Option<mpsc::Receiver<String>>>,
-    started: Mutex<bool>,
-    socket: String,
-    session: String,
+    state: Mutex<TmuxState>,
+    conf_path: PathBuf,
 }
 
 impl Hub {
     pub fn new() -> Arc<Self> {
         let (output_tx, _) = broadcast::channel(4096);
-        let (cmd_tx, cmd_rx) = mpsc::channel(512);
+        // Write the tmux config once; on failure tmux just uses its defaults.
+        let conf_path = std::env::temp_dir().join("mymux.tmux.conf");
+        if let Err(e) = std::fs::write(&conf_path, TMUX_CONF) {
+            eprintln!("mymuxd: could not write tmux config: {e}");
+        }
         Arc::new(Self {
             output_tx,
-            cmd_tx,
-            cmd_rx: Mutex::new(Some(cmd_rx)),
-            started: Mutex::new(false),
-            socket: "mymux".to_string(),
-            session: "mymux".to_string(),
+            state: Mutex::new(TmuxState::default()),
+            conf_path,
         })
     }
 
-    /// Subscribe to pane output. Subscribe *before* calling [`Hub::ensure_started`]
-    /// so the first client sees the session from its very first byte.
+    /// Subscribe to pane output. Subscribe *before* [`Hub::ensure_started`] so a
+    /// fresh first client sees the session from its very first byte.
     pub fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
         self.output_tx.subscribe()
     }
 
-    /// Spawn `tmux -C` once. Idempotent: later calls are no-ops.
+    /// Spawn the `tmux -C` control client if it isn't already running. Called on
+    /// every connection, so it also respawns after a session has ended.
     pub fn ensure_started(self: &Arc<Self>) {
-        let mut started = self.started.lock().unwrap();
-        if *started {
+        let mut state = self.state.lock().unwrap();
+        if state.running {
             return;
         }
-        let Some(cmd_rx) = self.cmd_rx.lock().unwrap().take() else {
-            return;
-        };
 
-        // `new-session -A` attaches if the session already exists (persistence),
-        // else creates it. `-C` puts the client in control mode over stdio.
+        let (cmd_tx, cmd_rx) = mpsc::channel::<String>(512);
+        let conf = self.conf_path.to_string_lossy().into_owned();
+
+        // `-f conf` is sourced before the session is created, so the first pane
+        // is already tmux-256color/truecolor. `new-session -A` attaches if the
+        // session exists (persistence) else creates it. `-C` = control mode.
         let spawn = Command::new("tmux")
             .args([
-                "-L", &self.socket, "-C", "new-session", "-A", "-s", &self.session,
+                "-L", SOCKET, "-f", conf.as_str(), "-C", "new-session", "-A", "-s", SESSION,
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -71,17 +93,33 @@ impl Hub {
                 return;
             }
         };
-        *started = true;
 
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
+        state.running = true;
+        state.cmd_tx = Some(cmd_tx);
+        drop(state);
 
         tokio::spawn(reader_loop(stdout, self.output_tx.clone()));
         tokio::spawn(writer_loop(stdin, cmd_rx));
+
+        // Supervisor: when tmux exits, reset so the next connection respawns it.
+        let hub = self.clone();
         tokio::spawn(async move {
             let status = child.wait().await;
             eprintln!("mymuxd: tmux control client exited: {status:?}");
+            let mut state = hub.state.lock().unwrap();
+            state.running = false;
+            state.cmd_tx = None;
         });
+    }
+
+    /// Queue a command for tmux's stdin. No-op if tmux isn't running.
+    async fn send_cmd(&self, cmd: String) {
+        let tx = self.state.lock().unwrap().cmd_tx.clone();
+        if let Some(tx) = tx {
+            let _ = tx.send(cmd).await;
+        }
     }
 
     /// Inject raw bytes as keystrokes into the active pane via `send-keys -H`.
@@ -93,21 +131,36 @@ impl Hub {
         for b in bytes {
             cmd.push_str(&format!(" {b:02x}"));
         }
-        let _ = self.cmd_tx.send(cmd).await;
+        self.send_cmd(cmd).await;
     }
 
     /// Set the control client's size; tmux resizes panes and emits a layout.
     pub async fn resize(&self, cols: u16, rows: u16) {
-        let _ = self
-            .cmd_tx
-            .send(format!("refresh-client -C {cols}x{rows}"))
-            .await;
+        self.send_cmd(format!("refresh-client -C {cols}x{rows}")).await;
     }
 
-    /// Nudge the active pane to redraw (Ctrl-L) so a fresh attach paints.
-    /// TODO(M2): replace with a proper screen reseed (`capture-pane -ep`).
-    pub async fn repaint(&self) {
-        let _ = self.cmd_tx.send("send-keys -H 0c".to_string()).await;
+    /// Snapshot the active pane's current screen (with colors) so a newly
+    /// connected client paints the real state instead of a blank terminal.
+    /// Returns clear+home followed by the captured screen, or empty on failure.
+    pub async fn snapshot(&self) -> Vec<u8> {
+        let out = Command::new("tmux")
+            .args(["-L", SOCKET, "capture-pane", "-e", "-p", "-t", SESSION])
+            .output()
+            .await;
+        match out {
+            Ok(o) if o.status.success() => {
+                let mut seed = b"\x1b[2J\x1b[H".to_vec();
+                // capture-pane joins rows with '\n'; a terminal needs '\r\n'.
+                for (i, row) in o.stdout.split(|&b| b == b'\n').enumerate() {
+                    if i > 0 {
+                        seed.extend_from_slice(b"\r\n");
+                    }
+                    seed.extend_from_slice(row);
+                }
+                seed
+            }
+            _ => Vec::new(),
+        }
     }
 }
 

@@ -54,6 +54,11 @@ impl PaneId {
     pub fn parse(tok: &str) -> Option<PaneId> {
         tok.strip_prefix('%')?.parse().ok().map(PaneId)
     }
+    /// Parse a `%N` token from raw bytes (the id itself is ASCII).
+    pub fn parse_bytes(tok: &[u8]) -> Option<PaneId> {
+        let n = tok.strip_prefix(b"%")?;
+        std::str::from_utf8(n).ok()?.parse().ok().map(PaneId)
+    }
 }
 impl WindowId {
     /// Parse a `@N` token.

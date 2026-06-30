@@ -19,14 +19,17 @@ xterm.js / dashboard (UI)  ⇄  WebSocket  ⇄  mymuxd (Rust)  ⇄  tmux -CC  �
 
 ## Status
 
-**M0 works**: a real shell driven through `tmux -CC`, bridged over WebSocket,
-rendered by xterm.js. The end-to-end byte loop is verified and `mux-core` has
-unit + fixture tests. Next: M1 (full multiplexer — layouts, splits, resize).
+**M0 + correctness pass work**: a real shell *and full-screen agent TUIs*
+(Claude Code, Codex) driven through `tmux -CC`, bridged over WebSocket, rendered
+by xterm.js. Verified end-to-end: agent UIs render, a reconnect reseeds the
+screen, `exit`+reconnect respawns a fresh session, and panes are truecolor.
+Next: M1 (lossless delivery under backpressure + multi-pane layouts).
 
 | Milestone | Scope | State |
 |-----------|-------|-------|
 | **M0** | tmux `-CC` driver + WS + one xterm.js pane | ✅ done |
-| M1 | full multiplexer: layouts, splits, resize, copy/paste | next |
+| **M0.1** | correctness: byte-accurate parser, screen reseed, respawn, truecolor | ✅ done |
+| M1 | lossless delivery + multi-pane: layouts, splits, resize, copy/paste | next |
 | M2 | persistence + auto-reconnect over an SSH tunnel; Tauri app | |
 | M3 | agent-status dashboard (output heuristics + agent hooks) | |
 

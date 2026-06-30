@@ -70,14 +70,20 @@ impl Parser {
     /// completed one. Lines inside a `%begin`..`%end` block are buffered and
     /// surface together as a single [`ControlEvent::CommandReply`].
     pub fn push_line(&mut self, line: &[u8]) -> Option<ControlEvent> {
-        // Control framing is ASCII; tolerate stray bytes without panicking.
-        let s = std::str::from_utf8(line).ok()?;
-        let s = s.strip_suffix('\r').unwrap_or(s); // defensive against CRLF
+        // %output payloads carry raw bytes (tmux escapes only control chars and
+        // `\`, never high/UTF-8 bytes) and tmux may split a multi-byte sequence
+        // across lines. So we must NOT UTF-8-validate the whole line: handle
+        // %output on raw bytes, and lossily decode the rest (pure-ASCII framing).
+        let line = if line.last() == Some(&b'\r') {
+            &line[..line.len() - 1] // defensive against CRLF
+        } else {
+            line
+        };
 
         // Inside a command-response block, everything up to %end/%error is reply text.
         if self.block.is_some() {
-            if s.starts_with("%end") || s.starts_with("%error") {
-                let error = s.starts_with("%error");
+            if line.starts_with(b"%end") || line.starts_with(b"%error") {
+                let error = line.starts_with(b"%error");
                 let block = self.block.take().unwrap();
                 return Some(ControlEvent::CommandReply {
                     num: block.num,
@@ -85,17 +91,33 @@ impl Parser {
                     error,
                 });
             }
-            self.block.as_mut().unwrap().lines.push(s.to_string());
+            self.block
+                .as_mut()
+                .unwrap()
+                .lines
+                .push(String::from_utf8_lossy(line).into_owned());
             return None;
         }
 
-        if s.is_empty() {
+        if line.is_empty() {
             return None;
         }
 
+        // %output is the only message whose payload is raw bytes — parse on bytes.
+        if let Some(rest) = line.strip_prefix(b"%output ") {
+            // rest = b"%<pane> <raw payload>"
+            let sp = rest.iter().position(|&b| b == b' ')?;
+            return Some(ControlEvent::Output {
+                pane: PaneId::parse_bytes(&rest[..sp])?,
+                data: unescape_output(&rest[sp + 1..]),
+            });
+        }
+
+        // Everything else is ASCII framing; a lossy decode never drops a line.
+        let s = String::from_utf8_lossy(line);
         let (verb, rest) = match s.split_once(' ') {
             Some((v, r)) => (v, r),
-            None => (s, ""),
+            None => (s.as_ref(), ""),
         };
 
         match verb {
@@ -108,17 +130,7 @@ impl Parser {
                 });
                 None
             }
-            "%output" => {
-                // %output %<pane> <escaped-payload>
-                let (pane_tok, payload) = match rest.split_once(' ') {
-                    Some((p, d)) => (p, d),
-                    None => (rest, ""),
-                };
-                Some(ControlEvent::Output {
-                    pane: PaneId::parse(pane_tok)?,
-                    data: unescape_output(payload),
-                })
-            }
+            // %output is handled above on raw bytes (its payload is not text).
             "%layout-change" => {
                 // %layout-change @<win> <layout> <visible-layout> <flags>
                 let mut it = rest.split(' ');
@@ -179,8 +191,8 @@ impl Parser {
 /// Decode a tmux `%output` payload: `\ooo` (three octal digits) becomes one
 /// byte; every other character is literal. tmux escapes control bytes, high
 /// bytes and `\` itself, so this round-trips arbitrary binary pane output.
-pub fn unescape_output(payload: &str) -> Vec<u8> {
-    let b = payload.as_bytes();
+pub fn unescape_output(payload: &[u8]) -> Vec<u8> {
+    let b = payload;
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
@@ -209,19 +221,19 @@ mod tests {
 
     #[test]
     fn unescape_control_and_printable() {
-        assert_eq!(unescape_output("AB\\015\\012"), b"AB\r\n");
-        assert_eq!(unescape_output("\\033[?2004l"), b"\x1b[?2004l");
-        assert_eq!(unescape_output("plain text"), b"plain text");
-        assert_eq!(unescape_output("\\007"), b"\x07");
+        assert_eq!(unescape_output(b"AB\\015\\012"), b"AB\r\n");
+        assert_eq!(unescape_output(b"\\033[?2004l"), b"\x1b[?2004l");
+        assert_eq!(unescape_output(b"plain text"), b"plain text");
+        assert_eq!(unescape_output(b"\\007"), b"\x07");
     }
 
     #[test]
     fn unescape_backslash_and_trailing() {
         // tmux escapes '\' as \134
-        assert_eq!(unescape_output("a\\134b"), b"a\\b");
+        assert_eq!(unescape_output(b"a\\134b"), b"a\\b");
         // a lone backslash with too few octal digits stays literal
-        assert_eq!(unescape_output("end\\"), b"end\\");
-        assert_eq!(unescape_output("\\01"), b"\\01");
+        assert_eq!(unescape_output(b"end\\"), b"end\\");
+        assert_eq!(unescape_output(b"\\01"), b"\\01");
     }
 
     #[test]
@@ -247,6 +259,29 @@ mod tests {
                 pane: PaneId(0),
                 data: b"printf 'A".to_vec(),
             }
+        );
+    }
+
+    #[test]
+    fn output_keeps_raw_utf8_and_split_multibyte() {
+        // Regression for the bug that broke Claude Code rendering: tmux emits raw
+        // UTF-8 in %output and may split a multi-byte char across lines. Such a
+        // line is NOT valid UTF-8 and must still survive byte-exact (never dropped).
+        let mut p = Parser::new();
+        // First two bytes of '╭' (U+256D), split mid-character by tmux's chunking.
+        assert_eq!(
+            p.push_line(b"%output %0 \xe2\x95"),
+            Some(ControlEvent::Output { pane: PaneId(0), data: vec![0xe2, 0x95] })
+        );
+        // A full multi-byte char round-trips byte-exact.
+        assert_eq!(
+            p.push_line(b"%output %0 \xe2\x95\xad"),
+            Some(ControlEvent::Output { pane: PaneId(0), data: vec![0xe2, 0x95, 0xad] })
+        );
+        // Raw high bytes mixed with an octal control escape (\015 = CR).
+        assert_eq!(
+            p.push_line(b"%output %0 \xe2\x95\xad\\015"),
+            Some(ControlEvent::Output { pane: PaneId(0), data: vec![0xe2, 0x95, 0xad, 0x0d] })
         );
     }
 
