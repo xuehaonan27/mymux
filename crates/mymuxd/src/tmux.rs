@@ -173,25 +173,51 @@ impl Hub {
         build_state_json(&self.model.lock().unwrap())
     }
 
-    /// Snapshot one pane's current screen (with colors): clear+home + content.
+    /// Snapshot one pane's current screen (with colors): clear+home + content,
+    /// then restore the real cursor position (capture-pane loses it — without
+    /// this the prompt/cursor ends up stuck at the bottom of the pane).
     pub async fn snapshot_pane(&self, pane: u32) -> Vec<u8> {
-        let out = Command::new("tmux")
-            .args(["-L", SOCKET, "capture-pane", "-e", "-p", "-t", &format!("%{pane}")])
+        let target = format!("%{pane}");
+        let cap = Command::new("tmux")
+            .args(["-L", SOCKET, "capture-pane", "-e", "-p", "-t", &target])
             .output()
             .await;
-        match out {
-            Ok(o) if o.status.success() => {
-                let mut seed = b"\x1b[2J\x1b[H".to_vec();
-                for (i, row) in o.stdout.split(|&b| b == b'\n').enumerate() {
-                    if i > 0 {
-                        seed.extend_from_slice(b"\r\n");
-                    }
-                    seed.extend_from_slice(row);
-                }
-                seed
-            }
-            _ => Vec::new(),
+        let Ok(cap) = cap else { return Vec::new() };
+        if !cap.status.success() {
+            return Vec::new();
         }
+        let (cy, cx) = self.pane_cursor(&target).await;
+
+        let mut seed = b"\x1b[2J\x1b[H".to_vec();
+        // Drop one trailing newline so we don't paint an extra row (which would
+        // scroll the top line away).
+        let content = cap.stdout.strip_suffix(b"\n").unwrap_or(&cap.stdout);
+        for (i, row) in content.split(|&b| b == b'\n').enumerate() {
+            if i > 0 {
+                seed.extend_from_slice(b"\r\n");
+            }
+            seed.extend_from_slice(row);
+        }
+        seed.extend_from_slice(format!("\x1b[{};{}H", cy + 1, cx + 1).as_bytes());
+        seed
+    }
+
+    /// The pane's cursor position as 0-based `(row, col)`.
+    async fn pane_cursor(&self, target: &str) -> (u32, u32) {
+        let out = Command::new("tmux")
+            .args(["-L", SOCKET, "display-message", "-p", "-t", target, "#{cursor_y} #{cursor_x}"])
+            .output()
+            .await;
+        if let Ok(o) = out {
+            if o.status.success() {
+                let s = String::from_utf8_lossy(&o.stdout);
+                let mut it = s.split_whitespace();
+                let cy = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                let cx = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                return (cy, cx);
+            }
+        }
+        (0, 0)
     }
 
     /// Snapshot every pane in the active window: `(paneId, seedBytes)`.
