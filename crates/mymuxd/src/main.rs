@@ -16,6 +16,7 @@ use tokio::net::TcpListener;
 #[tokio::main]
 async fn main() {
     let hub = tmux::Hub::new();
+    tokio::spawn(tmux::heuristic_sweep(hub.clone()));
 
     let app = Router::new()
         .route("/ws", get(ws::ws_handler))

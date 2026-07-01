@@ -46,6 +46,19 @@ impl AgentState {
     }
 }
 
+/// Where a pane's [`AgentState`] came from. Hook reports outrank heuristics.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    Hook,
+    Heuristic,
+}
+
+#[derive(Clone, Copy)]
+pub struct AgentEntry {
+    pub state: AgentState,
+    pub source: Source,
+}
+
 #[derive(Deserialize)]
 pub struct AgentQuery {
     pane: u32,

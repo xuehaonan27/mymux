@@ -19,7 +19,7 @@ xterm.js / dashboard (UI)  ⇄  WebSocket  ⇄  mymuxd (Rust)  ⇄  tmux -CC  �
 
 ## Status
 
-**M3 (agent status) is landing**: window tabs are badged by each agent's state
+**M3 works** (agent status): window tabs are badged by each agent's state
 — running / waiting-for-you / done — so you glance instead of polling. On top of
 M1 (the multiplexer) and M2 (Tauri app + resilient single-auth tunnel).
 
@@ -30,7 +30,7 @@ M1 (the multiplexer) and M2 (Tauri app + resilient single-auth tunnel).
 | **M2.1** | resilient single-auth SSH tunnel (auto-reconnect) | ✅ done |
 | **M2.2** | Tauri desktop app + full iTerm2 keybindings | ✅ done |
 | **M3.1** | agent-status tab badges via agent hooks | ✅ done |
-| **M3.2** | tool-agnostic heuristics (BEL/idle) + richer panel | next |
+| **M3.2** | tool-agnostic heuristics (idle/bell) + clear-on-focus | ✅ done |
 
 ## Layout
 
@@ -122,5 +122,7 @@ scripts/install-claude-hooks.sh     # Claude Code: merges hooks non-destructivel
 
 Under the hood the hooks run `scripts/mymux-agent-report.sh <state>`, which
 `GET`s `http://127.0.0.1:8088/agent?pane=$TMUX_PANE&state=…` — so **any** tool
-can report (point Codex's `notify` at the reporter). Panes without hooks will
-fall back to output heuristics in M3.2.
+can report (point Codex's `notify` at the reporter). Panes **without** hooks fall
+back to output heuristics: a backgrounded full-screen app badges *running* while
+active, *done* when it goes quiet, *waiting* if it rang the bell — and focusing a
+window clears its *done*.

@@ -5,17 +5,18 @@
 //! The control client is **restartable**: if the session ends (e.g. the user
 //! types `exit`), the supervisor resets state so the next connection respawns it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use mux_core::{parse_layout, ControlEvent, Model, Parser, WindowId};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::agent::AgentState;
+use crate::agent::{AgentEntry, AgentState, Source};
 use crate::state::build_state_json;
 
 const SOCKET: &str = "mymux";
@@ -45,13 +46,27 @@ struct TmuxState {
     cmd_tx: Option<mpsc::Sender<String>>,
 }
 
+/// Raw per-pane signals the heuristics read (for un-hooked agents).
+struct PaneHeur {
+    alt: bool,
+    last_activity: Instant,
+    last_bell: Option<Instant>,
+}
+
+/// Agent badges (hook + heuristic) plus the raw signals heuristics use.
+#[derive(Default)]
+struct AgentTracker {
+    entries: BTreeMap<u32, AgentEntry>,
+    heur: BTreeMap<u32, PaneHeur>,
+}
+
 /// Shared bridge between the WebSocket clients and a single tmux control client.
 pub struct Hub {
     events_tx: broadcast::Sender<ServerEvent>,
     state: Mutex<TmuxState>,
     model: Arc<Mutex<Model>>,
-    /// Agent state per pane, reported by agent hooks via `/agent`.
-    agents: Mutex<BTreeMap<u32, AgentState>>,
+    /// Agent badges (hook reports + heuristics) and per-pane heuristic signals.
+    agents: Mutex<AgentTracker>,
     conf_path: PathBuf,
 }
 
@@ -66,7 +81,7 @@ impl Hub {
             events_tx,
             state: Mutex::new(TmuxState::default()),
             model: Arc::new(Mutex::new(Model::new())),
-            agents: Mutex::new(BTreeMap::new()),
+            agents: Mutex::new(AgentTracker::default()),
             conf_path,
         })
     }
@@ -189,24 +204,129 @@ impl Hub {
     pub fn state_json(&self) -> String {
         let model = self.model.lock().unwrap();
         let agents = self.agents.lock().unwrap();
-        build_state_json(&model, &agents)
+        let view: BTreeMap<u32, AgentState> =
+            agents.entries.iter().map(|(&p, e)| (p, e.state)).collect();
+        build_state_json(&model, &view)
     }
 
-    /// Update an agent's reported state for a pane (`None` clears it), then
-    /// broadcast a fresh snapshot so the UI re-badges.
+    /// Update an agent's hook-reported state (`None` clears it), then broadcast.
     pub fn set_agent(&self, pane: u32, state: Option<AgentState>) {
         {
             let mut agents = self.agents.lock().unwrap();
             match state {
                 Some(s) => {
-                    agents.insert(pane, s);
+                    agents.entries.insert(pane, AgentEntry { state: s, source: Source::Hook });
                 }
                 None => {
-                    agents.remove(&pane);
+                    agents.entries.remove(&pane);
                 }
             }
         }
         self.emit(ServerEvent::State(self.state_json()));
+    }
+
+    /// Fold a pane's output into the heuristic signals (alt-screen, activity, bell).
+    fn note_output(&self, pane: u32, data: &[u8]) {
+        let now = Instant::now();
+        let alt_on = contains(data, b"\x1b[?1049h");
+        let alt_off = contains(data, b"\x1b[?1049l");
+        let bell = data.contains(&0x07);
+        let mut agents = self.agents.lock().unwrap();
+        let h = agents.heur.entry(pane).or_insert(PaneHeur {
+            alt: false,
+            last_activity: now,
+            last_bell: None,
+        });
+        h.last_activity = now;
+        if alt_on {
+            h.alt = true;
+        }
+        if alt_off {
+            h.alt = false;
+        }
+        if bell {
+            h.last_bell = Some(now);
+        }
+    }
+
+    /// Recompute heuristic badges for background full-screen panes (hook reports
+    /// always win; the window you're currently viewing gets no badge).
+    fn run_heuristics(&self) {
+        const IDLE: Duration = Duration::from_secs(8);
+        const BELL_WINDOW: Duration = Duration::from_secs(25);
+        let now = Instant::now();
+        let active: BTreeSet<u32> = self
+            .model
+            .lock()
+            .unwrap()
+            .active_window_panes()
+            .iter()
+            .map(|p| p.0)
+            .collect();
+
+        let mut changed = false;
+        {
+            let mut agents = self.agents.lock().unwrap();
+            let panes: Vec<u32> = agents.heur.keys().copied().collect();
+            for p in panes {
+                if agents.entries.get(&p).map(|e| e.source) == Some(Source::Hook) {
+                    continue; // hooks own this pane
+                }
+                let (alt, last_activity, last_bell) = {
+                    let h = &agents.heur[&p];
+                    (h.alt, h.last_activity, h.last_bell)
+                };
+                let desired = if active.contains(&p) || !alt {
+                    None
+                } else if now.duration_since(last_activity) > IDLE {
+                    let belled = last_bell.is_some_and(|b| now.duration_since(b) < BELL_WINDOW);
+                    Some(if belled { AgentState::Waiting } else { AgentState::Done })
+                } else {
+                    Some(AgentState::Running)
+                };
+                if agents.entries.get(&p).map(|e| e.state) != desired {
+                    match desired {
+                        Some(s) => {
+                            agents
+                                .entries
+                                .insert(p, AgentEntry { state: s, source: Source::Heuristic });
+                        }
+                        None => {
+                            agents.entries.remove(&p);
+                        }
+                    }
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.emit(ServerEvent::State(self.state_json()));
+        }
+    }
+
+    /// Clear "done" badges for the active window's panes — you've now seen them.
+    fn clear_done_on_focus(&self) {
+        let panes: Vec<u32> = self
+            .model
+            .lock()
+            .unwrap()
+            .active_window_panes()
+            .iter()
+            .map(|p| p.0)
+            .collect();
+        let mut changed = false;
+        {
+            let mut agents = self.agents.lock().unwrap();
+            for p in &panes {
+                if agents.entries.get(p).map(|e| e.state) == Some(AgentState::Done) {
+                    agents.entries.remove(p);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.emit(ServerEvent::State(self.state_json()));
+        }
     }
 
     /// Snapshot one pane's current screen (with colors): clear+home + content,
@@ -359,6 +479,7 @@ async fn reader_loop(stdout: ChildStdout, hub: Arc<Hub>) {
 
         match ev {
             ControlEvent::Output { pane, data } => {
+                hub.note_output(pane.0, &data);
                 hub.emit(ServerEvent::Output { pane: pane.0, data });
             }
             ControlEvent::Exit { reason } => {
@@ -379,7 +500,23 @@ async fn reader_loop(stdout: ChildStdout, hub: Arc<Hub>) {
             for (pane, seed) in hub.snapshot_visible().await {
                 hub.emit(ServerEvent::Output { pane, data: seed });
             }
+            if switched {
+                hub.clear_done_on_focus();
+            }
         }
+    }
+}
+
+/// True if `needle` occurs in `hay`.
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && hay.len() >= needle.len() && hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Periodically recompute heuristic agent badges for un-hooked panes.
+pub async fn heuristic_sweep(hub: Arc<Hub>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        hub.run_heuristics();
     }
 }
 
