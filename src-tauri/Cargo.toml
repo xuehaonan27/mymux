@@ -1,0 +1,22 @@
+[package]
+name = "mymux-app"
+version = "0.1.0"
+description = "mymux desktop app"
+edition = "2021"
+
+# Its own workspace on purpose: the root workspace stays buildable on boxes
+# without webkit2gtk (the dev server); this crate is built on macOS via
+# `cargo tauri`. It still path-depends on the shared connector crate.
+[workspace]
+
+[lib]
+name = "mymux_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+mymux-connect = { path = "../crates/mymux-connect" }

@@ -86,3 +86,27 @@ network drops. Authenticate once (ssh-agent / keychain) and every window rides
 that one tunnel; on reconnect the daemon reseeds all panes from tmux, so nothing
 is lost. (Forward `5173` for the Vite-served UI too, until M2.2 bundles the UI
 into the Tauri app.)
+
+## Run the desktop app (macOS)
+
+The native app (`src-tauri/`) bundles the UI, keeps the resilient tunnel itself,
+and unlocks the full iTerm2 keybindings a browser reserves (⌘T / ⌘W / ⌘1–9).
+Build it **on your Mac** — it can't build on the headless Linux box (no
+webkit2gtk, no display):
+
+```sh
+# one-time: Tauri CLI
+cargo install tauri-cli --version '^2'      # or: npm i -g @tauri-apps/cli
+
+# tell it which host runs mymuxd (an ~/.ssh/config alias works)
+mkdir -p ~/.config/mymux && echo "<dev-host>" > ~/.config/mymux/host
+# (or export MYMUX_HOST=<dev-host>)
+
+# from the repo root on your Mac:
+cargo tauri dev          # dev run; or `cargo tauri build` for a .app / .dmg
+```
+
+The app starts `mymuxd` on the remote if needed, forwards `localhost:8088` with
+auto-reconnect, and opens the workspace. Enter your ssh passphrase once
+(keychain); drop the network and it restores on its own. For a signed release
+bundle, first regenerate the icon set: `cargo tauri icon src-tauri/icons/icon.png`.

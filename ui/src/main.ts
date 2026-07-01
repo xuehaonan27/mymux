@@ -31,7 +31,9 @@ interface StateMsg {
   layout: LayoutNode | null;
 }
 
-const WS_URL = `ws://${location.hostname || '127.0.0.1'}:8088/ws`;
+// 127.0.0.1 works both under the port-forwarded browser and inside the Tauri
+// app (whose webview host is tauri.localhost, not the machine itself).
+const WS_URL = 'ws://127.0.0.1:8088/ws';
 const FONT = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 const FONT_SIZE = 13;
 const LINE_HEIGHT = 1.2;
@@ -237,6 +239,9 @@ cmdBtn('btn-splitv', () => (activePane != null ? { t: 'split', pane: activePane,
 const hintEl = document.getElementById('hint')!;
 const isMac = /Mac|iPhone|iPad/.test(navigator.userAgent);
 const mod = (e: KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey);
+// In the Tauri app there is no browser reserving Cmd+T/W/1-9, so we bind the
+// full iTerm2 set there; in a browser those stay on the ⌘K leader.
+const isTauri = '__TAURI_INTERNALS__' in window || '__TAURI__' in window;
 
 let leaderActive = false;
 function setLeader(on: boolean) {
@@ -306,20 +311,48 @@ document.addEventListener(
     }
     if (!mod(e)) return;
     const lower = e.key.toLowerCase();
+    const stop = () => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    // Works everywhere (browser + Tauri):
     if (lower === 'k' && !e.shiftKey && !e.altKey) {
-      e.preventDefault();
-      e.stopPropagation();
+      stop();
       setLeader(true);
-    } else if (lower === 'd' && !e.altKey) {
-      e.preventDefault();
-      e.stopPropagation();
+      return;
+    }
+    if (lower === 'd' && !e.altKey) {
+      stop();
       splitActive(e.shiftKey ? 'v' : 'h');
-    } else if (lower === 'c' && !e.shiftKey && !e.altKey) {
+      return;
+    }
+    if (lower === 'c' && !e.shiftKey && !e.altKey) {
       const sel = activePane != null ? panes.get(activePane)?.term.getSelection() : '';
       if (sel) {
-        e.preventDefault();
-        e.stopPropagation();
+        stop();
         copySelection();
+      }
+      return;
+    }
+
+    // Full iTerm2 direct combos — only in the Tauri app (a browser reserves these):
+    if (isTauri) {
+      if (lower === 't' && !e.shiftKey && !e.altKey) {
+        stop();
+        sendJson({ t: 'new_window' });
+      } else if (lower === 'w' && !e.shiftKey && !e.altKey) {
+        stop();
+        closeActive();
+      } else if (!e.shiftKey && !e.altKey && e.key >= '1' && e.key <= '9') {
+        stop();
+        switchWindowIndex(parseInt(e.key, 10) - 1);
+      } else if (e.altKey) {
+        const ad = ARROWS[e.key];
+        if (ad) {
+          stop();
+          navPane(ad);
+        }
       }
     }
     // Cmd/Ctrl+V paste falls through to xterm, which applies bracketed paste.
