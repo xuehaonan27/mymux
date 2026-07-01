@@ -198,9 +198,18 @@ impl Hub {
         if !cap.status.success() {
             return Vec::new();
         }
-        let (cy, cx) = self.pane_cursor(&target).await;
+        let (cy, cx, alt) = self.pane_state(&target).await;
 
-        let mut seed = b"\x1b[2J\x1b[H".to_vec();
+        let mut seed = Vec::new();
+        if alt {
+            // Match tmux's alternate-screen state so that when the full-screen
+            // app later exits (emitting ?1049l) xterm restores the primary
+            // buffer, instead of leaving stale content behind. Without this a
+            // client that (re)connects while vim/less/claude is running desyncs
+            // its buffers from tmux.
+            seed.extend_from_slice(b"\x1b[?1049h");
+        }
+        seed.extend_from_slice(b"\x1b[2J\x1b[H");
         // Drop one trailing newline so we don't paint an extra row (which would
         // scroll the top line away).
         let content = cap.stdout.strip_suffix(b"\n").unwrap_or(&cap.stdout);
@@ -214,10 +223,14 @@ impl Hub {
         seed
     }
 
-    /// The pane's cursor position as 0-based `(row, col)`.
-    async fn pane_cursor(&self, target: &str) -> (u32, u32) {
+    /// The pane's cursor position (0-based `row, col`) and whether it is on the
+    /// alternate screen.
+    async fn pane_state(&self, target: &str) -> (u32, u32, bool) {
         let out = Command::new("tmux")
-            .args(["-L", SOCKET, "display-message", "-p", "-t", target, "#{cursor_y} #{cursor_x}"])
+            .args([
+                "-L", SOCKET, "display-message", "-p", "-t", target,
+                "#{cursor_y} #{cursor_x} #{alternate_on}",
+            ])
             .output()
             .await;
         if let Ok(o) = out {
@@ -226,10 +239,11 @@ impl Hub {
                 let mut it = s.split_whitespace();
                 let cy = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
                 let cx = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-                return (cy, cx);
+                let alt = it.next() == Some("1");
+                return (cy, cx, alt);
             }
         }
-        (0, 0)
+        (0, 0, false)
     }
 
     /// Snapshot every pane in the active window: `(paneId, seedBytes)`.
