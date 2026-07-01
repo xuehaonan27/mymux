@@ -5,6 +5,7 @@
 //! The control client is **restartable**: if the session ends (e.g. the user
 //! types `exit`), the supervisor resets state so the next connection respawns it.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -14,6 +15,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::{broadcast, mpsc};
 
+use crate::agent::AgentState;
 use crate::state::build_state_json;
 
 const SOCKET: &str = "mymux";
@@ -48,6 +50,8 @@ pub struct Hub {
     events_tx: broadcast::Sender<ServerEvent>,
     state: Mutex<TmuxState>,
     model: Arc<Mutex<Model>>,
+    /// Agent state per pane, reported by agent hooks via `/agent`.
+    agents: Mutex<BTreeMap<u32, AgentState>>,
     conf_path: PathBuf,
 }
 
@@ -62,6 +66,7 @@ impl Hub {
             events_tx,
             state: Mutex::new(TmuxState::default()),
             model: Arc::new(Mutex::new(Model::new())),
+            agents: Mutex::new(BTreeMap::new()),
             conf_path,
         })
     }
@@ -182,7 +187,26 @@ impl Hub {
 
     /// The current state snapshot as JSON (for initial sync / resync).
     pub fn state_json(&self) -> String {
-        build_state_json(&self.model.lock().unwrap())
+        let model = self.model.lock().unwrap();
+        let agents = self.agents.lock().unwrap();
+        build_state_json(&model, &agents)
+    }
+
+    /// Update an agent's reported state for a pane (`None` clears it), then
+    /// broadcast a fresh snapshot so the UI re-badges.
+    pub fn set_agent(&self, pane: u32, state: Option<AgentState>) {
+        {
+            let mut agents = self.agents.lock().unwrap();
+            match state {
+                Some(s) => {
+                    agents.insert(pane, s);
+                }
+                None => {
+                    agents.remove(&pane);
+                }
+            }
+        }
+        self.emit(ServerEvent::State(self.state_json()));
     }
 
     /// Snapshot one pane's current screen (with colors): clear+home + content,

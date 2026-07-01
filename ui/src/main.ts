@@ -22,6 +22,7 @@ interface WinInfo {
   id: number;
   name: string;
   active: boolean;
+  agent?: 'running' | 'waiting' | 'done';
 }
 interface StateMsg {
   t: string;
@@ -45,6 +46,7 @@ const termArea = document.getElementById('term') as HTMLDivElement;
 const tabsEl = document.getElementById('tabs') as HTMLDivElement;
 const statusEl = document.getElementById('status')!;
 const metaEl = document.getElementById('meta')!;
+const agentsEl = document.getElementById('agents')!;
 
 interface Pane {
   term: Terminal;
@@ -126,10 +128,22 @@ function renderTabs(windows: WinInfo[]) {
   for (const w of windows) {
     const tab = document.createElement('button');
     tab.className = 'tab' + (w.active ? ' active' : '');
-    tab.textContent = w.name || `@${w.id}`;
+    if (w.agent) {
+      const dot = document.createElement('span');
+      dot.className = `adot agent-${w.agent}`;
+      tab.appendChild(dot);
+    }
+    tab.appendChild(document.createTextNode(w.name || `@${w.id}`));
     tab.addEventListener('click', () => sendJson({ t: 'select_window', id: w.id }));
     tabsEl.appendChild(tab);
   }
+  // Glance summary: how many windows want your attention.
+  const waiting = windows.filter((w) => w.agent === 'waiting').length;
+  const done = windows.filter((w) => w.agent === 'done').length;
+  const parts: string[] = [];
+  if (waiting) parts.push(`⏳ ${waiting} waiting`);
+  if (done) parts.push(`✓ ${done} done`);
+  agentsEl.textContent = parts.join('  ·  ');
 }
 
 function updateMeta(windows: number) {

@@ -4,6 +4,7 @@
 //! WebSocket. M0 serves only `/ws`; the UI is served by Vite in dev and by the
 //! daemon itself from M2 on.
 
+mod agent;
 mod state;
 mod tmux;
 mod ws;
@@ -18,6 +19,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/ws", get(ws::ws_handler))
+        .route("/agent", get(agent::agent_handler))
         .with_state(hub);
 
     let addr = "127.0.0.1:8088";

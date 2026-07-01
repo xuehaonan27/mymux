@@ -1,8 +1,12 @@
 //! Serialization of the [`mux_core::Model`] into the JSON state snapshot the UI
 //! consumes. Lives here (not in `mux-core`) so the core stays dependency-free.
 
+use std::collections::BTreeMap;
+
 use mux_core::{CellKind, LayoutCell, Model};
 use serde::Serialize;
+
+use crate::agent::AgentState;
 
 #[derive(Serialize)]
 struct StateMsg {
@@ -18,6 +22,9 @@ struct WinMsg {
     id: u32,
     name: String,
     active: bool,
+    /// Aggregated agent state of the window's panes, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent: Option<&'static str>,
 }
 
 /// The layout tree, mirroring `mux_core::LayoutCell` for the UI.
@@ -43,8 +50,21 @@ fn cell_to_msg(c: &LayoutCell) -> LayoutMsg {
     LayoutMsg { kind, pane, x: c.x, y: c.y, w: c.w, h: c.h, children }
 }
 
+/// Aggregate the most attention-worthy agent state among a window's panes.
+fn window_agent(root: &LayoutCell, agents: &BTreeMap<u32, AgentState>) -> Option<&'static str> {
+    let mut best: Option<AgentState> = None;
+    root.for_each_pane(&mut |pane, _| {
+        if let Some(&s) = agents.get(&pane.0) {
+            if best.map_or(true, |b| s.priority() > b.priority()) {
+                best = Some(s);
+            }
+        }
+    });
+    best.map(AgentState::as_str)
+}
+
 /// Build the `{"t":"state",...}` snapshot for the active window.
-pub fn build_state_json(model: &Model) -> String {
+pub fn build_state_json(model: &Model, agents: &BTreeMap<u32, AgentState>) -> String {
     let layout = model
         .active_window
         .and_then(|w| model.windows.get(&w))
@@ -58,6 +78,7 @@ pub fn build_state_json(model: &Model) -> String {
             id: id.0,
             name: wi.name.clone().unwrap_or_default(),
             active: model.active_window == Some(*id),
+            agent: wi.layout.as_ref().and_then(|l| window_agent(&l.root, agents)),
         })
         .collect();
 

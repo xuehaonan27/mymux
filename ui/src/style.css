@@ -30,7 +30,7 @@ body {
   color: #c5cdd9;
 }
 #meta {
-  margin-left: auto;
+  margin-left: 12px;
   color: #5c6773;
 }
 .dot {
@@ -83,6 +83,42 @@ body {
 .barbtn:hover {
   color: #c5cdd9;
   border-color: #2f81f7;
+}
+
+/* Agent-status badges on window tabs + a glance summary in the bar. */
+#agents {
+  margin-left: auto;
+  font: 11px ui-monospace, Menlo, monospace;
+  font-weight: 600;
+  color: #d6a04c;
+}
+.adot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+  background: #5c6773;
+}
+.agent-running {
+  background: #2f81f7;
+}
+.agent-done {
+  background: #3fb950;
+}
+.agent-waiting {
+  background: #d6a04c;
+  animation: mymux-pulse 1.2s ease-in-out infinite;
+}
+@keyframes mymux-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
 }
 
 /* Pane area: a positioning context; each pane is placed by exact cell geometry. */
