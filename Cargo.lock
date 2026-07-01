@@ -365,6 +365,13 @@ name = "mux-core"
 version = "0.1.0"
 
 [[package]]
+name = "mymux-connect"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "mymuxd"
 version = "0.1.0"
 dependencies = [

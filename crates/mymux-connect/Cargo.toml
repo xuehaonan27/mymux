@@ -1,0 +1,17 @@
+[package]
+name = "mymux-connect"
+description = "Client-side resilient SSH tunnel to a remote mymuxd (single auth, auto-reconnect)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "mymux_connect"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mymux-connect"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "signal"] }

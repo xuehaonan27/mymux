@@ -19,25 +19,28 @@ xterm.js / dashboard (UI)  ⇄  WebSocket  ⇄  mymuxd (Rust)  ⇄  tmux -CC  �
 
 ## Status
 
-**M0 + correctness pass work**: a real shell *and full-screen agent TUIs*
-(Claude Code, Codex) driven through `tmux -CC`, bridged over WebSocket, rendered
-by xterm.js. Verified end-to-end: agent UIs render, a reconnect reseeds the
-screen, `exit`+reconnect respawns a fresh session, and panes are truecolor.
-Next: M1 (lossless delivery under backpressure + multi-pane layouts).
+**M1 works** (the multiplexer): multi-pane layouts (splits + windows/tabs),
+cell-accurate resize, lossless delivery (resync on backpressure), keybindings (a
+`⌘K` leader + direct combos) and copy/paste — on top of the M0 base (agent TUIs
+render, reconnect reseeds, respawn, truecolor). **M2.1** adds a resilient,
+single-auth SSH tunnel. Next: M2.2 (Tauri desktop app).
 
 | Milestone | Scope | State |
 |-----------|-------|-------|
 | **M0** | tmux `-CC` driver + WS + one xterm.js pane | ✅ done |
-| **M0.1** | correctness: byte-accurate parser, screen reseed, respawn, truecolor | ✅ done |
-| M1 | lossless delivery + multi-pane: layouts, splits, resize, copy/paste | next |
-| M2 | persistence + auto-reconnect over an SSH tunnel; Tauri app | |
+| **M0.1** | byte-accurate parser, screen reseed, respawn, truecolor | ✅ done |
+| **M1** | multi-pane layouts, splits, windows, resize, lossless, keys, copy/paste | ✅ done |
+| **M2.1** | resilient single-auth SSH tunnel (auto-reconnect) | ✅ done |
+| **M2.2** | Tauri desktop app + full iTerm2 keybindings | next |
 | M3 | agent-status dashboard (output heuristics + agent hooks) | |
 
 ## Layout
 
 - `crates/mux-core` — dependency-free tmux control-mode protocol parser + model.
 - `crates/mymuxd` — daemon: drives `tmux -CC`, serves a WebSocket + the UI.
+- `crates/mymux-connect` — client-side resilient SSH tunnel (auto-reconnect).
 - `ui` — Vite + TypeScript + xterm.js client.
+- `scripts/mymux-connect.sh` — no-build resilient tunnel (pure `ssh` loop).
 - `fixtures` — captured control-mode streams used in tests.
 
 ## Develop
@@ -67,5 +70,19 @@ ssh -L 5173:localhost:5173 -L 8088:localhost:8088 <dev-host>
 
 You get a real shell rendered by xterm.js, driven through tmux control mode —
 one emulation layer, native scrollback, mouse wheel. Reload the page and the
-session persists (tmux holds it on the `mymux` socket). M2 collapses the
-two-port forward into the Tauri app over a single auto-reconnecting tunnel.
+session persists (tmux holds it on the `mymux` socket).
+
+## Connect from your Mac (resilient tunnel)
+
+Start the daemon + UI on the dev box (as above), then from your Mac run the
+connector instead of a raw `ssh -L` for the daemon port:
+
+```sh
+cargo run -p mymux-connect -- <dev-host>     # or, no build: scripts/mymux-connect.sh <dev-host>
+```
+
+It forwards `localhost:8088` to the remote mymuxd and **auto-reconnects** on
+network drops. Authenticate once (ssh-agent / keychain) and every window rides
+that one tunnel; on reconnect the daemon reseeds all panes from tmux, so nothing
+is lost. (Forward `5173` for the Vite-served UI too, until M2.2 bundles the UI
+into the Tauri app.)

@@ -185,6 +185,17 @@ function setStatus(state: 'connecting' | 'open' | 'closed') {
   statusEl.className = `dot ${state}`;
 }
 
+let reconnectPending = false;
+function scheduleReconnect() {
+  if (reconnectPending) return;
+  reconnectPending = true;
+  setStatus('closed');
+  window.setTimeout(() => {
+    reconnectPending = false;
+    connect();
+  }, 1000);
+}
+
 function connect() {
   setStatus('connecting');
   ws = new WebSocket(WS_URL);
@@ -197,11 +208,10 @@ function connect() {
     if (typeof ev.data === 'string') onState(ev.data);
     else if (ev.data instanceof ArrayBuffer) onBinary(ev.data);
   };
-  ws.onclose = () => {
-    setStatus('closed');
-    window.setTimeout(connect, 1000);
-  };
-  ws.onerror = () => ws?.close();
+  // Reconnect on both close and error: a connection refused during the tunnel's
+  // down-window may fire only one of them.
+  ws.onclose = () => scheduleReconnect();
+  ws.onerror = () => scheduleReconnect();
 }
 
 let resizeTimer: number | undefined;
