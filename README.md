@@ -19,18 +19,18 @@ xterm.js / dashboard (UI)  ⇄  WebSocket  ⇄  mymuxd (Rust)  ⇄  tmux -CC  �
 
 ## Status
 
-**M3 works** (agent status): window tabs are badged by each agent's state
-— running / waiting-for-you / done — so you glance instead of polling. On top of
-M1 (the multiplexer) and M2 (Tauri app + resilient single-auth tunnel).
+**M4 works** (code panel): ⌘E opens a lightweight file tree + editor + git-diff
+over the terminal — browse, edit, and review changes without leaving mymux. On
+top of agent-status badges (M3), the multiplexer (M1), and the Tauri app +
+resilient single-auth tunnel (M2).
 
 | Milestone | Scope | State |
 |-----------|-------|-------|
 | **M0 / M0.1** | tmux `-CC` driver, byte-accurate parser, reseed, respawn, truecolor | ✅ done |
 | **M1** | multi-pane layouts, splits, windows, resize, lossless, keys, copy/paste | ✅ done |
-| **M2.1** | resilient single-auth SSH tunnel (auto-reconnect) | ✅ done |
-| **M2.2** | Tauri desktop app + full iTerm2 keybindings | ✅ done |
-| **M3.1** | agent-status tab badges via agent hooks | ✅ done |
-| **M3.2** | tool-agnostic heuristics (idle/bell) + clear-on-focus | ✅ done |
+| **M2** | Tauri desktop app + resilient single-auth SSH tunnel (auto-reconnect) | ✅ done |
+| **M3** | agent-status tab badges (hooks + heuristics) | ✅ done |
+| **M4** | ⌘E code panel: file tree, editor (edit/save), git diff | ✅ done |
 
 ## Layout
 
@@ -126,3 +126,15 @@ can report (point Codex's `notify` at the reporter). Panes **without** hooks fal
 back to output heuristics: a backgrounded full-screen app badges *running* while
 active, *done* when it goes quiet, *waiting* if it rang the bell — and focusing a
 window clears its *done*.
+
+## Code & git (⌘E)
+
+Press **⌘E** (or the `code` button) for a lightweight overlay: a file tree and
+git-changes list on the left, a CodeMirror editor / unified diff on the right.
+Open a file to read or edit it (⌘S saves); click a changed file to see its diff.
+It's a "quick look," not an IDE — no LSP yet (the last open pain point), just
+fast browse/edit/diff without opening VSCode.
+
+The daemon serves `/fs/*` and `/git/*` confined to a root (`MYMUX_ROOT` or its
+cwd) — rejecting path escapes, with a CORS allowlist so only the mymux UI can
+reach them.

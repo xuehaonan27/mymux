@@ -121,6 +121,125 @@ body {
   }
 }
 
+/* ⌘E code overlay: file tree + CodeMirror editor. */
+.code-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: none;
+  grid-template-columns: 260px 1fr;
+  background: #0b0e14;
+}
+.code-panel.show {
+  display: grid;
+}
+.code-side {
+  overflow: auto;
+  background: #0d1017;
+  border-right: 1px solid #1e2430;
+}
+.code-side-hd,
+.code-hd {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  font: 11px ui-monospace, Menlo, monospace;
+  color: #9aa5b1;
+  border-bottom: 1px solid #1e2430;
+}
+.code-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.code-editor {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.code-editor .cm-editor {
+  height: 100%;
+}
+.trow {
+  padding: 2px 8px;
+  font: 12px ui-monospace, Menlo, monospace;
+  color: #c5cdd9;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.trow:hover {
+  background: #161b27;
+}
+.trow.tdir {
+  color: #9aa5b1;
+}
+#code-path {
+  color: #c5cdd9;
+}
+#code-hint {
+  color: #5c6773;
+}
+
+/* Git changes list + unified diff view. */
+.code-changes {
+  max-height: 38%;
+  overflow: auto;
+  padding: 2px 0;
+  border-bottom: 1px solid #1e2430;
+}
+.grow {
+  padding: 2px 8px;
+  font: 12px ui-monospace, Menlo, monospace;
+  color: #c5cdd9;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.grow:hover {
+  background: #161b27;
+}
+.gbadge {
+  display: inline-block;
+  min-width: 2ch;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 600;
+}
+.gnew {
+  color: #3fb950;
+}
+.gmod {
+  color: #d6a04c;
+}
+.gdel {
+  color: #f85149;
+}
+.code-diff {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font: 12px/1.5 ui-monospace, Menlo, monospace;
+  background: #0b0e14;
+}
+.dl {
+  padding: 0 12px;
+  white-space: pre;
+}
+.dadd {
+  background: rgba(63, 185, 80, 0.12);
+  color: #7ee787;
+}
+.ddel {
+  background: rgba(248, 81, 73, 0.12);
+  color: #ffa198;
+}
+.dhunk {
+  color: #79c0ff;
+}
+.dmeta {
+  color: #5c6773;
+}
+
 /* Pane area: a positioning context; each pane is placed by exact cell geometry. */
 #term {
   position: relative;

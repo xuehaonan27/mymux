@@ -2,6 +2,7 @@ import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import './style.css';
 import { measureCell } from './metrics';
+import { initCodePanel } from './code';
 
 // M1.2: render tmux's full window layout. The daemon pushes a JSON state
 // snapshot (window list + layout tree + active pane) and pane-addressed output;
@@ -257,6 +258,9 @@ const mod = (e: KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey);
 // full iTerm2 set there; in a browser those stay on the ⌘K leader.
 const isTauri = '__TAURI_INTERNALS__' in window || '__TAURI__' in window;
 
+const codePanel = initCodePanel();
+document.getElementById('btn-code')?.addEventListener('click', () => codePanel.toggle());
+
 let leaderActive = false;
 function setLeader(on: boolean) {
   leaderActive = on;
@@ -323,6 +327,19 @@ document.addEventListener(
       setLeader(false);
       return;
     }
+
+    // With the code panel open, only ⌘E / Esc are ours — the rest goes to the editor.
+    if (codePanel.isOpen()) {
+      if (mod(e) && e.key.toLowerCase() === 'e' && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        codePanel.toggle();
+      } else if (e.key === 'Escape') {
+        codePanel.toggle();
+      }
+      return;
+    }
+
     if (!mod(e)) return;
     const lower = e.key.toLowerCase();
     const stop = () => {
@@ -331,6 +348,11 @@ document.addEventListener(
     };
 
     // Works everywhere (browser + Tauri):
+    if (lower === 'e' && !e.shiftKey && !e.altKey) {
+      stop();
+      codePanel.toggle();
+      return;
+    }
     if (lower === 'k' && !e.shiftKey && !e.altKey) {
       stop();
       setLeader(true);
