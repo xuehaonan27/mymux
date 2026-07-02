@@ -25,6 +25,7 @@ interface WinInfo {
   name: string;
   active: boolean;
   agent?: 'running' | 'waiting' | 'done';
+  ephemeral?: boolean;
 }
 interface StateMsg {
   t: string;
@@ -129,13 +130,13 @@ function renderTabs(windows: WinInfo[]) {
   tabsEl.replaceChildren();
   for (const w of windows) {
     const tab = document.createElement('button');
-    tab.className = 'tab' + (w.active ? ' active' : '');
+    tab.className = 'tab' + (w.active ? ' active' : '') + (w.ephemeral ? ' ephemeral' : '');
     if (w.agent) {
       const dot = document.createElement('span');
       dot.className = `adot agent-${w.agent}`;
       tab.appendChild(dot);
     }
-    tab.appendChild(document.createTextNode(w.name || `@${w.id}`));
+    tab.appendChild(document.createTextNode((w.ephemeral ? '⌁ ' : '') + (w.name || `@${w.id}`)));
     tab.addEventListener('click', () => sendJson({ t: 'select_window', id: w.id }));
     tabsEl.appendChild(tab);
   }
@@ -248,6 +249,7 @@ function cmdBtn(id: string, make: () => unknown) {
 cmdBtn('btn-newwin', () => ({ t: 'new_window' }));
 cmdBtn('btn-splith', () => (activePane != null ? { t: 'split', pane: activePane, dir: 'h' } : null));
 cmdBtn('btn-splitv', () => (activePane != null ? { t: 'split', pane: activePane, dir: 'v' } : null));
+cmdBtn('btn-eph', () => ({ t: 'new_ephemeral' }));
 
 // ---- Keybindings (M1.3): a Cmd/Ctrl+K leader for everything, plus a few
 // non-conflicting direct combos. The Tauri app (M2) can bind the rest of the
@@ -315,6 +317,7 @@ function handleLeaderKey(e: KeyboardEvent) {
   if (lower === 'c') return sendJson({ t: 'new_window' });
   if (lower === 'x') return closeActive();
   if (lower === 't') return toggleProc();
+  if (lower === 's') return sendJson({ t: 'new_ephemeral' });
   if (lower === 'd') return splitActive(e.shiftKey ? 'v' : 'h');
   if (k === '|' || k === '\\') return splitActive('h');
   if (k === '-') return splitActive('v');

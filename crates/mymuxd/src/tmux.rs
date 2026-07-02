@@ -17,6 +17,7 @@ use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::agent::{AgentEntry, AgentState, Source};
+use crate::pty::{is_ephemeral, PtyManager};
 use crate::state::build_state_json;
 
 /// tmux control socket (`tmux -L <socket>`). Overridable via `MYMUX_SOCKET` so a
@@ -67,6 +68,13 @@ struct AgentTracker {
     heur: BTreeMap<u32, PaneHeur>,
 }
 
+/// Which view the shared UI is showing: a tmux window, or an ephemeral pty tab.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActiveView {
+    Tmux,
+    Ephemeral(u32),
+}
+
 /// Shared bridge between the WebSocket clients and a single tmux control client.
 pub struct Hub {
     events_tx: broadcast::Sender<ServerEvent>,
@@ -75,6 +83,13 @@ pub struct Hub {
     /// Agent badges (hook reports + heuristics) and per-pane heuristic signals.
     agents: Mutex<AgentTracker>,
     conf_path: PathBuf,
+    /// Ephemeral (non-tmux) pty panes, keyed by high-bit id.
+    ptys: Mutex<PtyManager>,
+    /// Whether the UI is showing tmux or an ephemeral tab (one shared view).
+    active_view: Mutex<ActiveView>,
+    /// Last whole-window size (cols, rows) the UI reported — the sizer for
+    /// ephemeral panes, which tmux does not lay out.
+    last_size: Mutex<(u16, u16)>,
 }
 
 impl Hub {
@@ -90,6 +105,9 @@ impl Hub {
             model: Arc::new(Mutex::new(Model::new())),
             agents: Mutex::new(AgentTracker::default()),
             conf_path,
+            ptys: Mutex::new(PtyManager::default()),
+            active_view: Mutex::new(ActiveView::Tmux),
+            last_size: Mutex::new((80, 24)),
         })
     }
 
@@ -163,6 +181,10 @@ impl Hub {
         if bytes.is_empty() {
             return;
         }
+        if is_ephemeral(pane) {
+            self.ptys.lock().unwrap().write(pane, bytes);
+            return;
+        }
         let mut cmd = format!("send-keys -t %{pane} -H");
         for b in bytes {
             cmd.push_str(&format!(" {b:02x}"));
@@ -171,11 +193,17 @@ impl Hub {
     }
 
     pub async fn focus(&self, pane: u32) {
+        if is_ephemeral(pane) {
+            return;
+        }
         self.send_cmd(format!("select-pane -t %{pane}")).await;
     }
 
     /// Move focus to the pane in a direction (`L`/`R`/`U`/`D`).
     pub async fn select_pane_dir(&self, dir: &str) {
+        if matches!(*self.active_view.lock().unwrap(), ActiveView::Ephemeral(_)) {
+            return;
+        }
         let flag = match dir {
             "L" => "-L",
             "R" => "-R",
@@ -187,11 +215,39 @@ impl Hub {
     }
 
     pub async fn resize(&self, cols: u16, rows: u16) {
+        *self.last_size.lock().unwrap() = (cols, rows);
+        let view = *self.active_view.lock().unwrap();
+        if let ActiveView::Ephemeral(id) = view {
+            self.ptys.lock().unwrap().resize(id, cols, rows);
+        }
+        // Keep tmux sized too, so switching back to a tmux window needs no resync.
         self.send_cmd(format!("refresh-client -C {cols}x{rows}")).await;
     }
 
     pub async fn select_window(&self, id: u32) {
+        if is_ephemeral(id) {
+            if !self.ptys.lock().unwrap().contains(id) {
+                return;
+            }
+            *self.active_view.lock().unwrap() = ActiveView::Ephemeral(id);
+            self.emit(ServerEvent::State(self.state_json()));
+            let seed = self.ptys.lock().unwrap().ring_snapshot(id);
+            if !seed.is_empty() {
+                self.emit(ServerEvent::Output { pane: id, data: seed });
+            }
+            return;
+        }
+        // Leaving any ephemeral view; if tmux is already on this window it emits
+        // no change event, so repaint from the (already-correct) model ourselves.
+        let cur = self.model.lock().unwrap().active_window.map(|w| w.0);
+        *self.active_view.lock().unwrap() = ActiveView::Tmux;
         self.send_cmd(format!("select-window -t @{id}")).await;
+        if cur == Some(id) {
+            self.emit(ServerEvent::State(self.state_json()));
+            for (pane, seed) in self.snapshot_visible().await {
+                self.emit(ServerEvent::Output { pane, data: seed });
+            }
+        }
     }
 
     pub async fn new_window(&self) {
@@ -201,10 +257,30 @@ impl Hub {
     }
 
     pub async fn close_pane(&self, pane: u32) {
+        if is_ephemeral(pane) {
+            let was_active = matches!(
+                *self.active_view.lock().unwrap(),
+                ActiveView::Ephemeral(x) if x == pane
+            );
+            self.ptys.lock().unwrap().close(pane);
+            if was_active {
+                *self.active_view.lock().unwrap() = ActiveView::Tmux;
+            }
+            self.emit(ServerEvent::State(self.state_json()));
+            if was_active {
+                for (p, seed) in self.snapshot_visible().await {
+                    self.emit(ServerEvent::Output { pane: p, data: seed });
+                }
+            }
+            return;
+        }
         self.send_cmd(format!("kill-pane -t %{pane}")).await;
     }
 
     pub async fn split(&self, pane: u32, horizontal: bool) {
+        if is_ephemeral(pane) {
+            return;
+        }
         let flag = if horizontal { "-h" } else { "-v" };
         self.send_cmd(format!("split-window {flag} -c \"#{{pane_current_path}}\" -t %{pane}"))
             .await;
@@ -212,11 +288,17 @@ impl Hub {
 
     /// The current state snapshot as JSON (for initial sync / resync).
     pub fn state_json(&self) -> String {
+        let ephemerals = self.ptys.lock().unwrap().list();
+        let active_ephemeral = match *self.active_view.lock().unwrap() {
+            ActiveView::Ephemeral(id) => Some(id),
+            ActiveView::Tmux => None,
+        };
+        let size = *self.last_size.lock().unwrap();
         let model = self.model.lock().unwrap();
         let agents = self.agents.lock().unwrap();
         let view: BTreeMap<u32, AgentState> =
             agents.entries.iter().map(|(&p, e)| (p, e.state)).collect();
-        build_state_json(&model, &view)
+        build_state_json(&model, &view, &ephemerals, active_ephemeral, size)
     }
 
     /// Update an agent's hook-reported state (`None` clears it), then broadcast.
@@ -402,6 +484,12 @@ impl Hub {
 
     /// Snapshot every pane in the active window: `(paneId, seedBytes)`.
     pub async fn snapshot_visible(&self) -> Vec<(u32, Vec<u8>)> {
+        // An ephemeral tab reseeds from its raw ring, not from tmux.
+        let view = *self.active_view.lock().unwrap();
+        if let ActiveView::Ephemeral(id) = view {
+            let seed = self.ptys.lock().unwrap().ring_snapshot(id);
+            return if seed.is_empty() { Vec::new() } else { vec![(id, seed)] };
+        }
         let panes: Vec<u32> = self
             .model
             .lock()
@@ -481,6 +569,64 @@ impl Hub {
             rows.push((wid.0, pane.0, pid, name));
         }
         rows
+    }
+
+    /// Spawn a new ephemeral (raw, non-tmux) shell tab and switch to it.
+    pub async fn new_ephemeral(self: &Arc<Self>) {
+        let cwd = self.active_pane_cwd().await;
+        let (cols, rows) = *self.last_size.lock().unwrap();
+        let handle = tokio::runtime::Handle::current();
+        let id = self.ptys.lock().unwrap().spawn(
+            self.events_tx.clone(),
+            self.clone(),
+            handle,
+            cwd,
+            cols,
+            rows,
+        );
+        let Some(id) = id else {
+            eprintln!("mymuxd: failed to spawn ephemeral shell");
+            return;
+        };
+        *self.active_view.lock().unwrap() = ActiveView::Ephemeral(id);
+        self.emit(ServerEvent::State(self.state_json()));
+    }
+
+    /// Called (from the pty reader thread) when an ephemeral shell exits: drop it
+    /// and, if it was the visible view, fall back to tmux and repaint.
+    pub async fn ephemeral_exited(self: Arc<Self>, id: u32) {
+        if !self.ptys.lock().unwrap().close(id) {
+            return;
+        }
+        let was_active =
+            matches!(*self.active_view.lock().unwrap(), ActiveView::Ephemeral(x) if x == id);
+        if was_active {
+            *self.active_view.lock().unwrap() = ActiveView::Tmux;
+        }
+        self.emit(ServerEvent::State(self.state_json()));
+        if was_active {
+            for (pane, seed) in self.snapshot_visible().await {
+                self.emit(ServerEvent::Output { pane, data: seed });
+            }
+        }
+    }
+
+    /// The active tmux pane's cwd, to root a new ephemeral shell nearby.
+    async fn active_pane_cwd(&self) -> Option<PathBuf> {
+        let pane = self.model.lock().unwrap().active_pane?;
+        let out = Command::new("tmux")
+            .args([
+                "-L", socket(), "display-message", "-p", "-t",
+                &format!("%{}", pane.0), "#{pane_current_path}",
+            ])
+            .output()
+            .await
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!p.is_empty()).then(|| PathBuf::from(p))
     }
 }
 

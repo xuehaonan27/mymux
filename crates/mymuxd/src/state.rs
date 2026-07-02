@@ -17,6 +17,11 @@ struct StateMsg {
     layout: Option<LayoutMsg>,
 }
 
+/// `skip_serializing_if` helper: omit a bool when it's false.
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
 #[derive(Serialize)]
 struct WinMsg {
     id: u32,
@@ -25,6 +30,9 @@ struct WinMsg {
     /// Aggregated agent state of the window's panes, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     agent: Option<&'static str>,
+    /// True for a mymuxd-owned ephemeral (non-tmux) tab.
+    #[serde(skip_serializing_if = "is_false")]
+    ephemeral: bool,
 }
 
 /// The layout tree, mirroring `mux_core::LayoutCell` for the UI.
@@ -63,29 +71,68 @@ fn window_agent(root: &LayoutCell, agents: &BTreeMap<u32, AgentState>) -> Option
     best.map(AgentState::as_str)
 }
 
-/// Build the `{"t":"state",...}` snapshot for the active window.
-pub fn build_state_json(model: &Model, agents: &BTreeMap<u32, AgentState>) -> String {
-    let layout = model
-        .active_window
-        .and_then(|w| model.windows.get(&w))
-        .and_then(|wi| wi.layout.as_ref())
-        .map(|l| cell_to_msg(&l.root));
+/// Build the `{"t":"state",...}` snapshot: tmux windows plus any ephemeral tabs.
+/// When an ephemeral tab is the active view, the layout is a single full-view
+/// leaf sized from `size` (tmux does not lay out ephemeral panes).
+pub fn build_state_json(
+    model: &Model,
+    agents: &BTreeMap<u32, AgentState>,
+    ephemerals: &[(u32, String)],
+    active_ephemeral: Option<u32>,
+    size: (u16, u16),
+) -> String {
+    let layout = if let Some(id) = active_ephemeral {
+        Some(LayoutMsg {
+            kind: "leaf",
+            pane: Some(id),
+            x: 0,
+            y: 0,
+            w: size.0,
+            h: size.1,
+            children: Vec::new(),
+        })
+    } else {
+        model
+            .active_window
+            .and_then(|w| model.windows.get(&w))
+            .and_then(|wi| wi.layout.as_ref())
+            .map(|l| cell_to_msg(&l.root))
+    };
 
-    let windows = model
+    let mut windows: Vec<WinMsg> = model
         .windows
         .iter()
         .map(|(id, wi)| WinMsg {
             id: id.0,
             name: wi.name.clone().unwrap_or_default(),
-            active: model.active_window == Some(*id),
+            active: active_ephemeral.is_none() && model.active_window == Some(*id),
             agent: wi.layout.as_ref().and_then(|l| window_agent(&l.root, agents)),
+            ephemeral: false,
         })
         .collect();
+    // Ephemeral tabs follow the tmux windows.
+    for (id, name) in ephemerals {
+        windows.push(WinMsg {
+            id: *id,
+            name: name.clone(),
+            active: active_ephemeral == Some(*id),
+            agent: None,
+            ephemeral: true,
+        });
+    }
+
+    let (active_window, active_pane) = match active_ephemeral {
+        Some(id) => (Some(id), Some(id)),
+        None => (
+            model.active_window.map(|w| w.0),
+            model.active_pane.map(|p| p.0),
+        ),
+    };
 
     let msg = StateMsg {
         t: "state",
-        active_window: model.active_window.map(|w| w.0),
-        active_pane: model.active_pane.map(|p| p.0),
+        active_window,
+        active_pane,
         windows,
         layout,
     };

@@ -31,6 +31,7 @@ resilient single-auth tunnel (M2).
 | **M2** | Tauri desktop app + resilient single-auth SSH tunnel (auto-reconnect) | ✅ done |
 | **M3** | agent-status tab badges (hooks + heuristics) | ✅ done |
 | **M4** | ⌘E code panel: file tree, editor (edit/save), git diff | ✅ done |
+| **M5** | process tree (⌘K t) + ephemeral non-tmux shells (⌘K s) | ✅ daemon verified · GUI pending |
 
 ## Layout
 
@@ -181,3 +182,14 @@ behind the same CORS allowlist as the code panel.
 Two env knobs let a throwaway/second daemon run without colliding with your main
 one: **`MYMUX_SOCKET`** (tmux control socket, default `mymux`) and **`MYMUX_ADDR`**
 (listen address, default `127.0.0.1:8088`).
+
+## Ephemeral shells (⌘K s)
+
+Not everything needs tmux. Press **⌘K s** (or the `+sh` button) for a raw,
+non-tmux shell in its own top-level tab (marked `⌁`, dashed) — ideal for quick
+throwaway commands without nesting inside a persistent agent session. It's a
+mymuxd-owned pty: it inherits the focused pane's cwd and **survives a disconnect**
+(the daemon holds it), but is intentionally ephemeral — it dies with the daemon
+and reseeds best-effort (a raw byte replay, not a reconstructed screen, so a
+full-screen TUI may look rough on reconnect). Close it like any pane. Persistent
+(agent) work stays on tmux windows.

@@ -8,6 +8,7 @@ mod agent;
 mod fs;
 mod git;
 mod proc;
+mod pty;
 mod state;
 mod tmux;
 mod ws;

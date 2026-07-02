@@ -71,6 +71,17 @@ body {
   background: #3fb950;
   border-color: #3fb950;
 }
+/* Ephemeral (raw, non-tmux) tabs: dashed + muted, to read as "throwaway". */
+.tab.ephemeral {
+  border-style: dashed;
+  border-color: #6e7681;
+  color: #adbac7;
+}
+.tab.ephemeral.active {
+  color: #0b0e14;
+  background: #adbac7;
+  border-color: #adbac7;
+}
 .barbtn {
   font: 11px ui-monospace, Menlo, monospace;
   color: #9aa5b1;
