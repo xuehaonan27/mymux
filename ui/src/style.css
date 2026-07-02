@@ -291,3 +291,106 @@ body {
 .hint b {
   color: #2f81f7;
 }
+
+/* Process-tree overlay (mini-htop): window → pane → indented process rows. */
+.proc-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 21;
+  display: none;
+  flex-direction: column;
+  background: #0b0e14;
+}
+.proc-panel.show {
+  display: flex;
+}
+.proc-hd {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 12px;
+  font: 11px ui-monospace, Menlo, monospace;
+  color: #9aa5b1;
+  border-bottom: 1px solid #1e2430;
+}
+.proc-hint {
+  color: #5c6773;
+}
+.proc-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 0 12px;
+  font: 12px/1.5 ui-monospace, Menlo, monospace;
+}
+.pwin {
+  padding: 6px 12px 2px;
+  color: #79c0ff;
+  font-weight: 600;
+}
+.ppane {
+  padding: 1px 12px 1px 20px;
+  color: #5c6773;
+}
+.prow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  color: #c5cdd9;
+  white-space: nowrap;
+}
+.prow:hover {
+  background: #161b27;
+}
+.pcpu {
+  width: 4ch;
+  text-align: right;
+  color: #5c6773;
+}
+.pcpu.warm {
+  color: #d6a04c;
+}
+.pcpu.hot {
+  color: #f85149;
+  font-weight: 600;
+}
+.pmem {
+  width: 5ch;
+  text-align: right;
+  color: #8b949e;
+}
+.pstate {
+  width: 1ch;
+  text-align: center;
+  color: #5c6773;
+}
+.st-R {
+  color: #3fb950;
+}
+.st-D,
+.st-Z {
+  color: #f85149;
+}
+.st-T {
+  color: #d6a04c;
+}
+.pcmd {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pkill {
+  visibility: hidden;
+  font: 11px ui-monospace, Menlo, monospace;
+  color: #f85149;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.prow:hover .pkill {
+  visibility: visible;
+}
+.pkill:hover {
+  color: #ff7b72;
+}

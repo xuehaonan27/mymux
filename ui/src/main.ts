@@ -3,6 +3,7 @@ import '@xterm/xterm/css/xterm.css';
 import './style.css';
 import { measureCell } from './metrics';
 import { initCodePanel } from './code';
+import { initProcPanel } from './proc';
 
 // M1.2: render tmux's full window layout. The daemon pushes a JSON state
 // snapshot (window list + layout tree + active pane) and pane-addressed output;
@@ -259,7 +260,18 @@ const mod = (e: KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey);
 const isTauri = '__TAURI_INTERNALS__' in window || '__TAURI__' in window;
 
 const codePanel = initCodePanel(() => activePane);
-document.getElementById('btn-code')?.addEventListener('click', () => codePanel.toggle());
+const procPanel = initProcPanel();
+// Both overlays are full-screen and share a z-band, so they're mutually exclusive.
+function toggleCode() {
+  if (procPanel.isOpen()) procPanel.toggle();
+  codePanel.toggle();
+}
+function toggleProc() {
+  if (codePanel.isOpen()) codePanel.toggle();
+  procPanel.toggle();
+}
+document.getElementById('btn-code')?.addEventListener('click', toggleCode);
+document.getElementById('btn-proc')?.addEventListener('click', toggleProc);
 
 let leaderActive = false;
 function setLeader(on: boolean) {
@@ -302,6 +314,7 @@ function handleLeaderKey(e: KeyboardEvent) {
   const lower = k.toLowerCase();
   if (lower === 'c') return sendJson({ t: 'new_window' });
   if (lower === 'x') return closeActive();
+  if (lower === 't') return toggleProc();
   if (lower === 'd') return splitActive(e.shiftKey ? 'v' : 'h');
   if (k === '|' || k === '\\') return splitActive('h');
   if (k === '-') return splitActive('v');
@@ -340,6 +353,15 @@ document.addEventListener(
       return;
     }
 
+    // The process panel is a read-only modal overlay: esc closes it.
+    if (procPanel.isOpen()) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        procPanel.toggle();
+      }
+      return;
+    }
+
     if (!mod(e)) return;
     const lower = e.key.toLowerCase();
     const stop = () => {
@@ -350,7 +372,7 @@ document.addEventListener(
     // Works everywhere (browser + Tauri):
     if (lower === 'e' && !e.shiftKey && !e.altKey) {
       stop();
-      codePanel.toggle();
+      toggleCode();
       return;
     }
     if (lower === 'k' && !e.shiftKey && !e.altKey) {

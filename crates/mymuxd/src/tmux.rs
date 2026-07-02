@@ -11,7 +11,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use mux_core::{parse_layout, ControlEvent, Model, Parser, WindowId};
+use mux_core::{parse_layout, ControlEvent, Model, PaneId, Parser, WindowId};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::{broadcast, mpsc};
@@ -19,7 +19,14 @@ use tokio::sync::{broadcast, mpsc};
 use crate::agent::{AgentEntry, AgentState, Source};
 use crate::state::build_state_json;
 
-pub(crate) const SOCKET: &str = "mymux";
+/// tmux control socket (`tmux -L <socket>`). Overridable via `MYMUX_SOCKET` so a
+/// test or second instance can run without colliding with the default `mymux`.
+pub(crate) fn socket() -> &'static str {
+    static SOCKET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SOCKET
+        .get_or_init(|| std::env::var("MYMUX_SOCKET").unwrap_or_else(|_| "mymux".into()))
+        .as_str()
+}
 const SESSION: &str = "mymux";
 
 /// tmux config sourced at server start (via `-f`) so the *first* pane is already
@@ -107,7 +114,7 @@ impl Hub {
 
         let spawn = Command::new("tmux")
             .args([
-                "-L", SOCKET, "-f", conf.as_str(), "-C", "new-session", "-A", "-s", SESSION,
+                "-L", socket(), "-f", conf.as_str(), "-C", "new-session", "-A", "-s", SESSION,
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -338,7 +345,7 @@ impl Hub {
     pub async fn snapshot_pane(&self, pane: u32) -> Vec<u8> {
         let target = format!("%{pane}");
         let cap = Command::new("tmux")
-            .args(["-L", SOCKET, "capture-pane", "-e", "-p", "-t", &target])
+            .args(["-L", socket(), "capture-pane", "-e", "-p", "-t", &target])
             .output()
             .await;
         let Ok(cap) = cap else { return Vec::new() };
@@ -375,7 +382,7 @@ impl Hub {
     async fn pane_state(&self, target: &str) -> (u32, u32, bool) {
         let out = Command::new("tmux")
             .args([
-                "-L", SOCKET, "display-message", "-p", "-t", target,
+                "-L", socket(), "display-message", "-p", "-t", target,
                 "#{cursor_y} #{cursor_x} #{alternate_on}",
             ])
             .output()
@@ -419,7 +426,7 @@ impl Hub {
     pub async fn refresh_layouts(&self) {
         let out = Command::new("tmux")
             .args([
-                "-L", SOCKET, "list-windows", "-F",
+                "-L", socket(), "list-windows", "-F",
                 "#{window_id} #{window_name} #{window_layout}",
             ])
             .output()
@@ -441,6 +448,39 @@ impl Hub {
                 info.layout = parse_layout(layout);
             }
         }
+    }
+
+    /// Every pane across all windows with its shell pid, for the process tree:
+    /// `(window_id, pane_id, pane_pid, window_name)`.
+    pub async fn pane_pids(&self) -> Vec<(u32, u32, u32, String)> {
+        let out = Command::new("tmux")
+            .args([
+                "-L", socket(), "list-panes", "-a", "-F",
+                "#{window_id} #{pane_id} #{pane_pid} #{window_name}",
+            ])
+            .output()
+            .await;
+        let Ok(o) = out else { return Vec::new() };
+        if !o.status.success() {
+            return Vec::new();
+        }
+        let text = String::from_utf8_lossy(&o.stdout);
+        let mut rows = Vec::new();
+        for line in text.lines() {
+            // "@0 %1 12345 window name" — window_name may contain spaces (last field).
+            let mut it = line.splitn(4, ' ');
+            let (Some(w), Some(p), Some(pid)) = (it.next(), it.next(), it.next()) else {
+                continue;
+            };
+            let name = it.next().unwrap_or("").to_string();
+            let (Some(wid), Some(pane), Ok(pid)) =
+                (WindowId::parse(w), PaneId::parse(p), pid.parse::<u32>())
+            else {
+                continue;
+            };
+            rows.push((wid.0, pane.0, pid, name));
+        }
+        rows
     }
 }
 

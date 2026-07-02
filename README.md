@@ -167,3 +167,17 @@ fast browse/edit/diff without opening VSCode.
 The daemon serves `/fs/*` and `/git/*` confined to a root (`MYMUX_ROOT` or its
 cwd) — rejecting path escapes, with a CORS allowlist so only the mymux UI can
 reach them.
+
+## Processes (⌘K t)
+
+Press **⌘K t** (or the `ps` button) for a scoped mini-htop: every window → pane →
+its process subtree (rooted at each pane's shell pid), with live %CPU, memory and
+state. Hover a row and click **✕** to kill that process — **⇧✕** for SIGKILL.
+Kills are **scoped**: the daemon only signals a pid it can prove is inside a
+pane's subtree (never by name), so the dashboard can't take down arbitrary
+processes. It reads `/proc` directly (Linux) and serves `/proc/tree` + `/proc/kill`
+behind the same CORS allowlist as the code panel.
+
+Two env knobs let a throwaway/second daemon run without colliding with your main
+one: **`MYMUX_SOCKET`** (tmux control socket, default `mymux`) and **`MYMUX_ADDR`**
+(listen address, default `127.0.0.1:8088`).

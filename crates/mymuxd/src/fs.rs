@@ -23,7 +23,7 @@ fn default_root() -> PathBuf {
 async fn pane_cwd(pane: u32) -> Option<PathBuf> {
     let out = Command::new("tmux")
         .args([
-            "-L", crate::tmux::SOCKET, "display-message", "-p", "-t",
+            "-L", crate::tmux::socket(), "display-message", "-p", "-t",
             &format!("%{pane}"), "#{pane_current_path}",
         ])
         .output()

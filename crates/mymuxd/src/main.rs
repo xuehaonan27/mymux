@@ -7,6 +7,7 @@
 mod agent;
 mod fs;
 mod git;
+mod proc;
 mod state;
 mod tmux;
 mod ws;
@@ -46,11 +47,15 @@ async fn main() {
         .route("/fs/write", post(fs::write))
         .route("/git/status", get(git::status))
         .route("/git/diff", get(git::diff))
+        .route("/proc/tree", get(proc::tree))
+        .route("/proc/kill", post(proc::kill))
         .with_state(hub)
         .layer(cors);
 
-    let addr = "127.0.0.1:8088";
-    let listener = TcpListener::bind(addr).await.expect("bind mymuxd port");
+    // Bind address is overridable via MYMUX_ADDR so a test/second instance can
+    // run without colliding with the default :8088.
+    let addr = std::env::var("MYMUX_ADDR").unwrap_or_else(|_| "127.0.0.1:8088".into());
+    let listener = TcpListener::bind(&addr).await.expect("bind mymuxd port");
     eprintln!("mymuxd listening on ws://{addr}/ws");
     axum::serve(listener, app).await.expect("serve mymuxd");
 }
