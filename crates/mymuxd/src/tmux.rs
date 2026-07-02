@@ -323,21 +323,34 @@ impl Hub {
         let alt_on = contains(data, b"\x1b[?1049h");
         let alt_off = contains(data, b"\x1b[?1049l");
         let bell = data.contains(&0x07);
-        let mut agents = self.agents.lock().unwrap();
-        let h = agents.heur.entry(pane).or_insert(PaneHeur {
-            alt: false,
-            last_activity: now,
-            last_bell: None,
-        });
-        h.last_activity = now;
-        if alt_on {
-            h.alt = true;
+        let cleared_done;
+        {
+            let mut agents = self.agents.lock().unwrap();
+            let h = agents.heur.entry(pane).or_insert(PaneHeur {
+                alt: false,
+                last_activity: now,
+                last_bell: None,
+            });
+            h.last_activity = now;
+            if alt_on {
+                h.alt = true;
+            }
+            if alt_off {
+                h.alt = false;
+            }
+            if bell {
+                h.last_bell = Some(now);
+            }
+            // Fresh output means the pane is active again, so a stale "done" badge
+            // (e.g. from Codex's turn-complete notify) is wrong — clear it and let
+            // the hook / heuristic re-establish the live state.
+            cleared_done = agents.entries.get(&pane).map(|e| e.state) == Some(AgentState::Done);
+            if cleared_done {
+                agents.entries.remove(&pane);
+            }
         }
-        if alt_off {
-            h.alt = false;
-        }
-        if bell {
-            h.last_bell = Some(now);
+        if cleared_done {
+            self.emit(ServerEvent::State(self.state_json()));
         }
     }
 

@@ -116,7 +116,7 @@ pub fn build_state_json(
             id: *id,
             name: name.clone(),
             active: active_ephemeral == Some(*id),
-            agent: None,
+            agent: agents.get(id).map(|s| s.as_str()),
             ephemeral: true,
         });
     }

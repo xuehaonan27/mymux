@@ -63,6 +63,9 @@ impl PtyManager {
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .ok()?;
 
+        self.next += 1;
+        let id = EPH_BIT | self.next;
+
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
         let mut cmd = CommandBuilder::new(&shell);
         cmd.env("TERM", "xterm-256color");
@@ -71,6 +74,8 @@ impl PtyManager {
         // doesn't behave as a nested session (the daemon may itself run in tmux).
         cmd.env_remove("TMUX");
         cmd.env_remove("TMUX_PANE");
+        // Let an agent's hook report which pane it's in — there's no $TMUX_PANE here.
+        cmd.env("MYMUX_PANE", id.to_string());
         if let Some(cwd) = cwd {
             cmd.cwd(cwd);
         }
@@ -82,8 +87,6 @@ impl PtyManager {
         let master = pair.master;
         drop(pair.slave); // so the master reader EOFs when the shell exits
 
-        self.next += 1;
-        let id = EPH_BIT | self.next;
         let ring = Arc::new(Mutex::new(VecDeque::with_capacity(4096)));
 
         // Reader thread: pty → ring + broadcast; on EOF schedule Hub cleanup.

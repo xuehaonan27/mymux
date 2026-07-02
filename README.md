@@ -148,14 +148,18 @@ Wire your agents to report state (one-time, on the dev box where they run):
 
 ```sh
 scripts/install-claude-hooks.sh     # Claude Code: merges hooks non-destructively
+scripts/install-codex-notify.sh     # Codex: points `notify` at the reporter
 ```
 
-Under the hood the hooks run `scripts/mymux-agent-report.sh <state>`, which
-`GET`s `http://127.0.0.1:8088/agent?pane=$TMUX_PANE&state=…` — so **any** tool
-can report (point Codex's `notify` at the reporter). Panes **without** hooks fall
-back to output heuristics: a backgrounded full-screen app badges *running* while
-active, *done* when it goes quiet, *waiting* if it rang the bell — and focusing a
-window clears its *done*.
+Under the hood the hooks run `scripts/mymux-agent-report.sh <state>`, which `GET`s
+`/agent?pane=…&state=…`, resolving the pane from `$TMUX_PANE` (tmux) or `$MYMUX_PANE`
+(a raw `⌁` shell) — so agents in **either** pane type badge their tab. Codex's
+`notify` only fires on turn-complete, so it reports *done* and leaves *running* to
+the heuristic (a stale *done* clears the moment the pane emits output again).
+
+Panes **without** hooks fall back to output heuristics: a backgrounded full-screen
+app badges *running* while active, *done* when it goes quiet, *waiting* if it rang
+the bell — and focusing a window clears its *done*.
 
 ## Code & git (⌘E)
 
