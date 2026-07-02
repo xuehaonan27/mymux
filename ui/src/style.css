@@ -154,18 +154,13 @@ body {
   flex-direction: column;
   min-width: 0;
 }
+/* Bounded parent; the editor's own theme sets `.cm-editor { height: 100% }`
+   and `.cm-scroller { overflow: auto }`, which is what actually enables
+   wheel/trackpad scrolling (CSS height alone does not). */
 .code-editor {
-  position: relative;
   flex: 1;
   min-height: 0;
   overflow: hidden;
-}
-.code-editor .cm-editor {
-  position: absolute;
-  inset: 0;
-}
-.code-editor .cm-scroller {
-  overflow: auto;
 }
 .trow {
   padding: 2px 8px;

@@ -1,5 +1,5 @@
 import { EditorView, basicSetup } from 'codemirror';
-import { EditorState, Compartment, type Extension } from '@codemirror/state';
+import { EditorState, type Extension } from '@codemirror/state';
 import { keymap } from '@codemirror/view';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { rust } from '@codemirror/lang-rust';
@@ -9,6 +9,13 @@ import { json } from '@codemirror/lang-json';
 import { markdown } from '@codemirror/lang-markdown';
 
 const API = 'http://127.0.0.1:8088';
+
+// Make the editor fill its (bounded) parent AND scroll on wheel/trackpad — this
+// has to be a CodeMirror theme, not just CSS, or the scroller never enables.
+const editorTheme = EditorView.theme({
+  '&': { height: '100%' },
+  '.cm-scroller': { overflow: 'auto' },
+});
 
 interface FsEntry {
   name: string;
@@ -20,7 +27,6 @@ interface GitFile {
   path: string;
 }
 
-// The panel is rooted at the focused pane's cwd, so every fetch carries its id.
 const paneQ = (pane: number | null) => (pane != null ? `pane=${pane}&` : '');
 
 async function fsList(pane: number | null, path: string): Promise<FsEntry[]> {
@@ -79,6 +85,16 @@ export interface CodePanel {
   isOpen(): boolean;
 }
 
+// One code view per pane. The tree, the changes list and the editor are all
+// rooted at the same pane cwd, so they live together in a Session rather than
+// as separate loose variables that have to be reset in lockstep by hand.
+interface Session {
+  pane: number | null;
+  path: string | null; // file open in the editor, or null
+  savedDoc: string; // last saved contents (dirty = editor doc differs)
+  state: EditorState | null; // editor doc + history, preserved across pane switches
+}
+
 /** The ⌘E code overlay, rooted at the focused pane's cwd. */
 export function initCodePanel(getActivePane: () => number | null): CodePanel {
   const panel = document.createElement('div');
@@ -88,7 +104,7 @@ export function initCodePanel(getActivePane: () => number | null): CodePanel {
     <div class="code-side">
       <div class="code-side-hd">changes</div>
       <div class="code-changes" id="code-changes"></div>
-      <div class="code-side-hd" id="code-root">files</div>
+      <div class="code-side-hd">files</div>
       <div class="code-tree" id="code-tree"></div>
     </div>
     <div class="code-main">
@@ -106,86 +122,117 @@ export function initCodePanel(getActivePane: () => number | null): CodePanel {
   diffEl.style.display = 'none';
 
   let editor: EditorView | null = null;
-  let currentPath: string | null = null;
-  let savedDoc = '';
-  let dirty = false;
-  let rootPane: number | null = null;
-  const langComp = new Compartment();
+  const sessions = new Map<number, Session>();
+  let current: Session | null = null;
+  let open = false;
+
+  const keyOf = (p: number | null) => p ?? -1;
+  function sessionFor(p: number | null): Session {
+    const k = keyOf(p);
+    let s = sessions.get(k);
+    if (!s) {
+      s = { pane: p, path: null, savedDoc: '', state: null };
+      sessions.set(k, s);
+    }
+    return s;
+  }
+
+  // Derived, never stored — the single source of "unsaved?" truth.
+  const isDirty = () =>
+    !!(current?.path && editor && editor.state.doc.toString() !== current.savedDoc);
 
   function renderHeader() {
-    if (!currentPath) {
+    if (!current?.path) {
       pathEl.textContent = 'no file open';
       pathEl.style.color = '';
       return;
     }
-    pathEl.textContent = (dirty ? '● ' : '') + currentPath;
-    pathEl.style.color = dirty ? '#d6a04c' : '';
+    const d = isDirty();
+    pathEl.textContent = (d ? '● ' : '') + current.path;
+    pathEl.style.color = d ? '#d6a04c' : '';
   }
 
-  // Returns false if the user cancels leaving an unsaved file.
-  function confirmDiscard(): boolean {
-    return !dirty || window.confirm(`Discard unsaved changes to ${currentPath}?`);
-  }
+  // Opening a different file is the only place edits are actually discarded;
+  // closing the panel and switching panes both preserve the session.
+  const confirmDiscard = () =>
+    !isDirty() || window.confirm(`Discard unsaved changes to ${current!.path}?`);
 
-  async function save() {
-    if (!editor || !currentPath) return;
-    const doc = editor.state.doc.toString();
-    const ok = await fsWrite(rootPane, currentPath, doc);
-    if (ok) {
-      savedDoc = doc;
-      dirty = false;
-      const p = currentPath;
-      pathEl.textContent = `${p}   ✓ saved`;
-      setTimeout(() => {
-        if (currentPath === p) renderHeader();
-      }, 1200);
-    } else {
-      pathEl.textContent = `${currentPath}   ✗ save failed`;
-    }
-  }
+  // Placeholder shown when a pane has no file open — read-only so it can't be
+  // mistaken for an editable buffer.
+  const emptyState = () =>
+    EditorState.create({
+      doc: '',
+      extensions: [basicSetup, oneDark, editorTheme, EditorView.editable.of(false)],
+    });
 
-  async function openFile(path: string) {
-    if (!confirmDiscard()) return;
-    let content: string;
-    try {
-      content = await fsRead(rootPane, path);
-    } catch {
-      pathEl.textContent = `cannot open ${path} (binary or too large?)`;
-      return;
-    }
-    currentPath = path;
-    savedDoc = content;
-    dirty = false;
-    renderHeader();
-    const state = EditorState.create({
-      doc: content,
+  function fileState(path: string, doc: string): EditorState {
+    return EditorState.create({
+      doc,
       extensions: [
         basicSetup,
         oneDark,
-        langComp.of(langFor(path)),
+        editorTheme,
+        langFor(path),
         keymap.of([{ key: 'Mod-s', preventDefault: true, run: () => (void save(), true) }]),
         EditorView.updateListener.of((u) => {
-          if (u.docChanged) {
-            dirty = u.state.doc.toString() !== savedDoc;
-            renderHeader();
-          }
+          if (u.docChanged) renderHeader();
         }),
       ],
     });
+  }
+
+  function mount(state: EditorState) {
     if (editor) editor.setState(state);
     else editor = new EditorView({ state, parent: editorParent });
     editorParent.style.display = '';
     diffEl.style.display = 'none';
-    editor.focus();
   }
 
+  async function save() {
+    if (!editor || !current?.path) return;
+    const s = current;
+    const doc = editor.state.doc.toString();
+    const ok = await fsWrite(s.pane, s.path!, doc);
+    if (ok) {
+      s.savedDoc = doc;
+      const p = s.path;
+      pathEl.textContent = `${p}   ✓ saved`;
+      setTimeout(() => {
+        if (current === s && current.path === p) renderHeader();
+      }, 1200);
+    } else {
+      pathEl.textContent = `${s.path}   ✗ save failed`;
+    }
+  }
+
+  async function openFile(path: string) {
+    if (!current || !confirmDiscard()) return;
+    const s = current;
+    let content: string;
+    try {
+      content = await fsRead(s.pane, path);
+    } catch {
+      pathEl.textContent = `cannot open ${path} (binary or too large?)`;
+      return;
+    }
+    if (current !== s) return; // switched panes mid-read
+    s.path = path;
+    s.savedDoc = content;
+    s.state = fileState(path, content);
+    mount(s.state);
+    renderHeader();
+    editor!.focus();
+  }
+
+  // The diff is a transient view over the current pane; it leaves the editor
+  // session untouched, so switching back restores the open file and its edits.
   async function showDiff(path: string) {
-    if (!confirmDiscard()) return;
-    currentPath = null;
-    dirty = false;
+    if (!current) return;
+    const s = current;
     pathEl.textContent = `diff · ${path}`;
     pathEl.style.color = '';
-    const text = (await gitDiff(rootPane, path)) || '(no textual diff)';
+    const text = (await gitDiff(s.pane, path)) || '(no textual diff)';
+    if (current !== s) return;
     diffEl.replaceChildren();
     for (const line of text.split('\n')) {
       const el = document.createElement('div');
@@ -221,15 +268,15 @@ export function initCodePanel(getActivePane: () => number | null): CodePanel {
       kids.style.display = 'none';
       wrap.appendChild(kids);
       let loaded = false;
-      let open = false;
+      let expanded = false;
       row.addEventListener('click', async (e) => {
         e.stopPropagation();
-        open = !open;
-        row.textContent = (open ? '▾ ' : '▸ ') + name;
-        kids.style.display = open ? '' : 'none';
-        if (open && !loaded) {
+        expanded = !expanded;
+        row.textContent = (expanded ? '▾ ' : '▸ ') + name;
+        kids.style.display = expanded ? '' : 'none';
+        if (expanded && !loaded) {
           loaded = true;
-          for (const c of await fsList(rootPane, path)) {
+          for (const c of await fsList(current?.pane ?? null, path)) {
             kids.appendChild(treeItem(path ? `${path}/${c.name}` : c.name, c.name, c.dir, depth + 1));
           }
         }
@@ -244,27 +291,30 @@ export function initCodePanel(getActivePane: () => number | null): CodePanel {
   }
 
   async function loadTree() {
+    const s = current;
     treeEl.replaceChildren();
-    for (const c of await fsList(rootPane, '')) {
-      treeEl.appendChild(treeItem(c.name, c.name, c.dir, 0));
-    }
+    const items = await fsList(s?.pane ?? null, '');
+    if (current !== s) return; // switched panes mid-fetch
+    for (const c of items) treeEl.appendChild(treeItem(c.name, c.name, c.dir, 0));
   }
 
   async function loadChanges() {
-    const files = await gitStatus(rootPane);
+    const s = current;
+    const files = await gitStatus(s?.pane ?? null);
+    if (current !== s) return;
     changesEl.replaceChildren();
     if (!files.length) {
       changesEl.textContent = 'clean';
       return;
     }
     for (const f of files) {
-      const s = f.status.trim();
-      const cls = s.includes('?') || s.includes('A') ? 'gnew' : s.includes('D') ? 'gdel' : 'gmod';
+      const st = f.status.trim();
+      const cls = st.includes('?') || st.includes('A') ? 'gnew' : st.includes('D') ? 'gdel' : 'gmod';
       const row = document.createElement('div');
       row.className = 'grow';
       const badge = document.createElement('span');
       badge.className = `gbadge ${cls}`;
-      badge.textContent = s || '·';
+      badge.textContent = st || '·';
       row.appendChild(badge);
       row.appendChild(document.createTextNode(' ' + f.path));
       row.addEventListener('click', () => void showDiff(f.path));
@@ -272,20 +322,32 @@ export function initCodePanel(getActivePane: () => number | null): CodePanel {
     }
   }
 
-  let open = false;
+  // Swap the whole view to a pane's session: snapshot the outgoing editor, then
+  // restore (or create) the incoming one. This is the only place "which pane"
+  // changes, so there is nothing to reset by hand elsewhere.
+  function showSession(p: number | null) {
+    if (current && editor) current.state = editor.state; // snapshot outgoing edits
+    current = sessionFor(p);
+    mount(current.state ?? emptyState());
+    renderHeader();
+    void loadTree();
+    void loadChanges();
+    editor?.focus();
+  }
+
   return {
     isOpen: () => open,
     toggle() {
-      if (open && !confirmDiscard()) return; // leaving an unsaved file
-      open = !open;
-      panel.classList.toggle('show', open);
       if (open) {
-        // Re-root to whichever pane is focused now.
-        rootPane = getActivePane();
-        void loadTree();
-        void loadChanges();
-        editor?.focus();
+        // Closing preserves the session (edits live on for the next open), so
+        // there is nothing to discard here.
+        open = false;
+        panel.classList.remove('show');
+        return;
       }
+      open = true;
+      panel.classList.add('show');
+      showSession(getActivePane());
     },
   };
 }
