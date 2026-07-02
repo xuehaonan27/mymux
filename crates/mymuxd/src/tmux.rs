@@ -568,6 +568,10 @@ impl Hub {
             };
             rows.push((wid.0, pane.0, pid, name));
         }
+        // Ephemeral shells appear as their own single-pane "window".
+        for (id, pid, name) in self.ptys.lock().unwrap().entries() {
+            rows.push((id, id, pid, name));
+        }
         rows
     }
 

@@ -28,6 +28,7 @@ struct Ephemeral {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
+    child_pid: u32,
     ring: Arc<Mutex<VecDeque<u8>>>,
     name: String,
 }
@@ -66,11 +67,16 @@ impl PtyManager {
         let mut cmd = CommandBuilder::new(&shell);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        // A raw shell is not inside tmux — strip inherited tmux markers so it
+        // doesn't behave as a nested session (the daemon may itself run in tmux).
+        cmd.env_remove("TMUX");
+        cmd.env_remove("TMUX_PANE");
         if let Some(cwd) = cwd {
             cmd.cwd(cwd);
         }
 
         let child = pair.slave.spawn_command(cmd).ok()?;
+        let child_pid = child.process_id().unwrap_or(0);
         let reader = pair.master.try_clone_reader().ok()?;
         let writer = pair.master.take_writer().ok()?;
         let master = pair.master;
@@ -109,6 +115,7 @@ impl PtyManager {
                 writer,
                 master,
                 child,
+                child_pid,
                 ring,
                 name: "shell".to_string(),
             },
@@ -160,6 +167,14 @@ impl PtyManager {
         self.map
             .iter()
             .map(|(&id, e)| (id, e.name.clone()))
+            .collect()
+    }
+
+    /// `(id, shell_pid, name)` for every live ephemeral (for the process tree).
+    pub fn entries(&self) -> Vec<(u32, u32, String)> {
+        self.map
+            .iter()
+            .map(|(&id, e)| (id, e.child_pid, e.name.clone()))
             .collect()
     }
 }

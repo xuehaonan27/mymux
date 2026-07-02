@@ -338,6 +338,9 @@ body {
   color: #79c0ff;
   font-weight: 600;
 }
+.pwin.eph {
+  color: #adbac7;
+}
 .ppane {
   padding: 1px 12px 1px 20px;
   color: #5c6773;
