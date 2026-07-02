@@ -19,7 +19,7 @@ use tokio::sync::{broadcast, mpsc};
 use crate::agent::{AgentEntry, AgentState, Source};
 use crate::state::build_state_json;
 
-const SOCKET: &str = "mymux";
+pub(crate) const SOCKET: &str = "mymux";
 const SESSION: &str = "mymux";
 
 /// tmux config sourced at server start (via `-f`) so the *first* pane is already
@@ -188,7 +188,9 @@ impl Hub {
     }
 
     pub async fn new_window(&self) {
-        self.send_cmd("new-window".to_string()).await;
+        // Open in the active pane's directory, not the tmux server's start dir.
+        self.send_cmd("new-window -c \"#{pane_current_path}\"".to_string())
+            .await;
     }
 
     pub async fn close_pane(&self, pane: u32) {
@@ -197,7 +199,8 @@ impl Hub {
 
     pub async fn split(&self, pane: u32, horizontal: bool) {
         let flag = if horizontal { "-h" } else { "-v" };
-        self.send_cmd(format!("split-window {flag} -t %{pane}")).await;
+        self.send_cmd(format!("split-window {flag} -c \"#{{pane_current_path}}\" -t %{pane}"))
+            .await;
     }
 
     /// The current state snapshot as JSON (for initial sync / resync).

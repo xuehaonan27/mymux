@@ -258,7 +258,7 @@ const mod = (e: KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey);
 // full iTerm2 set there; in a browser those stay on the ⌘K leader.
 const isTauri = '__TAURI_INTERNALS__' in window || '__TAURI__' in window;
 
-const codePanel = initCodePanel();
+const codePanel = initCodePanel(() => activePane);
 document.getElementById('btn-code')?.addEventListener('click', () => codePanel.toggle());
 
 let leaderActive = false;

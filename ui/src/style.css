@@ -127,13 +127,13 @@ body {
   inset: 0;
   z-index: 20;
   display: none;
-  grid-template-columns: 260px 1fr;
   background: #0b0e14;
 }
 .code-panel.show {
-  display: grid;
+  display: flex;
 }
 .code-side {
+  flex: 0 0 260px;
   overflow: auto;
   background: #0d1017;
   border-right: 1px solid #1e2430;
@@ -149,17 +149,23 @@ body {
   border-bottom: 1px solid #1e2430;
 }
 .code-main {
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   min-width: 0;
 }
 .code-editor {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow: hidden;
 }
 .code-editor .cm-editor {
-  height: 100%;
+  position: absolute;
+  inset: 0;
+}
+.code-editor .cm-scroller {
+  overflow: auto;
 }
 .trow {
   padding: 2px 8px;

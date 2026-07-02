@@ -8,7 +8,6 @@ import { python } from '@codemirror/lang-python';
 import { json } from '@codemirror/lang-json';
 import { markdown } from '@codemirror/lang-markdown';
 
-// Same host as the WS; the daemon serves /fs and /git with a CORS allowlist.
 const API = 'http://127.0.0.1:8088';
 
 interface FsEntry {
@@ -21,29 +20,32 @@ interface GitFile {
   path: string;
 }
 
-async function fsList(path: string): Promise<FsEntry[]> {
-  const r = await fetch(`${API}/fs/list?path=${encodeURIComponent(path)}`);
+// The panel is rooted at the focused pane's cwd, so every fetch carries its id.
+const paneQ = (pane: number | null) => (pane != null ? `pane=${pane}&` : '');
+
+async function fsList(pane: number | null, path: string): Promise<FsEntry[]> {
+  const r = await fetch(`${API}/fs/list?${paneQ(pane)}path=${encodeURIComponent(path)}`);
   return r.ok ? r.json() : [];
 }
-async function fsRead(path: string): Promise<string> {
-  const r = await fetch(`${API}/fs/read?path=${encodeURIComponent(path)}`);
+async function fsRead(pane: number | null, path: string): Promise<string> {
+  const r = await fetch(`${API}/fs/read?${paneQ(pane)}path=${encodeURIComponent(path)}`);
   if (!r.ok) throw new Error(`read ${path}: ${r.status}`);
   return r.text();
 }
-async function fsWrite(path: string, content: string): Promise<boolean> {
+async function fsWrite(pane: number | null, path: string, content: string): Promise<boolean> {
   const r = await fetch(`${API}/fs/write`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ path, content }),
+    body: JSON.stringify({ path, content, pane: pane ?? undefined }),
   });
   return r.ok;
 }
-async function gitStatus(): Promise<GitFile[]> {
-  const r = await fetch(`${API}/git/status`);
+async function gitStatus(pane: number | null): Promise<GitFile[]> {
+  const r = await fetch(`${API}/git/status?${paneQ(pane)}`);
   return r.ok ? r.json() : [];
 }
-async function gitDiff(path: string): Promise<string> {
-  const r = await fetch(`${API}/git/diff?path=${encodeURIComponent(path)}`);
+async function gitDiff(pane: number | null, path: string): Promise<string> {
+  const r = await fetch(`${API}/git/diff?${paneQ(pane)}path=${encodeURIComponent(path)}`);
   return r.ok ? r.text() : '';
 }
 
@@ -77,8 +79,8 @@ export interface CodePanel {
   isOpen(): boolean;
 }
 
-/** The ⌘E code overlay: git changes + file tree on the left, editor/diff right. */
-export function initCodePanel(): CodePanel {
+/** The ⌘E code overlay, rooted at the focused pane's cwd. */
+export function initCodePanel(getActivePane: () => number | null): CodePanel {
   const panel = document.createElement('div');
   panel.id = 'code';
   panel.className = 'code-panel';
@@ -86,7 +88,7 @@ export function initCodePanel(): CodePanel {
     <div class="code-side">
       <div class="code-side-hd">changes</div>
       <div class="code-changes" id="code-changes"></div>
-      <div class="code-side-hd">files</div>
+      <div class="code-side-hd" id="code-root">files</div>
       <div class="code-tree" id="code-tree"></div>
     </div>
     <div class="code-main">
@@ -105,28 +107,56 @@ export function initCodePanel(): CodePanel {
 
   let editor: EditorView | null = null;
   let currentPath: string | null = null;
+  let savedDoc = '';
+  let dirty = false;
+  let rootPane: number | null = null;
   const langComp = new Compartment();
+
+  function renderHeader() {
+    if (!currentPath) {
+      pathEl.textContent = 'no file open';
+      pathEl.style.color = '';
+      return;
+    }
+    pathEl.textContent = (dirty ? '● ' : '') + currentPath;
+    pathEl.style.color = dirty ? '#d6a04c' : '';
+  }
+
+  // Returns false if the user cancels leaving an unsaved file.
+  function confirmDiscard(): boolean {
+    return !dirty || window.confirm(`Discard unsaved changes to ${currentPath}?`);
+  }
 
   async function save() {
     if (!editor || !currentPath) return;
-    const ok = await fsWrite(currentPath, editor.state.doc.toString());
-    const p = currentPath;
-    pathEl.textContent = `${p}   ${ok ? '✓ saved' : '✗ save failed'}`;
-    setTimeout(() => {
-      if (currentPath === p) pathEl.textContent = p;
-    }, 1500);
+    const doc = editor.state.doc.toString();
+    const ok = await fsWrite(rootPane, currentPath, doc);
+    if (ok) {
+      savedDoc = doc;
+      dirty = false;
+      const p = currentPath;
+      pathEl.textContent = `${p}   ✓ saved`;
+      setTimeout(() => {
+        if (currentPath === p) renderHeader();
+      }, 1200);
+    } else {
+      pathEl.textContent = `${currentPath}   ✗ save failed`;
+    }
   }
 
   async function openFile(path: string) {
+    if (!confirmDiscard()) return;
     let content: string;
     try {
-      content = await fsRead(path);
+      content = await fsRead(rootPane, path);
     } catch {
       pathEl.textContent = `cannot open ${path} (binary or too large?)`;
       return;
     }
     currentPath = path;
-    pathEl.textContent = path;
+    savedDoc = content;
+    dirty = false;
+    renderHeader();
     const state = EditorState.create({
       doc: content,
       extensions: [
@@ -134,6 +164,12 @@ export function initCodePanel(): CodePanel {
         oneDark,
         langComp.of(langFor(path)),
         keymap.of([{ key: 'Mod-s', preventDefault: true, run: () => (void save(), true) }]),
+        EditorView.updateListener.of((u) => {
+          if (u.docChanged) {
+            dirty = u.state.doc.toString() !== savedDoc;
+            renderHeader();
+          }
+        }),
       ],
     });
     if (editor) editor.setState(state);
@@ -144,9 +180,12 @@ export function initCodePanel(): CodePanel {
   }
 
   async function showDiff(path: string) {
-    currentPath = null; // diff view is read-only
+    if (!confirmDiscard()) return;
+    currentPath = null;
+    dirty = false;
     pathEl.textContent = `diff · ${path}`;
-    const text = (await gitDiff(path)) || '(no textual diff)';
+    pathEl.style.color = '';
+    const text = (await gitDiff(rootPane, path)) || '(no textual diff)';
     diffEl.replaceChildren();
     for (const line of text.split('\n')) {
       const el = document.createElement('div');
@@ -190,7 +229,7 @@ export function initCodePanel(): CodePanel {
         kids.style.display = open ? '' : 'none';
         if (open && !loaded) {
           loaded = true;
-          for (const c of await fsList(path)) {
+          for (const c of await fsList(rootPane, path)) {
             kids.appendChild(treeItem(path ? `${path}/${c.name}` : c.name, c.name, c.dir, depth + 1));
           }
         }
@@ -204,18 +243,15 @@ export function initCodePanel(): CodePanel {
     return wrap;
   }
 
-  let treeLoaded = false;
   async function loadTree() {
-    if (treeLoaded) return;
-    treeLoaded = true;
     treeEl.replaceChildren();
-    for (const c of await fsList('')) {
+    for (const c of await fsList(rootPane, '')) {
       treeEl.appendChild(treeItem(c.name, c.name, c.dir, 0));
     }
   }
 
   async function loadChanges() {
-    const files = await gitStatus();
+    const files = await gitStatus(rootPane);
     changesEl.replaceChildren();
     if (!files.length) {
       changesEl.textContent = 'clean';
@@ -240,9 +276,12 @@ export function initCodePanel(): CodePanel {
   return {
     isOpen: () => open,
     toggle() {
+      if (open && !confirmDiscard()) return; // leaving an unsaved file
       open = !open;
       panel.classList.toggle('show', open);
       if (open) {
+        // Re-root to whichever pane is focused now.
+        rootPane = getActivePane();
         void loadTree();
         void loadChanges();
         editor?.focus();
