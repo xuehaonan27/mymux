@@ -13,6 +13,15 @@ REMOTE="${3:-8088}"
 echo "mymux-connect: localhost:$LOCAL -> $HOST:$REMOTE  (Ctrl-C to stop)"
 echo "then open the UI against localhost:$LOCAL"
 
+# Non-interactive auth is required for the packaged desktop app (it has no
+# terminal to prompt on). If ssh can't connect silently, say how to fix it; in
+# this shell you can still type the passphrase once below.
+if ! ssh -o BatchMode=yes -o ConnectTimeout=8 \
+       -o 'ControlPath=~/.ssh/mymux-%r@%h:%p' "$HOST" true 2>/dev/null; then
+  echo "mymux-connect: $HOST needs a passphrase. For silent, headless reconnects, load your key once:"
+  echo "  ssh-add --apple-use-keychain ~/.ssh/id_ed25519   # macOS (see README: One-time SSH setup)"
+fi
+
 backoff=1
 while true; do
   start=$(date +%s)

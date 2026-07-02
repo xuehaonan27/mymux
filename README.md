@@ -70,6 +70,33 @@ You get a real shell rendered by xterm.js, driven through tmux control mode —
 one emulation layer, native scrollback, mouse wheel. Reload the page and the
 session persists (tmux holds it on the `mymux` socket).
 
+## One-time SSH setup (do this first)
+
+mymux authenticates over SSH **non-interactively** — the packaged desktop app
+has no terminal to type a passphrase into, so your key must be loaded in an
+agent. Do this once:
+
+```sh
+# macOS — store the passphrase in the Keychain and auto-load the key:
+ssh-add --apple-use-keychain ~/.ssh/id_ed25519
+```
+
+Then in `~/.ssh/config`, under the host you connect to:
+
+```
+Host <dev-host>
+  AddKeysToAgent yes
+  UseKeychain yes
+  IdentityFile ~/.ssh/id_ed25519
+```
+
+(Linux client: `eval "$(ssh-agent -s)" && ssh-add ~/.ssh/id_ed25519`.)
+
+After this, both `cargo tauri dev` and the built `.app` connect with **no**
+passphrase prompt. The connector reuses a single SSH ControlMaster — it
+authenticates at most once and reconnects silently. If the key isn't loaded it
+prints these exact steps and waits, connecting the moment you run `ssh-add`.
+
 ## Connect from your Mac (resilient tunnel)
 
 Start the daemon + UI on the dev box (as above), then from your Mac run the
@@ -105,8 +132,10 @@ cargo tauri dev          # dev run; or `cargo tauri build` for a .app / .dmg
 ```
 
 The app starts `mymuxd` on the remote if needed, forwards `localhost:8088` with
-auto-reconnect, and opens the workspace. Enter your ssh passphrase once
-(keychain); drop the network and it restores on its own. For a signed release
+auto-reconnect, and opens the workspace. With your key in an agent (see
+[One-time SSH setup](#one-time-ssh-setup-do-this-first)) it connects with no
+passphrase prompt — essential here, since a Finder-launched app has no terminal
+to prompt on. Drop the network and it restores on its own. For a signed release
 bundle, first regenerate the icon set: `cargo tauri icon src-tauri/icons/icon.png`.
 
 ## Agent status
