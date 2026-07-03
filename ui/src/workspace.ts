@@ -21,6 +21,8 @@ export interface WinInfo {
   name: string;
   active: boolean;
   agent?: 'running' | 'waiting' | 'done';
+  /** The pane holding the agent state — attention jumps focus it directly. */
+  agent_pane?: number;
   ephemeral?: boolean;
 }
 interface StateMsg {
@@ -65,6 +67,7 @@ export class Workspace {
   private readonly hooks: WorkspaceHooks;
   private readonly container: HTMLElement;
   private readonly root: HTMLDivElement;
+  private readonly banner: HTMLDivElement;
 
   private readonly panes = new Map<number, Pane>();
   activePane: number | null = null;
@@ -98,6 +101,10 @@ export class Workspace {
     this.root.className = 'workspace';
     this.root.style.display = 'none';
     opts.container.appendChild(this.root);
+    this.banner = document.createElement('div');
+    this.banner.className = 'ws-banner';
+    this.banner.style.display = 'none';
+    this.root.appendChild(this.banner);
   }
 
   // ---- lifecycle -----------------------------------------------------------
@@ -140,6 +147,17 @@ export class Workspace {
 
   private setWsState(s: WsState) {
     this.wsState = s;
+    // In-workspace banner, so a background host's trouble is visible the moment
+    // you switch to it (the bar dot only reflects the visible workspace).
+    if (s === 'open') {
+      this.banner.style.display = 'none';
+    } else {
+      this.banner.textContent =
+        s === 'connecting'
+          ? `Connecting to ${this.label}…`
+          : `Connection to ${this.label} lost — reconnecting…`;
+      this.banner.style.display = '';
+    }
     this.hooks.onStatus(this, s);
   }
 

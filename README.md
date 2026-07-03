@@ -202,14 +202,23 @@ Panes **without** hooks fall back to output heuristics: a backgrounded full-scre
 app badges *running* while active, *done* when it goes quiet, *waiting* if it rang
 the bell — and focusing a window clears its *done*.
 
+**The attention queue**: every window that needs a human (waiting for approval /
+input, or finished) is queued across **all** connected hosts, ordered by when it
+first needed you. Press **⌘J** (or ⌘K `a`, or click the ⏳/✓ summary) to jump to
+the oldest one — keyboard focus lands **directly on the agent's pane**. Deal
+with it and press again for the next. Entries clear themselves — answering flips
+*waiting* back to *running*, and focusing clears *done*. When nothing is pending
+you get a small "All clear — no agent needs you right now."
+
 ## Code & git (⌘E)
 
 Press **⌘E** (or the `code` button) for a lightweight overlay: a file tree and
-git-changes list on the left, a CodeMirror editor / unified diff on the right.
-Open a file to read or edit it (⌘S saves); click a changed file to see its diff.
-Each pane gets its own session rooted at that pane's cwd, preserved across
-switches. It's a "quick look," not an IDE — no LSP yet (the last open pain
-point), just fast browse/edit/diff without opening VSCode.
+git-changes list on the left, a CodeMirror editor / unified diff on the right
+(loaded on first use, so the app itself stays small). **⌘P** fuzzy-opens any
+file in the repo. Open a file to read or edit it (⌘S saves); click a changed
+file to see its diff. Each pane gets its own session rooted at that pane's cwd,
+preserved across switches. It's a "quick look," not an IDE — no LSP yet (the
+last open pain point), just fast browse/edit/diff without opening VSCode.
 
 The daemon serves `/fs/*` and `/git/*` confined to a root (the pane's cwd, else
 `MYMUX_ROOT`/cwd) — rejecting path escapes, with a CORS allowlist so only the

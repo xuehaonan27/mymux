@@ -48,6 +48,7 @@ async fn main() {
         .route("/fs/write", post(fs::write))
         .route("/git/status", get(git::status))
         .route("/git/diff", get(git::diff))
+        .route("/git/files", get(git::files))
         .route("/proc/tree", get(proc::tree))
         .route("/proc/kill", post(proc::kill))
         .with_state(hub)

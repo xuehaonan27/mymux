@@ -2,7 +2,7 @@ import '@xterm/xterm/css/xterm.css';
 import './style.css';
 import { invoke } from '@tauri-apps/api/core';
 import { measureCell } from './metrics';
-import { initCodePanel } from './code';
+import type { CodePanel, CodePanelOpts } from './code';
 import { initProcPanel } from './proc';
 import { initHostManager } from './hostmanager';
 import { Workspace, WinInfo, WsState } from './workspace';
@@ -32,6 +32,89 @@ const mod = (e: KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey);
 // full iTerm2 set there; in a browser those stay on the ⌘K leader.
 const isTauri = '__TAURI_INTERNALS__' in window || '__TAURI__' in window;
 
+// ---- user prefs (client-side; a fuller settings store is on the backlog) ----
+
+interface Prefs {
+  hostBarAlways?: boolean;
+}
+function loadPrefs(): Prefs {
+  try {
+    return JSON.parse(localStorage.getItem('mymux.prefs') ?? '{}');
+  } catch {
+    return {};
+  }
+}
+let prefs: Prefs = loadPrefs();
+function savePrefs(p: Prefs) {
+  prefs = p;
+  localStorage.setItem('mymux.prefs', JSON.stringify(p));
+  renderHosts();
+}
+
+// ---- attention queue --------------------------------------------------------
+// Windows whose agent needs a human (waiting for approval/input, or done),
+// across ALL hosts, ordered by when they FIRST needed you. Entries leave on
+// their own once handled: answering flips waiting→running (hook), and focusing
+// a window clears its done badge (daemon) — so the queue is a pure derivation
+// of the badge lifecycle.
+
+interface AttnEntry {
+  hostId: string;
+  windowId: number;
+  /** Pane to land keyboard focus on (kept fresh while queued). */
+  paneId?: number;
+  since: number;
+}
+let attentionQueue: AttnEntry[] = [];
+
+function updateQueue(w: Workspace) {
+  const needy = new Map(
+    w.windowList
+      .filter((x) => x.agent === 'waiting' || x.agent === 'done')
+      .map((x) => [x.id, x.agent_pane]),
+  );
+  attentionQueue = attentionQueue.filter((e) => e.hostId !== w.id || needy.has(e.windowId));
+  for (const [winId, pane] of needy) {
+    const existing = attentionQueue.find((e) => e.hostId === w.id && e.windowId === winId);
+    if (existing) existing.paneId = pane; // keep position, refresh the target pane
+    else attentionQueue.push({ hostId: w.id, windowId: winId, paneId: pane, since: Date.now() });
+  }
+}
+
+// Jump to the oldest item that isn't the window you're already looking at.
+function jumpToAttention() {
+  attentionQueue = attentionQueue.filter((e) => workspaces.has(e.hostId));
+  const entry = attentionQueue.find(
+    (e) => !(workspaces.get(e.hostId) === activeWs && e.windowId === activeWs?.activeWindow),
+  );
+  if (!entry) {
+    toast(
+      attentionQueue.length
+        ? 'The only thing waiting on you is this window.'
+        : 'All clear — no agent needs you right now.',
+    );
+    return;
+  }
+  const w = workspaces.get(entry.hostId)!;
+  if (w !== activeWs) switchTo(w.id);
+  w.sendJson({ t: 'select_window', id: entry.windowId });
+  // Land keyboard focus on the agent's pane (no manual click). The daemon
+  // orders this after the window switch; the resulting state focuses locally.
+  if (entry.paneId != null) w.sendJson({ t: 'focus', pane: entry.paneId });
+}
+
+// Transient notice (bottom center, auto-fades).
+const toastEl = document.createElement('div');
+toastEl.className = 'toast';
+document.body.appendChild(toastEl);
+let toastTimer: number | undefined;
+function toast(msg: string) {
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => toastEl.classList.remove('show'), 1800);
+}
+
 // ---- workspace registry ----------------------------------------------------
 
 const workspaces = new Map<string, Workspace>();
@@ -51,6 +134,7 @@ function ensureWorkspace(id: string, label: string, port: number): Workspace {
     style: STYLE,
     hooks: {
       onUpdate(w) {
+        updateQueue(w);
         if (w === activeWs) {
           renderTabs(w);
           updateMeta();
@@ -89,6 +173,7 @@ function switchTo(id: string) {
 // A workspace is over (its session ended, or the user disconnected the host).
 function endWorkspace(w: Workspace, disconnectTunnel: boolean) {
   workspaces.delete(w.id);
+  attentionQueue = attentionQueue.filter((e) => e.hostId !== w.id);
   w.destroy();
   if (disconnectTunnel && isTauri) {
     void invoke('disconnect', { host_id: w.id }).catch(() => {});
@@ -153,7 +238,7 @@ function topAgent(windows: WinInfo[]): 'waiting' | 'done' | 'running' | undefine
 // than one connected host (always-show will become a profile setting).
 function renderHosts() {
   hostsEl.replaceChildren();
-  const show = workspaces.size >= 2;
+  const show = workspaces.size >= 2 || (prefs.hostBarAlways === true && workspaces.size >= 1);
   hostsEl.style.display = show ? 'flex' : 'none';
   if (!show) return;
   let i = 0;
@@ -194,6 +279,10 @@ function updateMeta() {
     : '';
 }
 
+// The ⏳/✓ summary doubles as the "take me there" button.
+agentsEl.title = 'Jump to the next window that needs you (⌘J)';
+agentsEl.addEventListener('click', jumpToAttention);
+
 function setStatus(state: WsState) {
   statusEl.className = `dot ${state}`;
 }
@@ -217,11 +306,29 @@ document.getElementById('btn-eph')?.addEventListener('click', () =>
 
 // ---- overlays ------------------------------------------------------------------
 
-const codePanel = initCodePanel({
+const codeOpts: CodePanelOpts = {
   getActivePane: () => active()?.activePane ?? null,
   getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
   getScope: () => active()?.id ?? 'local',
-});
+};
+// CodeMirror is heavy, so the code panel loads on first use (vite splits the
+// chunk); the wrapper keeps the synchronous interface the shell expects.
+let codeReal: CodePanel | null = null;
+let codeLoading = false;
+const codePanel = {
+  isOpen: () => codeReal?.isOpen() ?? false,
+  toggle: () => {
+    if (codeReal) return codeReal.toggle();
+    if (codeLoading) return;
+    codeLoading = true;
+    void import('./code').then((m) => {
+      codeReal = m.initCodePanel(codeOpts);
+      codeReal.toggle();
+    });
+  },
+  quickOpen: () => codeReal?.quickOpen(),
+  escape: () => codeReal?.escape() ?? false,
+};
 const procPanel = initProcPanel({
   getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
 });
@@ -263,6 +370,7 @@ function handleLeaderKey(e: KeyboardEvent) {
   const lower = k.toLowerCase();
   if (lower === 'c') return w.sendJson({ t: 'new_window' });
   if (lower === 'x') return w.closeActive();
+  if (lower === 'a') return jumpToAttention();
   if (lower === 't') return toggleProc();
   if (lower === 's') return w.sendJson({ t: 'new_ephemeral' });
   if (lower === 'd') return w.splitActive(e.shiftKey ? 'v' : 'h');
@@ -291,14 +399,19 @@ document.addEventListener(
       return;
     }
 
-    // With the code panel open, only ⌘E / Esc are ours — the rest goes to the editor.
+    // With the code panel open, only ⌘E / ⌘P / Esc are ours — the rest goes to
+    // the editor (or the quick-open input).
     if (codePanel.isOpen()) {
       if (mod(e) && e.key.toLowerCase() === 'e' && !e.shiftKey && !e.altKey) {
         e.preventDefault();
         e.stopPropagation();
         codePanel.toggle();
+      } else if (mod(e) && e.key.toLowerCase() === 'p' && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        codePanel.quickOpen();
       } else if (e.key === 'Escape') {
-        codePanel.toggle();
+        if (!codePanel.escape()) codePanel.toggle();
       }
       return;
     }
@@ -323,6 +436,11 @@ document.addEventListener(
     if (lower === 'e' && !e.shiftKey && !e.altKey) {
       stop();
       toggleCode();
+      return;
+    }
+    if (lower === 'j' && !e.shiftKey && !e.altKey) {
+      stop();
+      jumpToAttention();
       return;
     }
     if (lower === 'k' && !e.shiftKey && !e.altKey) {
@@ -381,12 +499,17 @@ document.addEventListener(
 if (isTauri) {
   hostManager = initHostManager({
     onConnected(host) {
+      localStorage.setItem('mymux.lastHost', host.id);
       ensureWorkspace(host.id, host.label, host.port);
       switchTo(host.id);
     },
     onDisconnected(hostId) {
       const w = workspaces.get(hostId);
       if (w) endWorkspace(w, false); // tunnel already torn down by the manager
+    },
+    prefs: {
+      hostBarAlways: () => prefs.hostBarAlways === true,
+      setHostBarAlways: (v) => savePrefs({ ...prefs, hostBarAlways: v }),
     },
   });
   const hostBtn = document.getElementById('btn-host');

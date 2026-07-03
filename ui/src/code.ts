@@ -59,6 +59,10 @@ async function gitDiff(pane: number | null, path: string): Promise<string> {
   const r = await fetch(`${apiBase()}/git/diff?${paneQ(pane)}path=${encodeURIComponent(path)}`);
   return r.ok ? r.text() : '';
 }
+async function gitFiles(pane: number | null): Promise<string[]> {
+  const r = await fetch(`${apiBase()}/git/files?${paneQ(pane)}`);
+  return r.ok ? r.json() : [];
+}
 
 function langFor(path: string): Extension {
   const ext = path.split('.').pop()?.toLowerCase() ?? '';
@@ -88,6 +92,10 @@ function langFor(path: string): Extension {
 export interface CodePanel {
   toggle(): void;
   isOpen(): boolean;
+  /** ⌘P: fuzzy-open a file from the repo. */
+  quickOpen(): void;
+  /** Esc pressed: returns true if consumed (e.g. closed quick-open). */
+  escape(): boolean;
 }
 
 // One code view per pane. The tree, the changes list and the editor are all
@@ -122,7 +130,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       <div class="code-tree" id="code-tree"></div>
     </div>
     <div class="code-main">
-      <div class="code-hd"><span id="code-path">no file open</span><span id="code-hint">⌘S save · esc / ⌘E close</span></div>
+      <div class="code-hd"><span id="code-path">no file open</span><span id="code-hint">⌘P open · ⌘S save · esc / ⌘E close</span></div>
       <div class="code-editor" id="code-editor"></div>
       <div class="code-diff" id="code-diff"></div>
       <div class="code-ph" id="code-ph"></div>
@@ -386,12 +394,115 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     editor?.focus();
   }
 
+  // ---- quick open (⌘P): fuzzy over the repo's files (git ls-files) ---------
+  const qoEl = document.createElement('div');
+  qoEl.className = 'qopen';
+  qoEl.style.display = 'none';
+  qoEl.innerHTML = `<input class="qopen-input" placeholder="Open file…" spellcheck="false"><div class="qopen-list"></div>`;
+  panel.appendChild(qoEl);
+  const qoInput = qoEl.querySelector('.qopen-input') as HTMLInputElement;
+  const qoList = qoEl.querySelector('.qopen-list') as HTMLElement;
+  let qoAll: string[] = [];
+  let qoShown: string[] = [];
+  let qoSel = 0;
+  let qoVisible = false;
+
+  // Subsequence match, ranked: basename prefix > basename substring > path
+  // substring > scattered subsequence; shorter paths win ties.
+  function fuzzy(q: string, files: string[]): string[] {
+    if (!q) return files.slice(0, 50);
+    const lq = q.toLowerCase();
+    const scored: Array<[number, string]> = [];
+    for (const f of files) {
+      const lf = f.toLowerCase();
+      let qi = 0;
+      for (let i = 0; i < lf.length && qi < lq.length; i++) if (lf[i] === lq[qi]) qi++;
+      if (qi < lq.length) continue;
+      const base = lf.slice(lf.lastIndexOf('/') + 1);
+      const rank = base.startsWith(lq) ? 0 : base.includes(lq) ? 1 : lf.includes(lq) ? 2 : 3;
+      scored.push([rank * 10000 + f.length, f]);
+    }
+    scored.sort((a, b) => a[0] - b[0]);
+    return scored.slice(0, 50).map((x) => x[1]);
+  }
+
+  function renderQo() {
+    qoList.replaceChildren();
+    qoShown.forEach((f, i) => {
+      const row = document.createElement('div');
+      row.className = 'qopen-row' + (i === qoSel ? ' sel' : '');
+      row.textContent = f;
+      row.addEventListener('click', () => pickQo(f));
+      qoList.appendChild(row);
+    });
+    if (!qoShown.length) {
+      const empty = document.createElement('div');
+      empty.className = 'qopen-empty';
+      empty.textContent = qoAll.length ? 'no match' : 'not a git repo (or no files)';
+      qoList.appendChild(empty);
+    }
+  }
+
+  function pickQo(f: string) {
+    closeQuickOpen();
+    void openFile(f);
+  }
+
+  function closeQuickOpen() {
+    qoVisible = false;
+    qoEl.style.display = 'none';
+  }
+
+  async function quickOpen() {
+    qoVisible = true;
+    qoEl.style.display = '';
+    qoInput.value = '';
+    qoSel = 0;
+    qoShown = [];
+    renderQo();
+    qoInput.focus();
+    qoAll = await gitFiles(current?.pane ?? null);
+    if (!qoVisible) return;
+    qoShown = fuzzy('', qoAll);
+    renderQo();
+  }
+
+  qoInput.addEventListener('input', () => {
+    qoSel = 0;
+    qoShown = fuzzy(qoInput.value.trim(), qoAll);
+    renderQo();
+  });
+  qoInput.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      qoSel = Math.min(qoSel + 1, Math.max(0, qoShown.length - 1));
+      renderQo();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      qoSel = Math.max(qoSel - 1, 0);
+      renderQo();
+    } else if (e.key === 'Enter' && qoShown[qoSel]) {
+      pickQo(qoShown[qoSel]);
+    }
+  });
+
   return {
     isOpen: () => open,
+    quickOpen: () => {
+      if (open) void quickOpen();
+    },
+    escape: () => {
+      if (qoVisible) {
+        closeQuickOpen();
+        return true;
+      }
+      return false;
+    },
     toggle() {
       if (open) {
         // Closing preserves the session (edits live on for the next open), so
         // there is nothing to discard here.
+        closeQuickOpen();
         open = false;
         panel.classList.remove('show');
         return;

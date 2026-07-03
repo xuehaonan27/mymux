@@ -50,6 +50,31 @@ pub async fn status(Query(q): Query<StatusQuery>) -> Json<Vec<GitFile>> {
     Json(files)
 }
 
+/// `GET /git/files?pane=<id>` — tracked + untracked (non-ignored) files, for
+/// the code panel's quick-open. Empty outside a repo; capped.
+pub async fn files(Query(q): Query<StatusQuery>) -> Json<Vec<String>> {
+    const CAP: usize = 20_000;
+    let root = root_for(q.pane).await;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+        .output()
+        .await;
+    let Ok(out) = out else { return Json(vec![]) };
+    if !out.status.success() {
+        return Json(vec![]);
+    }
+    let files = out
+        .stdout
+        .split(|&b| b == 0)
+        .filter(|p| !p.is_empty())
+        .take(CAP)
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect();
+    Json(files)
+}
+
 #[derive(Deserialize)]
 pub struct DiffQuery {
     #[serde(default)]

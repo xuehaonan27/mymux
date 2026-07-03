@@ -41,9 +41,10 @@ Honest counterweight: no acute pain forces this — drivers are strategic (own t
 stack; per-window sizes; multi-client semantics; kill the control-mode boundary
 that caused most historical bugs). Don't start before multi-host/LSP priorities.
 
-## Multi-host — SHIPPED 2026-07-03 (Mac verify pending); remaining polish
-- Remember open hosts in hosts.json and offer to reconnect them at launch.
-- Per-host reconnect banners inside the workspace (today only the status dot).
+## Multi-host — SHIPPED 2026-07-03; remaining polish
+- ~~Remember open hosts~~ → the manager now boots into last time's host
+  (passphrase prompt pre-opened); remembering the full multi-host set is still open.
+- ~~Per-host reconnect banners~~ → done (in-workspace banner when its WS drops).
 - Chip overflow behavior for many hosts (scroll / compact mode).
 
 ## Attach to an existing tmux session — decided against (2026-07-03)
@@ -53,11 +54,15 @@ server's config (no truecolor conf), couple sizes with other attached clients,
 and break the one-session-per-control-client model — not worth it; a standalone
 tmux stays standalone.
 
-## Settings / user profile (not started)
-- A small persisted settings store (`~/.config/mymux/settings.json` or alongside
-  hosts.json) surfaced in the app.
-- First setting: **always show the host bar even with a single host** (today it
-  auto-hides below 2 connected hosts).
+## Pane-granular attention — DONE 2026-07-03
+`WinMsg.agent_pane` carries the pane holding the window's agent state; ⌘J sends
+`focus{pane}` after `select_window`, so keyboard focus lands on the agent's pane.
+**Requirement to preserve when the native engine/protocol replaces tmux.**
+
+## Settings / user profile (started minimally)
+- DONE: client-side prefs in localStorage (`mymux.prefs`), first setting "always
+  show the host bar" as a checkbox in the host manager.
+- Open: a proper persisted settings store + a real settings surface.
 
 ## Misc
 - Tighten the daemon's HTTP surface (per-session token in addition to the CORS allowlist).

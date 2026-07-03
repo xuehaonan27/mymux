@@ -33,6 +33,9 @@ body {
   margin-left: 12px;
   color: #5c6773;
 }
+#agents {
+  cursor: pointer;
+}
 .dot {
   width: 8px;
   height: 8px;
@@ -620,4 +623,101 @@ body {
   color: #5c6773;
   font-size: 12px;
   max-width: 48ch;
+}
+
+/* Transient notice (attention queue "all clear", etc.). */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 42px;
+  transform: translateX(-50%) translateY(6px);
+  padding: 8px 14px;
+  font: 12px ui-monospace, Menlo, monospace;
+  color: #c5cdd9;
+  background: #161b27;
+  border: 1px solid #2f3947;
+  border-radius: 8px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  z-index: 50;
+}
+.toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* Per-workspace connection banner (visible when its WS isn't open). */
+.ws-banner {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 4px 12px;
+  font: 11px ui-monospace, Menlo, monospace;
+  color: #0b0e14;
+  background: #d6a04c;
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+/* Quick open (⌘P) palette inside the code panel. */
+.qopen {
+  position: absolute;
+  top: 46px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 520px;
+  max-width: 80vw;
+  display: flex;
+  flex-direction: column;
+  background: #11151d;
+  border: 1px solid #2f3947;
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  z-index: 5;
+}
+.qopen-input {
+  padding: 10px 12px;
+  background: #0d1017;
+  border: 0;
+  border-bottom: 1px solid #1e2430;
+  color: #e6edf3;
+  font: 13px ui-monospace, Menlo, monospace;
+  outline: none;
+}
+.qopen-list {
+  max-height: 320px;
+  overflow: auto;
+  font: 12px/1.7 ui-monospace, Menlo, monospace;
+}
+.qopen-row {
+  padding: 2px 12px;
+  color: #adbac7;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.qopen-row:hover {
+  background: #161b27;
+}
+.qopen-row.sel {
+  background: #1c2433;
+  color: #e6edf3;
+}
+.qopen-empty {
+  padding: 10px 12px;
+  color: #5c6773;
+}
+.host-pref {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #8b949e;
+  font-size: 12px;
+  margin-top: 4px;
+  cursor: pointer;
 }

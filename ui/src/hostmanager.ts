@@ -46,6 +46,11 @@ export interface HostManagerHooks {
   onConnected(host: { id: string; label: string; port: number }): void;
   /** The user disconnected a host from the manager; its tunnel is already down. */
   onDisconnected(hostId: string): void;
+  /** Client-side prefs surfaced in the manager (host bar visibility). */
+  prefs: {
+    hostBarAlways(): boolean;
+    setHostBarAlways(v: boolean): void;
+  };
 }
 
 export interface HostManager {
@@ -63,6 +68,8 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   // their workspaces live their own lives.
   let attempt: { host: Host; passphrase: string; port: number | null } | null = null;
   let statusEl: HTMLElement | null = null;
+  // On first open, jump straight to last time's host (one keystroke to be back in).
+  let bootedToLast = false;
 
   const el = (tag: string, cls?: string, text?: string): HTMLElement => {
     const e = document.createElement(tag);
@@ -110,7 +117,21 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     const add = el('button', 'host-btn', '+ Add host');
     add.onclick = () => showForm();
     root.appendChild(add);
+    const pref = el('label', 'host-pref');
+    const cb = el('input') as HTMLInputElement;
+    cb.type = 'checkbox';
+    cb.checked = hooks.prefs.hostBarAlways();
+    cb.onchange = () => hooks.prefs.setHostBarAlways(cb.checked);
+    pref.append(cb, document.createTextNode(' Always show the host bar'));
+    root.appendChild(pref);
     panel.replaceChildren(root);
+
+    if (!bootedToLast) {
+      bootedToLast = true;
+      const last = localStorage.getItem('mymux.lastHost');
+      const h = last ? store.hosts.find((x) => x.id === last) : undefined;
+      if (h && !conns.has(h.id)) showConnect(h);
+    }
   }
 
   function hostCard(h: Host, conn?: ConnInfo): HTMLElement {
