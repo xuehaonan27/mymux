@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use mux_core::{parse_layout, ControlEvent, Model, PaneId, Parser, WindowId};
@@ -90,6 +90,8 @@ pub struct Hub {
     /// Last whole-window size (cols, rows) the UI reported — the sizer for
     /// ephemeral panes, which tmux does not lay out.
     last_size: Mutex<(u16, u16)>,
+    /// Self-reference so `send_cmd` can respawn the control client on demand.
+    me: Weak<Hub>,
 }
 
 impl Hub {
@@ -99,7 +101,7 @@ impl Hub {
         if let Err(e) = std::fs::write(&conf_path, TMUX_CONF) {
             eprintln!("mymuxd: could not write tmux config: {e}");
         }
-        Arc::new(Self {
+        Arc::new_cyclic(|me| Self {
             events_tx,
             state: Mutex::new(TmuxState::default()),
             model: Arc::new(Mutex::new(Model::new())),
@@ -108,6 +110,7 @@ impl Hub {
             ptys: Mutex::new(PtyManager::default()),
             active_view: Mutex::new(ActiveView::Tmux),
             last_size: Mutex::new((80, 24)),
+            me: me.clone(),
         })
     }
 
@@ -161,16 +164,43 @@ impl Hub {
 
         let hub = self.clone();
         tokio::spawn(async move {
+            let started = Instant::now();
             let status = child.wait().await;
             eprintln!("mymuxd: tmux control client exited: {status:?}");
-            let mut state = hub.state.lock().unwrap();
-            state.running = false;
-            state.cmd_tx = None;
+            {
+                let mut state = hub.state.lock().unwrap();
+                state.running = false;
+                state.cmd_tx = None;
+            }
+            // Self-heal: while UIs are attached, respawn the session so exiting
+            // the last pane never bricks the workspace. A client that died fast
+            // backs off, so a broken tmux can't crash-loop us.
+            if hub.events_tx.receiver_count() == 0 {
+                return; // the next WS connection respawns via ensure_started
+            }
+            let delay = if started.elapsed() < Duration::from_secs(10) {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_millis(500)
+            };
+            tokio::time::sleep(delay).await;
+            if hub.events_tx.receiver_count() > 0 {
+                hub.ensure_started();
+            }
         });
     }
 
     async fn send_cmd(&self, cmd: String) {
-        let tx = self.state.lock().unwrap().cmd_tx.clone();
+        let mut tx = self.state.lock().unwrap().cmd_tx.clone();
+        if tx.is_none() {
+            // The control client is gone (e.g. the last pane exited and took the
+            // session with it). Respawn on demand so a live UI never sends into
+            // the void; `new-session -A` re-attaches or creates as needed.
+            if let Some(hub) = self.me.upgrade() {
+                hub.ensure_started();
+                tx = self.state.lock().unwrap().cmd_tx.clone();
+            }
+        }
         if let Some(tx) = tx {
             let _ = tx.send(cmd).await;
         }
