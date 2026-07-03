@@ -2,7 +2,8 @@
 // /proc/tree, with a scoped per-row kill (POST /proc/kill). Follows the same
 // overlay pattern as code.ts.
 
-const API = 'http://127.0.0.1:8088';
+// Resolved per call so the panel follows the active workspace's daemon.
+let apiBase = () => 'http://127.0.0.1:8088';
 
 interface ProcNode {
   pid: number;
@@ -42,7 +43,8 @@ const fmtMem = (kb: number) =>
       : kb + 'K';
 
 /** The process-tree overlay (a lightweight, scoped top/htop). */
-export function initProcPanel(): ProcPanel {
+export function initProcPanel(opts: { getApiBase: () => string }): ProcPanel {
+  apiBase = opts.getApiBase;
   const panel = document.createElement('div');
   panel.id = 'proc';
   panel.className = 'proc-panel';
@@ -60,7 +62,7 @@ export function initProcPanel(): ProcPanel {
 
   async function kill(pid: number, hard: boolean) {
     try {
-      await fetch(`${API}/proc/kill`, {
+      await fetch(`${apiBase()}/proc/kill`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ pid, signal: hard ? 'KILL' : 'TERM' }),
@@ -112,7 +114,7 @@ export function initProcPanel(): ProcPanel {
   async function poll() {
     let tree: ProcTree;
     try {
-      const r = await fetch(`${API}/proc/tree`);
+      const r = await fetch(`${apiBase()}/proc/tree`);
       if (!r.ok) return;
       tree = await r.json();
     } catch {

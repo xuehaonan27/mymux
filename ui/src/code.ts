@@ -8,7 +8,8 @@ import { python } from '@codemirror/lang-python';
 import { json } from '@codemirror/lang-json';
 import { markdown } from '@codemirror/lang-markdown';
 
-const API = 'http://127.0.0.1:8088';
+// Resolved per call so the panel follows the active workspace's daemon.
+let apiBase = () => 'http://127.0.0.1:8088';
 
 // Make the editor fill its (bounded) parent AND scroll on wheel/trackpad — this
 // has to be a CodeMirror theme, not just CSS, or the scroller never enables.
@@ -30,16 +31,16 @@ interface GitFile {
 const paneQ = (pane: number | null) => (pane != null ? `pane=${pane}&` : '');
 
 async function fsList(pane: number | null, path: string): Promise<FsEntry[]> {
-  const r = await fetch(`${API}/fs/list?${paneQ(pane)}path=${encodeURIComponent(path)}`);
+  const r = await fetch(`${apiBase()}/fs/list?${paneQ(pane)}path=${encodeURIComponent(path)}`);
   return r.ok ? r.json() : [];
 }
 async function fsRead(pane: number | null, path: string): Promise<string> {
-  const r = await fetch(`${API}/fs/read?${paneQ(pane)}path=${encodeURIComponent(path)}`);
+  const r = await fetch(`${apiBase()}/fs/read?${paneQ(pane)}path=${encodeURIComponent(path)}`);
   if (!r.ok) throw new Error(`read ${path}: ${r.status}`);
   return r.text();
 }
 async function fsWrite(pane: number | null, path: string, content: string): Promise<boolean> {
-  const r = await fetch(`${API}/fs/write`, {
+  const r = await fetch(`${apiBase()}/fs/write`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ path, content, pane: pane ?? undefined }),
@@ -47,11 +48,11 @@ async function fsWrite(pane: number | null, path: string, content: string): Prom
   return r.ok;
 }
 async function gitStatus(pane: number | null): Promise<GitFile[]> {
-  const r = await fetch(`${API}/git/status?${paneQ(pane)}`);
+  const r = await fetch(`${apiBase()}/git/status?${paneQ(pane)}`);
   return r.ok ? r.json() : [];
 }
 async function gitDiff(pane: number | null, path: string): Promise<string> {
-  const r = await fetch(`${API}/git/diff?${paneQ(pane)}path=${encodeURIComponent(path)}`);
+  const r = await fetch(`${apiBase()}/git/diff?${paneQ(pane)}path=${encodeURIComponent(path)}`);
   return r.ok ? r.text() : '';
 }
 
@@ -95,8 +96,17 @@ interface Session {
   state: EditorState | null; // editor doc + history, preserved across pane switches
 }
 
+export interface CodePanelOpts {
+  getActivePane: () => number | null;
+  /** The active workspace's daemon base URL (multi-host: differs per host). */
+  getApiBase: () => string;
+  /** Scope key for per-pane sessions — pane ids collide across hosts. */
+  getScope: () => string;
+}
+
 /** The ⌘E code overlay, rooted at the focused pane's cwd. */
-export function initCodePanel(getActivePane: () => number | null): CodePanel {
+export function initCodePanel(opts: CodePanelOpts): CodePanel {
+  apiBase = opts.getApiBase;
   const panel = document.createElement('div');
   panel.id = 'code';
   panel.className = 'code-panel';
@@ -122,11 +132,11 @@ export function initCodePanel(getActivePane: () => number | null): CodePanel {
   diffEl.style.display = 'none';
 
   let editor: EditorView | null = null;
-  const sessions = new Map<number, Session>();
+  const sessions = new Map<string, Session>();
   let current: Session | null = null;
   let open = false;
 
-  const keyOf = (p: number | null) => p ?? -1;
+  const keyOf = (p: number | null) => `${opts.getScope()}:${p ?? -1}`;
   function sessionFor(p: number | null): Session {
     const k = keyOf(p);
     let s = sessions.get(k);
@@ -347,7 +357,7 @@ export function initCodePanel(getActivePane: () => number | null): CodePanel {
       }
       open = true;
       panel.classList.add('show');
-      showSession(getActivePane());
+      showSession(opts.getActivePane());
     },
   };
 }

@@ -1,323 +1,227 @@
-import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import './style.css';
+import { invoke } from '@tauri-apps/api/core';
 import { measureCell } from './metrics';
 import { initCodePanel } from './code';
 import { initProcPanel } from './proc';
 import { initHostManager } from './hostmanager';
+import { Workspace, WinInfo, WsState } from './workspace';
 
-// M1.2: render tmux's full window layout. The daemon pushes a JSON state
-// snapshot (window list + layout tree + active pane) and pane-addressed output;
-// we mirror it with one xterm per pane, absolutely positioned by cell geometry
-// (faithful to tmux, the authoritative sizer).
+// The shell: a registry of per-host Workspaces (each owns its WS + panes; see
+// workspace.ts), the shared bar (host chips / window tabs / agent counts), the
+// overlays, and keybindings routed to the visible workspace.
 
-type Kind = 'leaf' | 'cols' | 'rows';
-interface LayoutNode {
-  kind: Kind;
-  pane?: number;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  children?: LayoutNode[];
-}
-interface WinInfo {
-  id: number;
-  name: string;
-  active: boolean;
-  agent?: 'running' | 'waiting' | 'done';
-  ephemeral?: boolean;
-}
-interface StateMsg {
-  t: string;
-  active_window: number | null;
-  active_pane: number | null;
-  windows: WinInfo[];
-  layout: LayoutNode | null;
-}
-
-// 127.0.0.1 works both under the port-forwarded browser and inside the Tauri
-// app (whose webview host is tauri.localhost, not the machine itself).
-const WS_URL = 'ws://127.0.0.1:8088/ws';
 const FONT = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 const FONT_SIZE = 13;
 const LINE_HEIGHT = 1.2;
 const THEME = { background: '#0b0e14', foreground: '#c5cdd9' };
-
 const { cellW, cellH } = measureCell(FONT, FONT_SIZE, LINE_HEIGHT);
+const STYLE = { font: FONT, fontSize: FONT_SIZE, lineHeight: LINE_HEIGHT, theme: THEME, cellW, cellH };
 
 const termArea = document.getElementById('term') as HTMLDivElement;
 const tabsEl = document.getElementById('tabs') as HTMLDivElement;
+const hostsEl = document.getElementById('hosts') as HTMLElement;
 const statusEl = document.getElementById('status')!;
 const metaEl = document.getElementById('meta')!;
 const agentsEl = document.getElementById('agents')!;
-
-interface Pane {
-  term: Terminal;
-  el: HTMLDivElement;
-}
-const panes = new Map<number, Pane>();
-let activePane: number | null = null;
-let activeWindow: number | null = null;
-let windowList: WinInfo[] = [];
-let ws: WebSocket | undefined;
-
-function makePane(id: number): Pane {
-  const el = document.createElement('div');
-  el.className = 'pane';
-  el.addEventListener('mousedown', () => focusPane(id));
-  termArea.appendChild(el);
-
-  const term = new Terminal({
-    fontFamily: FONT,
-    fontSize: FONT_SIZE,
-    lineHeight: LINE_HEIGHT,
-    scrollback: 10000,
-    cursorBlink: true,
-    theme: THEME,
-  });
-  term.open(el);
-  term.onData((d) => sendInput(id, d));
-
-  const pane: Pane = { term, el };
-  panes.set(id, pane);
-  return pane;
-}
-
-function focusPane(id: number) {
-  sendJson({ t: 'focus', pane: id });
-  setActivePane(id);
-  panes.get(id)?.term.focus();
-}
-
-function setActivePane(id: number | null) {
-  const changed = id !== activePane;
-  activePane = id;
-  for (const [pid, p] of panes) p.el.classList.toggle('active', pid === id);
-  // Give the newly-active pane keyboard focus so typing and nav land there.
-  if (changed && id != null) panes.get(id)?.term.focus();
-}
-
-// Place each leaf pane at its exact cell rectangle; dispose panes that vanished.
-function applyLayout(root: LayoutNode) {
-  const seen = new Set<number>();
-  const place = (n: LayoutNode) => {
-    if (n.kind === 'leaf' && n.pane != null) {
-      const p = panes.get(n.pane) ?? makePane(n.pane);
-      p.el.style.left = `${n.x * cellW}px`;
-      p.el.style.top = `${n.y * cellH}px`;
-      p.el.style.width = `${n.w * cellW}px`;
-      p.el.style.height = `${n.h * cellH}px`;
-      if (p.term.cols !== n.w || p.term.rows !== n.h) {
-        p.term.resize(Math.max(1, n.w), Math.max(1, n.h));
-      }
-      seen.add(n.pane);
-    } else {
-      n.children?.forEach(place);
-    }
-  };
-  place(root);
-
-  for (const [pid, p] of [...panes]) {
-    if (!seen.has(pid)) {
-      p.term.dispose();
-      p.el.remove();
-      panes.delete(pid);
-    }
-  }
-}
-
-function renderTabs(windows: WinInfo[]) {
-  tabsEl.replaceChildren();
-  for (const w of windows) {
-    const tab = document.createElement('button');
-    tab.className = 'tab' + (w.active ? ' active' : '') + (w.ephemeral ? ' ephemeral' : '');
-    if (w.agent) {
-      const dot = document.createElement('span');
-      dot.className = `adot agent-${w.agent}`;
-      tab.appendChild(dot);
-    }
-    tab.appendChild(document.createTextNode((w.ephemeral ? '⌁ ' : '') + (w.name || `@${w.id}`)));
-    tab.addEventListener('click', () => sendJson({ t: 'select_window', id: w.id }));
-    tabsEl.appendChild(tab);
-  }
-  // Glance summary: how many windows want your attention.
-  const waiting = windows.filter((w) => w.agent === 'waiting').length;
-  const done = windows.filter((w) => w.agent === 'done').length;
-  const parts: string[] = [];
-  if (waiting) parts.push(`⏳ ${waiting} waiting`);
-  if (done) parts.push(`✓ ${done} done`);
-  agentsEl.textContent = parts.join('  ·  ');
-}
-
-function updateMeta(windows: number) {
-  metaEl.textContent = `${windows} win · pane ${activePane ?? '?'}`;
-}
-
-function onState(json: string) {
-  let msg: StateMsg;
-  try {
-    msg = JSON.parse(json);
-  } catch {
-    return;
-  }
-  if (msg.t === 'session_end') return onSessionEnd();
-  if (msg.t !== 'state') return;
-  windowList = msg.windows;
-  activeWindow = msg.active_window;
-  renderTabs(msg.windows);
-  if (msg.layout) {
-    applyLayout(msg.layout);
-    nudgeSizeIfMismatched(msg.layout);
-  }
-  setActivePane(msg.active_pane);
-  updateMeta(msg.windows.length);
-}
-
-// The tmux session is over (the last pane exited) — "done with this host". In
-// the app we return to the host manager; in a browser (no host manager) we
-// close the socket and let the reconnect start a fresh session.
-function onSessionEnd() {
-  for (const [pid, p] of panes) {
-    p.term.dispose();
-    p.el.remove();
-    panes.delete(pid);
-  }
-  windowList = [];
-  activeWindow = null;
-  setActivePane(null);
-  renderTabs([]);
-  updateMeta(0);
-  if (hostManager) {
-    suspended = true;
-    ws?.close();
-    hostManager.open();
-  } else {
-    ws?.close();
-  }
-}
-
-function onBinary(buf: ArrayBuffer) {
-  if (buf.byteLength < 4) return;
-  const pane = new DataView(buf).getUint32(0, true);
-  // Only render output for panes in the active window's layout. Output for a
-  // background pane is dropped (switching to that window triggers a fresh
-  // snapshot); creating a pane here would overlap, unpositioned.
-  const p = panes.get(pane);
-  if (p) p.term.write(new Uint8Array(buf, 4));
-}
-
-function sendJson(obj: unknown) {
-  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
-}
-
-function sendInput(pane: number, data: string) {
-  if (ws?.readyState !== WebSocket.OPEN) return;
-  const payload = new TextEncoder().encode(data);
-  const buf = new Uint8Array(4 + payload.length);
-  new DataView(buf.buffer).setUint32(0, pane, true);
-  buf.set(payload, 4);
-  ws.send(buf);
-}
-
-// We are the screen; tmux is the authoritative sizer. Report the whole-window
-// size in cells; tmux splits it and pushes back the per-pane layout.
-function desiredSize() {
-  return {
-    cols: Math.max(20, Math.floor(termArea.clientWidth / cellW)),
-    rows: Math.max(5, Math.floor(termArea.clientHeight / cellH)),
-  };
-}
-
-function sendResize() {
-  const { cols, rows } = desiredSize();
-  sendJson({ t: 'resize', cols, rows });
-}
-
-// Size self-healing: if a state snapshot is laid out at a size other than ours
-// (e.g. a session created at tmux's default 80x24 before our resize landed),
-// nudge the daemon. Rate-limited so a size we can't win (another attached tmux
-// client clamping it) degrades to a slow nudge instead of a loop.
-let lastSizeNudge = 0;
-function nudgeSizeIfMismatched(root: LayoutNode) {
-  const { cols, rows } = desiredSize();
-  if (root.w === cols && root.h === rows) return;
-  const now = Date.now();
-  if (now - lastSizeNudge < 1500) return;
-  lastSizeNudge = now;
-  sendJson({ t: 'resize', cols, rows });
-}
-
-function setStatus(state: 'connecting' | 'open' | 'closed') {
-  statusEl.className = `dot ${state}`;
-}
-
-let reconnectPending = false;
-// True while the host manager is in charge (session ended / switching hosts):
-// the terminal must not touch the socket until the next successful connect.
-let suspended = false;
-let hostManager: { open(): void } | null = null;
-
-function scheduleReconnect() {
-  if (suspended || reconnectPending) return;
-  reconnectPending = true;
-  setStatus('closed');
-  window.setTimeout(() => {
-    reconnectPending = false;
-    connect();
-  }, 1000);
-}
-
-function connect() {
-  if (suspended) return;
-  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-  setStatus('connecting');
-  ws = new WebSocket(WS_URL);
-  ws.binaryType = 'arraybuffer';
-  ws.onopen = () => {
-    setStatus('open');
-    sendResize();
-  };
-  ws.onmessage = (ev) => {
-    if (typeof ev.data === 'string') onState(ev.data);
-    else if (ev.data instanceof ArrayBuffer) onBinary(ev.data);
-  };
-  // Reconnect on both close and error: a connection refused during the tunnel's
-  // down-window may fire only one of them.
-  ws.onclose = () => scheduleReconnect();
-  ws.onerror = () => scheduleReconnect();
-}
-
-let resizeTimer: number | undefined;
-new ResizeObserver(() => {
-  window.clearTimeout(resizeTimer);
-  resizeTimer = window.setTimeout(sendResize, 100);
-}).observe(termArea);
-
-// Temporary toolbar buttons so M1.2 is demonstrable; M1.3 adds keybindings.
-function cmdBtn(id: string, make: () => unknown) {
-  document.getElementById(id)?.addEventListener('click', () => {
-    const m = make();
-    if (m) sendJson(m);
-  });
-}
-cmdBtn('btn-newwin', () => ({ t: 'new_window' }));
-cmdBtn('btn-splith', () => (activePane != null ? { t: 'split', pane: activePane, dir: 'h' } : null));
-cmdBtn('btn-splitv', () => (activePane != null ? { t: 'split', pane: activePane, dir: 'v' } : null));
-cmdBtn('btn-eph', () => ({ t: 'new_ephemeral' }));
-
-// ---- Keybindings (M1.3): a Cmd/Ctrl+K leader for everything, plus a few
-// non-conflicting direct combos. The Tauri app (M2) can bind the rest of the
-// iTerm2-style direct combos that the browser reserves (Cmd+T/W/1-9). ----
 const hintEl = document.getElementById('hint')!;
+
 const isMac = /Mac|iPhone|iPad/.test(navigator.userAgent);
 const mod = (e: KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey);
 // In the Tauri app there is no browser reserving Cmd+T/W/1-9, so we bind the
 // full iTerm2 set there; in a browser those stay on the ⌘K leader.
 const isTauri = '__TAURI_INTERNALS__' in window || '__TAURI__' in window;
 
-const codePanel = initCodePanel(() => activePane);
-const procPanel = initProcPanel();
+// ---- workspace registry ----------------------------------------------------
+
+const workspaces = new Map<string, Workspace>();
+let activeWs: Workspace | null = null;
+const active = () => activeWs;
+let hostManager: { open(): void } | null = null;
+
+function ensureWorkspace(id: string, label: string, port: number): Workspace {
+  const existing = workspaces.get(id);
+  if (existing) return existing;
+  const w = new Workspace({
+    id,
+    label,
+    wsUrl: `ws://127.0.0.1:${port}/ws`,
+    apiBase: `http://127.0.0.1:${port}`,
+    container: termArea,
+    style: STYLE,
+    hooks: {
+      onUpdate(w) {
+        if (w === activeWs) {
+          renderTabs(w);
+          updateMeta();
+        }
+        renderHosts();
+        renderAgents();
+      },
+      onStatus(w, s) {
+        if (w === activeWs) setStatus(s);
+      },
+      onSessionEnd(w) {
+        endWorkspace(w, true);
+      },
+    },
+  });
+  workspaces.set(id, w);
+  w.connect();
+  return w;
+}
+
+function switchTo(id: string) {
+  const w = workspaces.get(id);
+  if (!w) return;
+  if (activeWs !== w) {
+    activeWs?.hide();
+    activeWs = w;
+    w.show();
+  }
+  renderTabs(w);
+  renderHosts();
+  renderAgents();
+  updateMeta();
+  setStatus(w.state());
+}
+
+// A workspace is over (its session ended, or the user disconnected the host).
+function endWorkspace(w: Workspace, disconnectTunnel: boolean) {
+  workspaces.delete(w.id);
+  w.destroy();
+  if (disconnectTunnel && isTauri) {
+    void invoke('disconnect', { host_id: w.id }).catch(() => {});
+  }
+  if (activeWs === w) activeWs = null;
+  if (activeWs === null) {
+    const next = [...workspaces.values()].pop();
+    if (next) {
+      switchTo(next.id);
+      return;
+    }
+    renderTabs(null);
+    renderHosts();
+    renderAgents();
+    updateMeta();
+    setStatus('closed');
+    if (isTauri) {
+      hostManager?.open();
+    } else {
+      // Browser (no host manager): start a fresh session right away.
+      ensureWorkspace('local', 'local', 8088);
+      switchTo('local');
+    }
+    return;
+  }
+  renderHosts();
+  renderAgents();
+}
+
+// ---- shared bar rendering ----------------------------------------------------
+
+function renderTabs(w: Workspace | null) {
+  tabsEl.replaceChildren();
+  if (!w) return;
+  for (const win of w.windowList) {
+    const tab = document.createElement('button');
+    tab.className = 'tab' + (win.active ? ' active' : '') + (win.ephemeral ? ' ephemeral' : '');
+    if (win.agent) {
+      const dot = document.createElement('span');
+      dot.className = `adot agent-${win.agent}`;
+      tab.appendChild(dot);
+    }
+    tab.appendChild(
+      document.createTextNode((win.ephemeral ? '⌁ ' : '') + (win.name || `@${win.id}`)),
+    );
+    tab.addEventListener('click', () => w.sendJson({ t: 'select_window', id: win.id }));
+    tabsEl.appendChild(tab);
+  }
+}
+
+/** The most attention-worthy agent state across a host's windows. */
+function topAgent(windows: WinInfo[]): 'waiting' | 'done' | 'running' | undefined {
+  let best: 'waiting' | 'done' | 'running' | undefined;
+  const prio = { waiting: 3, done: 2, running: 1 } as const;
+  for (const w of windows) {
+    if (w.agent && (!best || prio[w.agent] > prio[best])) best = w.agent;
+  }
+  return best;
+}
+
+// Host chips: one per connected workspace (shown once there's more than one).
+function renderHosts() {
+  hostsEl.replaceChildren();
+  if (workspaces.size < 2) return;
+  let i = 0;
+  for (const w of workspaces.values()) {
+    i += 1;
+    const chip = document.createElement('button');
+    chip.className = 'hostchip' + (w === activeWs ? ' active' : '');
+    chip.title = `switch host (⌘⇧${i})`;
+    const agent = topAgent(w.windowList);
+    if (agent) {
+      const dot = document.createElement('span');
+      dot.className = `adot agent-${agent}`;
+      chip.appendChild(dot);
+    }
+    chip.appendChild(document.createTextNode(w.label));
+    chip.addEventListener('click', () => switchTo(w.id));
+    hostsEl.appendChild(chip);
+  }
+}
+
+// Glance summary across ALL hosts: how many windows want your attention.
+function renderAgents() {
+  let waiting = 0;
+  let done = 0;
+  for (const w of workspaces.values()) {
+    waiting += w.windowList.filter((x) => x.agent === 'waiting').length;
+    done += w.windowList.filter((x) => x.agent === 'done').length;
+  }
+  const parts: string[] = [];
+  if (waiting) parts.push(`⏳ ${waiting} waiting`);
+  if (done) parts.push(`✓ ${done} done`);
+  agentsEl.textContent = parts.join('  ·  ');
+}
+
+function updateMeta() {
+  metaEl.textContent = activeWs
+    ? `${activeWs.windowList.length} win · pane ${activeWs.activePane ?? '?'}`
+    : '';
+}
+
+function setStatus(state: WsState) {
+  statusEl.className = `dot ${state}`;
+}
+
+let resizeTimer: number | undefined;
+new ResizeObserver(() => {
+  window.clearTimeout(resizeTimer);
+  resizeTimer = window.setTimeout(() => active()?.sendResize(), 100);
+}).observe(termArea);
+
+// ---- toolbar -----------------------------------------------------------------
+
+document.getElementById('btn-newwin')?.addEventListener('click', () =>
+  active()?.sendJson({ t: 'new_window' }),
+);
+document.getElementById('btn-splith')?.addEventListener('click', () => active()?.splitActive('h'));
+document.getElementById('btn-splitv')?.addEventListener('click', () => active()?.splitActive('v'));
+document.getElementById('btn-eph')?.addEventListener('click', () =>
+  active()?.sendJson({ t: 'new_ephemeral' }),
+);
+
+// ---- overlays ------------------------------------------------------------------
+
+const codePanel = initCodePanel({
+  getActivePane: () => active()?.activePane ?? null,
+  getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
+  getScope: () => active()?.id ?? 'local',
+});
+const procPanel = initProcPanel({
+  getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
+});
 // Both overlays are full-screen and share a z-band, so they're mutually exclusive.
 function toggleCode() {
   if (procPanel.isOpen()) procPanel.toggle();
@@ -330,33 +234,16 @@ function toggleProc() {
 document.getElementById('btn-code')?.addEventListener('click', toggleCode);
 document.getElementById('btn-proc')?.addEventListener('click', toggleProc);
 
+// ---- keybindings (⌘K leader + direct combos; full iTerm2 set in Tauri) --------
+
 let leaderActive = false;
 function setLeader(on: boolean) {
   leaderActive = on;
   hintEl.classList.toggle('show', on);
 }
 
-function splitActive(dir: 'h' | 'v') {
-  if (activePane != null) sendJson({ t: 'split', pane: activePane, dir });
-}
-function closeActive() {
-  if (activePane != null) sendJson({ t: 'close_pane', pane: activePane });
-}
-function navPane(dir: 'L' | 'R' | 'U' | 'D') {
-  sendJson({ t: 'select_pane', dir });
-}
-function switchWindowIndex(i: number) {
-  const w = windowList[i];
-  if (w) sendJson({ t: 'select_window', id: w.id });
-}
-function switchWindowRel(delta: number) {
-  if (!windowList.length) return;
-  const idx = Math.max(0, windowList.findIndex((w) => w.id === activeWindow));
-  const next = windowList[(idx + delta + windowList.length) % windowList.length];
-  sendJson({ t: 'select_window', id: next.id });
-}
 function copySelection() {
-  const sel = activePane != null ? panes.get(activePane)?.term.getSelection() : '';
+  const sel = active()?.selection() ?? '';
   if (sel) navigator.clipboard?.writeText(sel).catch(() => {});
 }
 
@@ -368,19 +255,21 @@ const ARROWS: Record<string, 'L' | 'R' | 'U' | 'D'> = {
 function handleLeaderKey(e: KeyboardEvent) {
   const k = e.key;
   if (k === 'Escape') return;
+  const w = active();
+  if (!w) return;
   const lower = k.toLowerCase();
-  if (lower === 'c') return sendJson({ t: 'new_window' });
-  if (lower === 'x') return closeActive();
+  if (lower === 'c') return w.sendJson({ t: 'new_window' });
+  if (lower === 'x') return w.closeActive();
   if (lower === 't') return toggleProc();
-  if (lower === 's') return sendJson({ t: 'new_ephemeral' });
-  if (lower === 'd') return splitActive(e.shiftKey ? 'v' : 'h');
-  if (k === '|' || k === '\\') return splitActive('h');
-  if (k === '-') return splitActive('v');
-  if (k === 'n' || k === ']') return switchWindowRel(1);
-  if (k === 'p' || k === '[') return switchWindowRel(-1);
-  if (k >= '1' && k <= '9') return switchWindowIndex(parseInt(k, 10) - 1);
+  if (lower === 's') return w.sendJson({ t: 'new_ephemeral' });
+  if (lower === 'd') return w.splitActive(e.shiftKey ? 'v' : 'h');
+  if (k === '|' || k === '\\') return w.splitActive('h');
+  if (k === '-') return w.splitActive('v');
+  if (k === 'n' || k === ']') return w.switchWindowRel(1);
+  if (k === 'p' || k === '[') return w.switchWindowRel(-1);
+  if (k >= '1' && k <= '9') return w.switchWindowIndex(parseInt(k, 10) - 1);
   const d = ARROWS[k] ?? ARROWS[lower];
-  if (d) navPane(d);
+  if (d) w.navPane(d);
 }
 
 document.addEventListener(
@@ -440,12 +329,11 @@ document.addEventListener(
     }
     if (lower === 'd' && !e.altKey) {
       stop();
-      splitActive(e.shiftKey ? 'v' : 'h');
+      active()?.splitActive(e.shiftKey ? 'v' : 'h');
       return;
     }
     if (lower === 'c' && !e.shiftKey && !e.altKey) {
-      const sel = activePane != null ? panes.get(activePane)?.term.getSelection() : '';
-      if (sel) {
+      if (active()?.selection()) {
         stop();
         copySelection();
       }
@@ -454,20 +342,26 @@ document.addEventListener(
 
     // Full iTerm2 direct combos — only in the Tauri app (a browser reserves these):
     if (isTauri) {
-      if (lower === 't' && !e.shiftKey && !e.altKey) {
+      if (e.shiftKey && !e.altKey && e.code >= 'Digit1' && e.code <= 'Digit9') {
+        // ⌘⇧1-9: switch host (⌘1-9 stays window switching).
         stop();
-        sendJson({ t: 'new_window' });
+        const ids = [...workspaces.keys()];
+        const id = ids[parseInt(e.code.slice(5), 10) - 1];
+        if (id) switchTo(id);
+      } else if (lower === 't' && !e.shiftKey && !e.altKey) {
+        stop();
+        active()?.sendJson({ t: 'new_window' });
       } else if (lower === 'w' && !e.shiftKey && !e.altKey) {
         stop();
-        closeActive();
+        active()?.closeActive();
       } else if (!e.shiftKey && !e.altKey && e.key >= '1' && e.key <= '9') {
         stop();
-        switchWindowIndex(parseInt(e.key, 10) - 1);
+        active()?.switchWindowIndex(parseInt(e.key, 10) - 1);
       } else if (e.altKey) {
         const ad = ARROWS[e.key];
         if (ad) {
           stop();
-          navPane(ad);
+          active()?.navPane(ad);
         }
       }
     }
@@ -476,12 +370,21 @@ document.addEventListener(
   true,
 );
 
-// In the Tauri app the host manager owns the SSH tunnel: on `connected` we start
-// the terminal WS. In a browser (dev) the WS talks to a manually-forwarded :8088.
+// ---- boot ----------------------------------------------------------------------
+
+// In the Tauri app the host manager owns the SSH tunnels: each `connected` host
+// gets a workspace on its own local port. In a browser (dev) there is a single
+// workspace against a manually-forwarded :8088.
 if (isTauri) {
-  hostManager = initHostManager(() => {
-    suspended = false;
-    connect(); // no-op if the socket is already open
+  hostManager = initHostManager({
+    onConnected(host) {
+      ensureWorkspace(host.id, host.label, host.port);
+      switchTo(host.id);
+    },
+    onDisconnected(hostId) {
+      const w = workspaces.get(hostId);
+      if (w) endWorkspace(w, false); // tunnel already torn down by the manager
+    },
   });
   const hostBtn = document.getElementById('btn-host');
   if (hostBtn) {
@@ -489,5 +392,6 @@ if (isTauri) {
     hostBtn.addEventListener('click', () => hostManager!.open());
   }
 } else {
-  connect();
+  ensureWorkspace('local', 'local', 8088);
+  switchTo('local');
 }

@@ -551,3 +551,43 @@ body {
   gap: 6px;
   align-items: flex-start;
 }
+
+/* Multi-host: one layer per workspace under #term; chips in the bar. */
+.workspace {
+  position: absolute;
+  inset: 0;
+}
+#hosts {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.hostchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  font: 11px ui-monospace, Menlo, monospace;
+  color: #adbac7;
+  background: #11151d;
+  border: 1px solid #2f3947;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.hostchip:hover {
+  border-color: #3f4b5b;
+}
+.hostchip.active {
+  color: #0b0e14;
+  background: #2f81f7;
+  border-color: #2f81f7;
+}
+.host-live {
+  color: #3fb950;
+  margin-right: 6px;
+  font-size: 10px;
+}
+.host-btn.small {
+  padding: 4px 10px;
+  font-size: 12px;
+}

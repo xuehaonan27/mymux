@@ -23,22 +23,28 @@ Deferred refinements — captured so we don't lose them. Not blocking.
 - Optional: a dedicated persistent ControlMaster (separate from the forward) so a
   forward restart never re-auths even without an agent.
 
-## Multi-host (planned, not started)
-One app connected to several hosts at once. Phases:
-- **A. Tunnel layer** — `run_russh_tunnel` accepts `local_port: 0` and reports the
-  bound port (extend `Status::Connected` or the event payload). `src-tauri`
-  `ConnState` becomes `HashMap<host_id, Active>`; `connect(host_id)` no longer
-  tears down other tunnels; add `disconnect(host_id)` + `conns_list()`; the
-  `mymux:status` event carries `host_id`.
-- **B. UI workspaces (the bulk)** — fold `main.ts`'s module globals
-  (ws/panes/windowList/activePane/…) into a `Workspace` class, one per host,
-  each with its own `ws://127.0.0.1:<port>/ws`; parameterize the code/proc
-  panels' API base (currently a hard-coded `:8088`). A top-level host strip in
-  the bar (chips / ⌘⇧1-9) switches the visible workspace; background ones stay
-  connected.
-- **C. Cross-host agent aggregation** — the bar sums waiting/done across all
-  connected hosts (the real payoff of multi-host).
-- **D. Polish** — per-host reconnect banners, remember open hosts in hosts.json.
+## Replace tmux with a native engine — declared endgame (2026-07-03)
+Since external-tmux interop is rejected, tmux is a pure implementation detail —
+replacing it is coherent. Strangler-fig path (each step ships alone, no big bang):
+1. **Server-side grid for ephemeral panes** (use a proven crate:
+   `alacritty_terminal` / `termwiz` / `avt`; serialize grid → escapes for reseed).
+   Standalone win: fixes ephemeral's "rough reseed" limitation and de-risks the
+   core tech. Do this first.
+2. Persistent native panes: same engine + restart survival — design fork to
+   settle: a tiny `mymux-ptyd` holder process (our own client/server split)
+   vs systemd FD store (single process, fd + serialized grid across restarts).
+3. Native splits/layout (the layout tree is already ours) + a `mymux attach`
+   CLI escape hatch (today `tmux -L mymux attach` is the rescue path — keep an
+   equivalent).
+4. New windows default to native; tmux engine kept for a transition, then removed.
+Honest counterweight: no acute pain forces this — drivers are strategic (own the
+stack; per-window sizes; multi-client semantics; kill the control-mode boundary
+that caused most historical bugs). Don't start before multi-host/LSP priorities.
+
+## Multi-host — SHIPPED 2026-07-03 (Mac verify pending); remaining polish
+- Remember open hosts in hosts.json and offer to reconnect them at launch.
+- Per-host reconnect banners inside the workspace (today only the status dot).
+- Chip overflow behavior for many hosts (scroll / compact mode).
 
 ## Attach to an existing tmux session — decided against (2026-07-03)
 mymuxd only drives its own socket + session (`tmux -L mymux … -s mymux`). Cleanly

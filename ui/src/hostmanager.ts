@@ -1,7 +1,9 @@
-// Native host manager (Tauri only): pick/add an SSH host, enter its key
-// passphrase in-app, and connect via the russh tunnel behind Tauri commands.
-// Shown until the tunnel reports `connected`; drives connect/disconnect and
-// surfaces auth / host-key problems.
+// Native host manager (Tauri only): pick/add SSH hosts, enter each key's
+// passphrase in-app, and connect via the russh tunnels behind Tauri commands.
+// Several hosts can be connected at once — `connect` returns that host's local
+// forward port and `mymux:status` events are tagged with the host id. The panel
+// force-shows at boot (nothing connected yet); afterwards it's an overlay for
+// connecting more hosts / switching / disconnecting.
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -29,20 +31,37 @@ type Status =
   | { host_key_unknown: { fingerprint: string } }
   | { error: string };
 
-export interface HostManager {
-  open(): void;
-  isConnected(): boolean;
+interface StatusEvent {
+  host_id: string;
+  status: Status;
+}
+interface ConnInfo {
+  host_id: string;
+  port: number;
+  status?: Status | null;
 }
 
-export function initHostManager(onConnected: () => void): HostManager {
+export interface HostManagerHooks {
+  /** A host's tunnel is up — give it a workspace (or switch to it). */
+  onConnected(host: { id: string; label: string; port: number }): void;
+  /** The user disconnected a host from the manager; its tunnel is already down. */
+  onDisconnected(hostId: string): void;
+}
+
+export interface HostManager {
+  open(): void;
+}
+
+export function initHostManager(hooks: HostManagerHooks): HostManager {
   const panel = document.createElement('div');
   panel.id = 'host';
   panel.className = 'host-panel show';
   document.body.appendChild(panel);
 
-  let connected = false;
-  // Host + passphrase of the in-flight attempt, so a host-key-trust retry can resend.
-  let attempt: { host: Host; passphrase: string } | null = null;
+  // The connect attempt currently driven from this panel (for status routing
+  // and the host-key trust retry). Events for other hosts are ignored here —
+  // their workspaces live their own lives.
+  let attempt: { host: Host; passphrase: string; port: number | null } | null = null;
   let statusEl: HTMLElement | null = null;
 
   const el = (tag: string, cls?: string, text?: string): HTMLElement => {
@@ -58,7 +77,7 @@ export function initHostManager(onConnected: () => void): HostManager {
     statusEl.textContent = msg;
   }
 
-  async function load(): Promise<HostStore> {
+  async function loadHosts(): Promise<HostStore> {
     try {
       return await invoke<HostStore>('hosts_list');
     } catch {
@@ -66,18 +85,27 @@ export function initHostManager(onConnected: () => void): HostManager {
     }
   }
 
+  async function loadConns(): Promise<Map<string, ConnInfo>> {
+    try {
+      const list = await invoke<ConnInfo[]>('conns_list');
+      return new Map(list.map((c) => [c.host_id, c]));
+    } catch {
+      return new Map();
+    }
+  }
+
   // ---- views ----
   async function showList() {
     statusEl = null;
     attempt = null;
-    const store = await load();
+    const [store, conns] = await Promise.all([loadHosts(), loadConns()]);
     const root = el('div', 'host-inner');
     root.appendChild(el('div', 'host-title', 'Connect to a host'));
     if (!store.hosts.length) {
       root.appendChild(el('div', 'host-empty', 'No hosts yet — add one to get started.'));
     }
     const list = el('div', 'host-list');
-    for (const h of store.hosts) list.appendChild(hostCard(h));
+    for (const h of store.hosts) list.appendChild(hostCard(h, conns.get(h.id)));
     root.appendChild(list);
     const add = el('button', 'host-btn', '+ Add host');
     add.onclick = () => showForm();
@@ -85,28 +113,52 @@ export function initHostManager(onConnected: () => void): HostManager {
     panel.replaceChildren(root);
   }
 
-  function hostCard(h: Host): HTMLElement {
+  function hostCard(h: Host, conn?: ConnInfo): HTMLElement {
     const card = el('div', 'host-card');
     const main = el('div', 'host-card-main');
-    main.appendChild(el('div', 'host-card-label', h.label || h.hostname));
+    const labelRow = el('div', 'host-card-label');
+    if (conn) labelRow.appendChild(el('span', 'host-live', '●'));
+    labelRow.appendChild(document.createTextNode(h.label || h.hostname));
+    main.appendChild(labelRow);
     main.appendChild(el('div', 'host-card-sub', `${h.user}@${h.hostname}:${h.port}`));
-    main.onclick = () => showConnect(h);
-    const edit = el('button', 'host-icon', '✎');
-    edit.title = 'Edit';
-    edit.onclick = (e) => {
-      e.stopPropagation();
-      showForm(h);
-    };
-    const del = el('button', 'host-icon', '✕');
-    del.title = 'Delete';
-    del.onclick = async (e) => {
-      e.stopPropagation();
-      if (confirm(`Delete host “${h.label || h.hostname}”?`)) {
-        await invoke('host_delete', { id: h.id });
+    card.appendChild(main);
+
+    if (conn) {
+      // Already connected: open its workspace, or tear the tunnel down.
+      main.onclick = () => {
+        panel.classList.remove('show');
+        hooks.onConnected({ id: h.id, label: h.label || h.hostname, port: conn.port });
+      };
+      const open = el('button', 'host-btn small', 'Open');
+      open.onclick = main.onclick as () => void;
+      const dis = el('button', 'host-icon', '⏻');
+      dis.title = 'Disconnect';
+      dis.onclick = async (e) => {
+        e.stopPropagation();
+        await invoke('disconnect', { host_id: h.id }).catch(() => {});
+        hooks.onDisconnected(h.id);
         void showList();
-      }
-    };
-    card.append(main, edit, del);
+      };
+      card.append(open, dis);
+    } else {
+      main.onclick = () => showConnect(h);
+      const edit = el('button', 'host-icon', '✎');
+      edit.title = 'Edit';
+      edit.onclick = (e) => {
+        e.stopPropagation();
+        showForm(h);
+      };
+      const del = el('button', 'host-icon', '✕');
+      del.title = 'Delete';
+      del.onclick = async (e) => {
+        e.stopPropagation();
+        if (confirm(`Delete host “${h.label || h.hostname}”?`)) {
+          await invoke('host_delete', { id: h.id });
+          void showList();
+        }
+      };
+      card.append(edit, del);
+    }
     return card;
   }
 
@@ -179,10 +231,14 @@ export function initHostManager(onConnected: () => void): HostManager {
   // ---- connect + live status ----
   async function connect(h: Host, passphrase: string, trust: boolean) {
     if (!statusEl) return;
-    attempt = { host: h, passphrase };
+    attempt = { host: h, passphrase, port: null };
     setStatus('info', 'Connecting…');
     try {
-      await invoke('connect', { host_id: h.id, passphrase, trust_host_key: trust });
+      attempt.port = await invoke<number>('connect', {
+        host_id: h.id,
+        passphrase,
+        trust_host_key: trust,
+      });
     } catch (e) {
       setStatus('error', String(e));
     }
@@ -198,14 +254,23 @@ export function initHostManager(onConnected: () => void): HostManager {
     statusEl.appendChild(trust);
   }
 
-  function onStatus(s: Status) {
+  function onStatus(ev: StatusEvent) {
+    // Only the attempt driven from this panel is ours; connected hosts'
+    // reconnect chatter is handled by their workspaces.
+    if (!attempt || ev.host_id !== attempt.host.id) return;
+    const s = ev.status;
     if (s === 'connected') {
-      connected = true;
+      const a = attempt;
+      attempt = null;
       panel.classList.remove('show');
-      onConnected();
+      hooks.onConnected({
+        id: a.host.id,
+        label: a.host.label || a.host.hostname,
+        port: a.port ?? 8088,
+      });
       return;
     }
-    if (connected || !statusEl) return; // ignore transient events once we're in
+    if (!statusEl) return;
     if (s === 'connecting') setStatus('info', 'Connecting…');
     else if (s === 'reconnecting') setStatus('info', 'Reconnecting…');
     else if (s === 'auth_failed')
@@ -220,15 +285,13 @@ export function initHostManager(onConnected: () => void): HostManager {
     else if (typeof s === 'object' && 'error' in s) setStatus('error', s.error);
   }
 
-  void listen<Status>('mymux:status', (ev) => onStatus(ev.payload));
+  void listen<StatusEvent>('mymux:status', (ev) => onStatus(ev.payload));
 
   void showList();
   return {
     open: () => {
-      connected = false;
       panel.classList.add('show');
       void showList();
     },
-    isConnected: () => connected,
   };
 }

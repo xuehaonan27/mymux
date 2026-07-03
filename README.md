@@ -58,7 +58,8 @@ and the multiplexer core (M0/M1).
 | **M3** | agent-status tab badges (hooks: Claude + Codex; heuristics) | ✅ done |
 | **M4** | ⌘E code panel: file tree, editor (edit/save), git diff | ✅ done |
 | **M5** | process tree (⌘K t) + ephemeral non-tmux shells (⌘K s) | ✅ done |
-| **M6** | native host manager: in-process SSH (russh), in-app passphrase, TOFU host keys | ✅ core verified · UI Mac-verify pending |
+| **M6** | native host manager: in-process SSH (russh), in-app passphrase, TOFU host keys | ✅ done |
+| **M7** | multi-host: several hosts at once, host chips, cross-host agent counts | ✅ built · Mac verify pending |
 
 Remaining original pain point: LSP (deferred until an editor/plugin story
 exists). Smaller items live in `docs/BACKLOG.md`.
@@ -115,9 +116,14 @@ migrated automatically). Pick one, enter the key's passphrase, **Connect**:
   trust it (then records it in `~/.ssh/known_hosts`). A **changed** host key is
   refused outright — MITM protection.
 - The app starts `mymuxd` on the remote if needed (the systemd service, else a
-  detached fallback), keeps `localhost:8088` forwarded with auto-reconnect, and
-  reveals the workspace. The `host` button in the bar switches hosts, and
-  **exiting the last pane ends the session and returns you to the host manager**.
+  detached fallback), keeps a local forward with auto-reconnect, and reveals the
+  workspace. **Exiting the last pane ends the session and returns you to the
+  host manager.**
+- **Several hosts at once**: connect more hosts from the manager (`host`
+  button) — each gets its own tunnel port and workspace. Host chips appear in
+  the bar (click or **⌘⇧1–9** to switch), the agent counter sums ⏳/✓ across
+  *all* hosts, and each chip carries its host's most attention-worthy agent
+  dot — one glance over every machine's agents.
 
 For a signed release bundle, first regenerate the icon set:
 `cargo tauri icon src-tauri/icons/icon.png`.

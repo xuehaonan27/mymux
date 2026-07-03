@@ -1,11 +1,13 @@
 //! mymux desktop app — a thin Tauri shell. It hosts the web UI and owns the SSH
-//! tunnel to the remote `mymuxd`: a native host manager (russh, in-process) driven
-//! by the UI via commands, plus a legacy single-host auto-connect via the `ssh`
-//! binary that stays until the host-manager UI lands.
+//! tunnels to remote `mymuxd`s: a native host manager (russh, in-process) driven
+//! by the UI via commands. Several hosts can be connected at once — each gets its
+//! own local forward port, and status events are tagged with the host id.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use mymux_connect::{config_dir, run_russh_tunnel, Host, HostStore, Status};
+use serde::Serialize;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, State};
 
@@ -15,30 +17,64 @@ fn remote_daemon_cmd() -> String {
     "systemctl --user start mymuxd.service 2>/dev/null || pgrep -x mymuxd >/dev/null 2>&1 || setsid mymuxd >/tmp/mymuxd.log 2>&1 </dev/null &".to_string()
 }
 
-// ---- native host manager: russh tunnel, driven by the UI -------------------
-
 struct Active {
     task: JoinHandle<()>,
     forwarder: JoinHandle<()>,
-    #[allow(dead_code)]
-    host_id: String,
+    port: u16,
 }
 
 #[derive(Default)]
 struct ConnState {
-    active: Mutex<Option<Active>>,
-    last_status: Arc<Mutex<Option<Status>>>,
+    /// Live tunnels, one per host id.
+    conns: Mutex<HashMap<String, Active>>,
+    /// Latest tunnel status per host id (kept by each forwarder task).
+    statuses: Arc<Mutex<HashMap<String, Status>>>,
+    /// Last local port used per host, so a host keeps a stable URL across
+    /// reconnects of its tunnel.
+    ports: Mutex<HashMap<String, u16>>,
 }
 
-/// Tear down the running tunnel (if any) and wait for its listener to drop, so a
-/// subsequent connect can rebind the local port.
-async fn teardown(state: &ConnState) {
-    let old = { state.active.lock().unwrap().take() };
+/// The `mymux:status` event payload: which host a status belongs to.
+#[derive(Clone, Serialize)]
+struct StatusEvent {
+    host_id: String,
+    status: Status,
+}
+
+#[derive(Serialize)]
+struct ConnInfo {
+    host_id: String,
+    port: u16,
+    status: Option<Status>,
+}
+
+/// A free local port for a host's tunnel: its remembered port when available,
+/// else probe upward from 8088, skipping ports held by other live tunnels.
+fn alloc_port(state: &ConnState, host_id: &str) -> Result<u16, String> {
+    let in_use: Vec<u16> = state.conns.lock().unwrap().values().map(|a| a.port).collect();
+    let free = |p: u16| {
+        !in_use.contains(&p) && std::net::TcpListener::bind(("127.0.0.1", p)).is_ok()
+    };
+    if let Some(&p) = state.ports.lock().unwrap().get(host_id) {
+        if free(p) {
+            return Ok(p);
+        }
+    }
+    (8088u16..8188)
+        .find(|&p| free(p))
+        .ok_or_else(|| "no free local port in 8088-8187".to_string())
+}
+
+/// Tear down one host's tunnel (if any) and wait for its listener to drop, so a
+/// reconnect can rebind the same port.
+async fn teardown(state: &ConnState, host_id: &str) {
+    let old = state.conns.lock().unwrap().remove(host_id);
     if let Some(a) = old {
         a.task.abort();
         a.forwarder.abort();
         let _ = a.task.await;
     }
+    state.statuses.lock().unwrap().remove(host_id);
 }
 
 #[tauri::command]
@@ -66,18 +102,37 @@ fn host_delete(id: String) -> Result<(), String> {
     store.save(&dir).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-fn conn_status(state: State<'_, ConnState>) -> Option<Status> {
-    state.last_status.lock().unwrap().clone()
+#[tauri::command(rename_all = "snake_case")]
+fn conn_status(state: State<'_, ConnState>, host_id: String) -> Option<Status> {
+    state.statuses.lock().unwrap().get(&host_id).cloned()
 }
 
+/// Every live tunnel with its local port and latest status.
 #[tauri::command]
-async fn disconnect(state: State<'_, ConnState>) -> Result<(), String> {
-    teardown(&state).await;
-    *state.last_status.lock().unwrap() = None;
+fn conns_list(state: State<'_, ConnState>) -> Vec<ConnInfo> {
+    let statuses = state.statuses.lock().unwrap();
+    state
+        .conns
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, a)| ConnInfo {
+            host_id: id.clone(),
+            port: a.port,
+            status: statuses.get(id).cloned(),
+        })
+        .collect()
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn disconnect(state: State<'_, ConnState>, host_id: String) -> Result<(), String> {
+    teardown(&state, &host_id).await;
     Ok(())
 }
 
+/// Connect (or re-drive: retry passphrase / trust host key) one host's tunnel.
+/// Other hosts' tunnels are untouched. Returns the local forward port — the UI
+/// points that host's workspace at `ws://127.0.0.1:<port>/ws`.
 #[tauri::command(rename_all = "snake_case")]
 async fn connect(
     app: AppHandle,
@@ -85,34 +140,37 @@ async fn connect(
     host_id: String,
     passphrase: Option<String>,
     trust_host_key: Option<bool>,
-) -> Result<(), String> {
+) -> Result<u16, String> {
     let host = HostStore::load(&config_dir())
         .get(&host_id)
         .cloned()
         .ok_or_else(|| format!("no such host: {host_id}"))?;
 
-    teardown(&state).await; // free the local port before rebinding
+    teardown(&state, &host_id).await; // re-drive this host only
+    let port = alloc_port(&state, &host_id)?;
+    state.ports.lock().unwrap().insert(host_id.clone(), port);
 
-    let cfg = host.to_tunnel_config(8088, 8088, remote_daemon_cmd(), trust_host_key.unwrap_or(false));
+    let cfg = host.to_tunnel_config(port, 8088, remote_daemon_cmd(), trust_host_key.unwrap_or(false));
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Status>(32);
 
-    // Forward tunnel status to the webview + remember the latest.
-    let last = state.last_status.clone();
+    // Forward tunnel status to the webview, tagged with the host id.
+    let statuses = state.statuses.clone();
+    let hid = host_id.clone();
     let app2 = app.clone();
     let forwarder = tauri::async_runtime::spawn(async move {
         while let Some(s) = rx.recv().await {
-            *last.lock().unwrap() = Some(s.clone());
-            let _ = app2.emit("mymux:status", s);
+            statuses.lock().unwrap().insert(hid.clone(), s.clone());
+            let _ = app2.emit("mymux:status", StatusEvent { host_id: hid.clone(), status: s });
         }
     });
     let task = tauri::async_runtime::spawn(run_russh_tunnel(cfg, passphrase, tx));
 
-    *state.active.lock().unwrap() = Some(Active {
-        task,
-        forwarder,
-        host_id,
-    });
-    Ok(())
+    state
+        .conns
+        .lock()
+        .unwrap()
+        .insert(host_id, Active { task, forwarder, port });
+    Ok(port)
 }
 
 pub fn run() {
@@ -124,7 +182,8 @@ pub fn run() {
             host_delete,
             connect,
             disconnect,
-            conn_status
+            conn_status,
+            conns_list
         ])
         .run(tauri::generate_context!())
         .expect("error while running the mymux app");
