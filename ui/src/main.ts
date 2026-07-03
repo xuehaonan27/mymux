@@ -20,7 +20,7 @@ const STYLE = { font: FONT, fontSize: FONT_SIZE, lineHeight: LINE_HEIGHT, theme:
 
 const termArea = document.getElementById('term') as HTMLDivElement;
 const tabsEl = document.getElementById('tabs') as HTMLDivElement;
-const hostsEl = document.getElementById('hosts') as HTMLElement;
+const hostsEl = document.getElementById('hostbar') as HTMLElement;
 const statusEl = document.getElementById('status')!;
 const metaEl = document.getElementById('meta')!;
 const agentsEl = document.getElementById('agents')!;
@@ -149,10 +149,13 @@ function topAgent(windows: WinInfo[]): 'waiting' | 'done' | 'running' | undefine
   return best;
 }
 
-// Host chips: one per connected workspace (shown once there's more than one).
+// Host chips live on their own strip above the bar, shown once there's more
+// than one connected host (always-show will become a profile setting).
 function renderHosts() {
   hostsEl.replaceChildren();
-  if (workspaces.size < 2) return;
+  const show = workspaces.size >= 2;
+  hostsEl.style.display = show ? 'flex' : 'none';
+  if (!show) return;
   let i = 0;
   for (const w of workspaces.values()) {
     i += 1;

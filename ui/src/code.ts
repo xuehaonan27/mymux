@@ -36,7 +36,11 @@ async function fsList(pane: number | null, path: string): Promise<FsEntry[]> {
 }
 async function fsRead(pane: number | null, path: string): Promise<string> {
   const r = await fetch(`${apiBase()}/fs/read?${paneQ(pane)}path=${encodeURIComponent(path)}`);
-  if (!r.ok) throw new Error(`read ${path}: ${r.status}`);
+  if (!r.ok) {
+    const err = new Error(`read ${path}: ${r.status}`) as Error & { status?: number };
+    err.status = r.status;
+    throw err;
+  }
   return r.text();
 }
 async function fsWrite(pane: number | null, path: string, content: string): Promise<boolean> {
@@ -121,6 +125,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       <div class="code-hd"><span id="code-path">no file open</span><span id="code-hint">⌘S save · esc / ⌘E close</span></div>
       <div class="code-editor" id="code-editor"></div>
       <div class="code-diff" id="code-diff"></div>
+      <div class="code-ph" id="code-ph"></div>
     </div>`;
   document.body.appendChild(panel);
 
@@ -129,6 +134,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   const pathEl = panel.querySelector('#code-path') as HTMLElement;
   const editorParent = panel.querySelector('#code-editor') as HTMLElement;
   const diffEl = panel.querySelector('#code-diff') as HTMLElement;
+  const phEl = panel.querySelector('#code-ph') as HTMLElement;
   diffEl.style.display = 'none';
 
   let editor: EditorView | null = null;
@@ -196,6 +202,36 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     else editor = new EditorView({ state, parent: editorParent });
     editorParent.style.display = '';
     diffEl.style.display = 'none';
+    phEl.style.display = '';
+  }
+
+  // VSCode-style stand-in for files the editor can't show — replaces the editor
+  // area (never leaves the previous file's text on screen under an error).
+  function showPlaceholder(path: string, status?: number) {
+    pathEl.textContent = `${path} — can't display`;
+    pathEl.style.color = '';
+    const reason =
+      status === 415
+        ? 'It looks binary (not valid UTF-8 text).'
+        : status === 400
+          ? 'It’s too large for the editor (2 MiB limit) or not a regular file.'
+          : status === 404
+            ? 'It no longer exists.'
+            : 'It could not be read.';
+    const line = (cls: string, text: string) => {
+      const d = document.createElement('div');
+      d.className = cls;
+      d.textContent = text;
+      return d;
+    };
+    phEl.replaceChildren(
+      line('ph-title', 'This file is not displayed in the editor.'),
+      line('ph-reason', reason),
+      line('ph-hint', 'A viewer plugin could open files like this — mymux doesn’t have a plugin system yet.'),
+    );
+    editorParent.style.display = 'none';
+    diffEl.style.display = 'none';
+    phEl.style.display = 'flex';
   }
 
   async function save() {
@@ -216,16 +252,20 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   }
 
   async function openFile(path: string) {
-    if (!current || !confirmDiscard()) return;
+    if (!current) return;
     const s = current;
     let content: string;
     try {
       content = await fsRead(s.pane, path);
-    } catch {
-      pathEl.textContent = `cannot open ${path} (binary or too large?)`;
+    } catch (e) {
+      if (current !== s) return;
+      showPlaceholder(path, (e as { status?: number }).status);
       return;
     }
     if (current !== s) return; // switched panes mid-read
+    // Only now can opening actually discard edits — an unreadable file never
+    // should have prompted (nor clobbered the buffer).
+    if (!confirmDiscard()) return;
     s.path = path;
     s.savedDoc = content;
     s.state = fileState(path, content);
@@ -263,6 +303,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     }
     editorParent.style.display = 'none';
     diffEl.style.display = '';
+    phEl.style.display = '';
   }
 
   function treeItem(path: string, name: string, dir: boolean, depth: number): HTMLElement {

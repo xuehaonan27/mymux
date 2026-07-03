@@ -53,6 +53,12 @@ server's config (no truecolor conf), couple sizes with other attached clients,
 and break the one-session-per-control-client model — not worth it; a standalone
 tmux stays standalone.
 
+## Settings / user profile (not started)
+- A small persisted settings store (`~/.config/mymux/settings.json` or alongside
+  hosts.json) surfaced in the app.
+- First setting: **always show the host bar even with a single host** (today it
+  auto-hides below 2 connected hosts).
+
 ## Misc
 - Tighten the daemon's HTTP surface (per-session token in addition to the CORS allowlist).
 - M2.2: unify the `cargo tauri dev` vs `npm install` working directories.

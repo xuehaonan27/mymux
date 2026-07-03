@@ -552,15 +552,20 @@ body {
   align-items: flex-start;
 }
 
-/* Multi-host: one layer per workspace under #term; chips in the bar. */
+/* Multi-host: one layer per workspace under #term; host chips get their own
+   slim strip ABOVE the main bar (hosts > windows hierarchy), shown only when
+   more than one host is connected. */
 .workspace {
   position: absolute;
   inset: 0;
 }
-#hosts {
-  display: flex;
-  gap: 4px;
+#hostbar {
+  display: none; /* shown by the shell when ≥2 hosts are connected */
   align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  background: #0d1119;
+  border-bottom: 1px solid #1e2430;
 }
 .hostchip {
   display: inline-flex;
@@ -590,4 +595,29 @@ body {
 .host-btn.small {
   padding: 4px 10px;
   font-size: 12px;
+}
+
+/* Stand-in when a file can't be shown (binary / too large / gone). */
+.code-ph {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  font: 13px ui-monospace, Menlo, monospace;
+}
+.code-ph .ph-title {
+  color: #c5cdd9;
+}
+.code-ph .ph-reason {
+  color: #8b949e;
+}
+.code-ph .ph-hint {
+  color: #5c6773;
+  font-size: 12px;
+  max-width: 48ch;
 }
