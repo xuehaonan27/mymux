@@ -5,139 +5,154 @@ over SSH. It replaces the `iTerm2 → ssh → tmux → coding-agent` stack with 
 single clean layer:
 
 ```
-xterm.js / dashboard (UI)  ⇄  WebSocket  ⇄  mymuxd (Rust)  ⇄  tmux -CC  ⇄  PTYs
+Tauri app / browser (xterm.js UI)
+   ⇄  SSH tunnel (in-process russh, auto-reconnect)
+   ⇄  mymuxd (Rust daemon)  ⇄  tmux -CC (persistent sessions)  +  ⌁ raw shells (ephemeral PTYs)
 ```
 
 - **Native rendering** — terminals render once, in xterm.js. No nested tmux
   redraw, so scrollback and TUIs (Claude Code, Codex) stay clean.
 - **tmux is the engine** — sessions/persistence come from `tmux -CC` control
   mode (the same mechanism iTerm2 uses), consumed natively by our client.
-- **Agent-aware** — a dashboard shows which agent session is running, waiting
-  for approval, or done — no more polling windows.
-- **Resilient** — one SSH ControlMaster tunnel, auto-reconnecting; the daemon
-  holds state so a dropped link restores instantly.
+- **Agent-aware** — tab badges show which agent is running, waiting for your
+  approval, or done — no more polling windows.
+- **Resilient** — an in-process SSH tunnel with auto-reconnect; you pick a host
+  and type its key passphrase **in the app**. The daemon holds state, so a
+  dropped link restores instantly.
+
+## Quick start (desktop app)
+
+**On the dev box (remote Linux, once).** Requires `tmux` installed:
+
+```sh
+scripts/install-systemd.sh          # build + install mymuxd as a systemd --user service
+scripts/install-claude-hooks.sh     # optional: Claude Code agent-status hooks
+scripts/install-codex-notify.sh     # optional: Codex agent-status (turn-complete)
+```
+
+**On your Mac:**
+
+```sh
+cargo install tauri-cli --version '^2'      # one-time
+cargo tauri dev                             # or `cargo tauri build` for a .app/.dmg
+```
+
+The app opens on the **host manager**: add your dev box (hostname, user,
+identity file), click it, type the key's passphrase, **Connect**. On first use
+it asks you to trust the server's host key; then you land in the workspace —
+⌘E code panel, ⌘K t processes, ⌘K s raw shells, agent badges, all live.
 
 ## Status
 
-**M4 works** (code panel): ⌘E opens a lightweight file tree + editor + git-diff
-over the terminal — browse, edit, and review changes without leaving mymux. On
-top of agent-status badges (M3), the multiplexer (M1), and the Tauri app +
-resilient single-auth tunnel (M2).
+**Latest: the native host manager (M6)** — the app owns its SSH client
+in-process (russh): per-host in-app passphrase entry, `known_hosts` TOFU, no
+dependency on the `ssh` binary or an agent. On top of ephemeral shells + the
+process tree (M5), the code panel (M4), agent badges (M3), the desktop app (M2),
+and the multiplexer core (M0/M1).
 
 | Milestone | Scope | State |
 |-----------|-------|-------|
 | **M0 / M0.1** | tmux `-CC` driver, byte-accurate parser, reseed, respawn, truecolor | ✅ done |
 | **M1** | multi-pane layouts, splits, windows, resize, lossless, keys, copy/paste | ✅ done |
-| **M2** | Tauri desktop app + resilient single-auth SSH tunnel (auto-reconnect) | ✅ done |
-| **M3** | agent-status tab badges (hooks + heuristics) | ✅ done |
+| **M2** | Tauri desktop app + resilient SSH tunnel (auto-reconnect) | ✅ done |
+| **M3** | agent-status tab badges (hooks: Claude + Codex; heuristics) | ✅ done |
 | **M4** | ⌘E code panel: file tree, editor (edit/save), git diff | ✅ done |
-| **M5** | process tree (⌘K t) + ephemeral non-tmux shells (⌘K s) | ✅ daemon verified · GUI pending |
+| **M5** | process tree (⌘K t) + ephemeral non-tmux shells (⌘K s) | ✅ done |
+| **M6** | native host manager: in-process SSH (russh), in-app passphrase, TOFU host keys | ✅ core verified · UI Mac-verify pending |
+
+Remaining original pain point: LSP (deferred until an editor/plugin story
+exists). Smaller items live in `docs/BACKLOG.md`.
 
 ## Layout
 
 - `crates/mux-core` — dependency-free tmux control-mode protocol parser + model.
-- `crates/mymuxd` — daemon: drives `tmux -CC`, serves a WebSocket + the UI.
-- `crates/mymux-connect` — client-side resilient SSH tunnel (auto-reconnect).
-- `ui` — Vite + TypeScript + xterm.js client.
-- `scripts/mymux-connect.sh` — no-build resilient tunnel (pure `ssh` loop).
+- `crates/mymuxd` — the daemon: drives `tmux -CC` and the ephemeral PTYs; serves
+  the WebSocket plus the `/fs`, `/git`, `/proc`, `/agent` HTTP endpoints.
+- `crates/mymux-connect` — SSH tunnels: the in-process russh client (host
+  manager) and the ssh-binary CLI connector (browser workflow).
+- `src-tauri` — the macOS desktop app (Tauri 2; its own workspace so the root
+  builds on headless boxes).
+- `ui` — Vite + TypeScript + xterm.js + CodeMirror client.
+- `systemd/mymuxd.service` — the user-service unit (note `KillMode=process`).
+- `scripts/` — installers (systemd, agent hooks) + the no-build shell tunnel.
+- `docs/BACKLOG.md` — deferred polish.
 - `fixtures` — captured control-mode streams used in tests.
 
 ## Develop
 
 ```sh
-cargo test -p mux-core      # protocol/layout/model unit + fixture tests
+cargo test                  # workspace: parser/model fixtures, /proc, tunnel, host store
 cargo build -p mymuxd       # the daemon
 npm --prefix ui install     # first time
 npm --prefix ui run build   # typecheck + bundle the UI
 ```
 
-## Run the M0 slice
+Two env knobs let a throwaway/second daemon run without colliding with your main
+one: **`MYMUX_SOCKET`** (tmux control socket, default `mymux`) and **`MYMUX_ADDR`**
+(listen address, default `127.0.0.1:8088`).
 
-On the dev box, in two shells:
+## Run the desktop app (macOS)
+
+The native app (`src-tauri/`) bundles the UI, owns the SSH tunnel
+**in-process** (russh — no `ssh` binary, no ssh-agent, no config files to
+prepare), and unlocks the full iTerm2 keybindings a browser reserves
+(⌘T / ⌘W / ⌘1–9). Build it **on your Mac** — it can't build on the headless
+Linux box (no webkit2gtk, no display):
+
+```sh
+cargo install tauri-cli --version '^2'      # one-time; or: npm i -g @tauri-apps/cli
+cargo tauri dev                             # dev run; or `cargo tauri build` for a .app/.dmg
+```
+
+On launch the **host manager** lists your saved hosts
+(`~/.config/mymux/hosts.json`; an old single-host `~/.config/mymux/host` file is
+migrated automatically). Pick one, enter the key's passphrase, **Connect**:
+
+- The passphrase decrypts your key **in-app** and is held only in memory —
+  reconnects are silent, nothing is written to disk. A Finder-launched `.app`
+  works fine (no terminal needed to prompt).
+- The **first** connection to a host shows its key fingerprint and asks to
+  trust it (then records it in `~/.ssh/known_hosts`). A **changed** host key is
+  refused outright — MITM protection.
+- The app starts `mymuxd` on the remote if needed (the systemd service, else a
+  detached fallback), keeps `localhost:8088` forwarded with auto-reconnect, and
+  reveals the workspace. The `host` button in the bar switches hosts.
+
+For a signed release bundle, first regenerate the icon set:
+`cargo tauri icon src-tauri/icons/icon.png`.
+
+## Run in a browser (dev workflow)
+
+No Tauri needed for hacking on mymux itself. On the dev box:
 
 ```sh
 cargo run -p mymuxd         # drives tmux, serves ws://127.0.0.1:8088/ws
 npm --prefix ui run dev     # Vite dev server on http://127.0.0.1:5173
 ```
 
-From your Mac, forward both ports and open the UI:
+From your Mac, forward both ports and open <http://localhost:5173>:
 
 ```sh
 ssh -L 5173:localhost:5173 -L 8088:localhost:8088 <dev-host>
-# then open http://localhost:5173
 ```
 
-You get a real shell rendered by xterm.js, driven through tmux control mode —
-one emulation layer, native scrollback, mouse wheel. Reload the page and the
-session persists (tmux holds it on the `mymux` socket).
-
-## One-time SSH setup (do this first)
-
-mymux authenticates over SSH **non-interactively** — the packaged desktop app
-has no terminal to type a passphrase into, so your key must be loaded in an
-agent. Do this once:
+Or replace the raw `ssh -L` for the daemon port with the resilient CLI
+connector, which auto-reconnects on drops and can start the remote daemon:
 
 ```sh
-# macOS — store the passphrase in the Keychain and auto-load the key:
-ssh-add --apple-use-keychain ~/.ssh/id_ed25519
+cargo run -p mymux-connect -- <dev-host> --ensure-daemon
+# no-build equivalent: scripts/mymux-connect.sh <dev-host>
 ```
 
-Then in `~/.ssh/config`, under the host you connect to:
+The CLI connector uses the `ssh` binary (one ControlMaster, one auth), so it
+authenticates via your ssh-agent/keychain — load the key once with
+`ssh-add --apple-use-keychain ~/.ssh/id_ed25519` (plus `AddKeysToAgent yes` /
+`UseKeychain yes` in `~/.ssh/config`); if it can't auth silently it prints
+exactly that and waits. **The desktop app needs none of this** — its russh
+client prompts in-app.
 
-```
-Host <dev-host>
-  AddKeysToAgent yes
-  UseKeychain yes
-  IdentityFile ~/.ssh/id_ed25519
-```
-
-(Linux client: `eval "$(ssh-agent -s)" && ssh-add ~/.ssh/id_ed25519`.)
-
-After this, both `cargo tauri dev` and the built `.app` connect with **no**
-passphrase prompt. The connector reuses a single SSH ControlMaster — it
-authenticates at most once and reconnects silently. If the key isn't loaded it
-prints these exact steps and waits, connecting the moment you run `ssh-add`.
-
-## Connect from your Mac (resilient tunnel)
-
-Start the daemon + UI on the dev box (as above), then from your Mac run the
-connector instead of a raw `ssh -L` for the daemon port:
-
-```sh
-cargo run -p mymux-connect -- <dev-host>     # or, no build: scripts/mymux-connect.sh <dev-host>
-```
-
-It forwards `localhost:8088` to the remote mymuxd and **auto-reconnects** on
-network drops. Authenticate once (ssh-agent / keychain) and every window rides
-that one tunnel; on reconnect the daemon reseeds all panes from tmux, so nothing
-is lost. (Forward `5173` for the Vite-served UI too, until M2.2 bundles the UI
-into the Tauri app.)
-
-## Run the desktop app (macOS)
-
-The native app (`src-tauri/`) bundles the UI, keeps the resilient tunnel itself,
-and unlocks the full iTerm2 keybindings a browser reserves (⌘T / ⌘W / ⌘1–9).
-Build it **on your Mac** — it can't build on the headless Linux box (no
-webkit2gtk, no display):
-
-```sh
-# one-time: Tauri CLI
-cargo install tauri-cli --version '^2'      # or: npm i -g @tauri-apps/cli
-
-# tell it which host runs mymuxd (an ~/.ssh/config alias works)
-mkdir -p ~/.config/mymux && echo "<dev-host>" > ~/.config/mymux/host
-# (or export MYMUX_HOST=<dev-host>)
-
-# from the repo root on your Mac:
-cargo tauri dev          # dev run; or `cargo tauri build` for a .app / .dmg
-```
-
-The app starts `mymuxd` on the remote if needed, forwards `localhost:8088` with
-auto-reconnect, and opens the workspace. With your key in an agent (see
-[One-time SSH setup](#one-time-ssh-setup-do-this-first)) it connects with no
-passphrase prompt — essential here, since a Finder-launched app has no terminal
-to prompt on. Drop the network and it restores on its own. For a signed release
-bundle, first regenerate the icon set: `cargo tauri icon src-tauri/icons/icon.png`.
+Reload the page or drop the link and the session persists — the daemon reseeds
+every pane from tmux on reconnect.
 
 ## Run mymuxd as a service (remote, systemd)
 
@@ -153,8 +168,10 @@ enables lingering, so the daemon — and your tmux sessions — survive a discon
 The unit uses **`KillMode=process`**, so `systemctl --user restart mymuxd` reloads
 the daemon **without killing the tmux server** (sessions persist across restarts;
 ephemeral `⌁` shells are dropped by design). Logs: `journalctl --user -u mymuxd -f`.
-The connector prefers this service and falls back to a detached `setsid` launch if
-it isn't installed, so nothing breaks without it.
+Both the app and the CLI connector prefer this service and fall back to a
+detached `setsid` launch if it isn't installed, so nothing breaks without it —
+but the service is the reliable path (the fallback needs `mymuxd` on the PATH of
+a non-interactive shell).
 
 ## Agent status
 
@@ -183,34 +200,32 @@ the bell — and focusing a window clears its *done*.
 Press **⌘E** (or the `code` button) for a lightweight overlay: a file tree and
 git-changes list on the left, a CodeMirror editor / unified diff on the right.
 Open a file to read or edit it (⌘S saves); click a changed file to see its diff.
-It's a "quick look," not an IDE — no LSP yet (the last open pain point), just
-fast browse/edit/diff without opening VSCode.
+Each pane gets its own session rooted at that pane's cwd, preserved across
+switches. It's a "quick look," not an IDE — no LSP yet (the last open pain
+point), just fast browse/edit/diff without opening VSCode.
 
-The daemon serves `/fs/*` and `/git/*` confined to a root (`MYMUX_ROOT` or its
-cwd) — rejecting path escapes, with a CORS allowlist so only the mymux UI can
-reach them.
+The daemon serves `/fs/*` and `/git/*` confined to a root (the pane's cwd, else
+`MYMUX_ROOT`/cwd) — rejecting path escapes, with a CORS allowlist so only the
+mymux UI can reach them.
 
 ## Processes (⌘K t)
 
 Press **⌘K t** (or the `ps` button) for a scoped mini-htop: every window → pane →
-its process subtree (rooted at each pane's shell pid), with live %CPU, memory and
-state. Hover a row and click **✕** to kill that process — **⇧✕** for SIGKILL.
-Kills are **scoped**: the daemon only signals a pid it can prove is inside a
-pane's subtree (never by name), so the dashboard can't take down arbitrary
-processes. It reads `/proc` directly (Linux) and serves `/proc/tree` + `/proc/kill`
-behind the same CORS allowlist as the code panel.
-
-Two env knobs let a throwaway/second daemon run without colliding with your main
-one: **`MYMUX_SOCKET`** (tmux control socket, default `mymux`) and **`MYMUX_ADDR`**
-(listen address, default `127.0.0.1:8088`).
+its process subtree (rooted at each pane's shell pid, including `⌁` shells), with
+live %CPU, memory and state. Hover a row and click **✕** to kill that process —
+**⇧✕** for SIGKILL. Kills are **scoped**: the daemon only signals a pid it can
+prove is inside a pane's subtree (never by name), so the dashboard can't take
+down arbitrary processes. It reads `/proc` directly (Linux) and serves
+`/proc/tree` + `/proc/kill` behind the same CORS allowlist as the code panel.
 
 ## Ephemeral shells (⌘K s)
 
 Not everything needs tmux. Press **⌘K s** (or the `+sh` button) for a raw,
 non-tmux shell in its own top-level tab (marked `⌁`, dashed) — ideal for quick
 throwaway commands without nesting inside a persistent agent session. It's a
-mymuxd-owned pty: it inherits the focused pane's cwd and **survives a disconnect**
-(the daemon holds it), but is intentionally ephemeral — it dies with the daemon
-and reseeds best-effort (a raw byte replay, not a reconstructed screen, so a
-full-screen TUI may look rough on reconnect). Close it like any pane. Persistent
-(agent) work stays on tmux windows.
+mymuxd-owned pty: it inherits the focused pane's cwd (with `$TMUX` stripped, so
+you can even nest a tmux in it) and **survives a disconnect** (the daemon holds
+it), but is intentionally ephemeral — it dies with the daemon and reseeds
+best-effort (a raw byte replay, not a reconstructed screen, so a full-screen TUI
+may look rough on reconnect). Close it like any pane. Persistent (agent) work
+stays on tmux windows.
