@@ -18,6 +18,11 @@ use std::time::{Duration, Instant};
 
 use tokio::process::{Child, Command};
 
+/// In-process SSH tunnel (russh) for the native host manager — the ssh-binary
+/// path below stays as a fallback until this is proven end-to-end.
+pub mod russh_tunnel;
+pub use russh_tunnel::{run_russh_tunnel, HostConfig, Status};
+
 /// One control socket per (user, host, port) tunnel. ssh expands the `%r@%h:%p`
 /// tokens and the leading `~`.
 const CONTROL_PATH: &str = "~/.ssh/mymux-%r@%h:%p";
@@ -44,9 +49,11 @@ impl TunnelConfig {
             local_port: 8088,
             remote_port: 8088,
             ensure_daemon: false,
-            // Only checks + starts; never kills anything by name.
+            // Prefer the systemd --user service (persistent, restart-safe); fall
+            // back to a detached setsid launch if it isn't installed. Only checks
+            // + starts; never kills anything by name.
             remote_daemon_cmd:
-                "pgrep -x mymuxd >/dev/null 2>&1 || setsid mymuxd >/tmp/mymuxd.log 2>&1 </dev/null &"
+                "systemctl --user start mymuxd.service 2>/dev/null || pgrep -x mymuxd >/dev/null 2>&1 || setsid mymuxd >/tmp/mymuxd.log 2>&1 </dev/null &"
                     .to_string(),
             forward_command: None,
         }

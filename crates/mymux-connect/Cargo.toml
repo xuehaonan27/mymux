@@ -14,4 +14,5 @@ name = "mymux-connect"
 path = "src/main.rs"
 
 [dependencies]
+russh = "0.62.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "signal"] }

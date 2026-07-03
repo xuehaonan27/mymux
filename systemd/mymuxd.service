@@ -1,0 +1,25 @@
+[Unit]
+Description=mymux daemon — tmux control-mode bridge for the mymux workspace
+After=default.target
+
+[Service]
+Type=simple
+# Installed by scripts/install-systemd.sh (copies the release binary here).
+ExecStart=%h/.local/bin/mymuxd
+
+# CRITICAL: only signal mymuxd itself on stop/restart. The tmux server it drives
+# lives in this cgroup but MUST survive a mymuxd restart — it holds your sessions.
+# (Ephemeral pty shells die on their own when mymuxd's pty masters close.)
+# The default KillMode=control-group would kill the tmux server too.
+KillMode=process
+
+Restart=on-failure
+RestartSec=2
+
+# Optional overrides:
+# Environment=MYMUX_ROOT=%h
+# Environment=MYMUX_ADDR=127.0.0.1:8088
+# Environment=MYMUX_SOCKET=mymux
+
+[Install]
+WantedBy=default.target

@@ -139,6 +139,23 @@ passphrase prompt — essential here, since a Finder-launched app has no termina
 to prompt on. Drop the network and it restores on its own. For a signed release
 bundle, first regenerate the icon set: `cargo tauri icon src-tauri/icons/icon.png`.
 
+## Run mymuxd as a service (remote, systemd)
+
+For a daemon that survives SSH logout and restarts cleanly, install it as a
+`systemd --user` service on the dev box:
+
+```sh
+scripts/install-systemd.sh     # builds release, installs the unit, enables linger
+```
+
+This runs mymuxd under your user manager (not an ephemeral SSH-session scope) and
+enables lingering, so the daemon — and your tmux sessions — survive a disconnect.
+The unit uses **`KillMode=process`**, so `systemctl --user restart mymuxd` reloads
+the daemon **without killing the tmux server** (sessions persist across restarts;
+ephemeral `⌁` shells are dropped by design). Logs: `journalctl --user -u mymuxd -f`.
+The connector prefers this service and falls back to a detached `setsid` launch if
+it isn't installed, so nothing breaks without it.
+
 ## Agent status
 
 Window tabs are badged by each agent's state, so you glance instead of polling:
