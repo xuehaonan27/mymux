@@ -408,3 +408,146 @@ body {
 .pkill:hover {
   color: #ff7b72;
 }
+
+/* Host manager (Tauri): the connection gate, above every other overlay. */
+.host-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: #0b0e14;
+}
+.host-panel.show {
+  display: flex;
+}
+.host-inner {
+  width: 420px;
+  max-width: 90vw;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font: 13px ui-monospace, Menlo, monospace;
+  color: #c5cdd9;
+}
+.host-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #e6edf3;
+}
+.host-empty {
+  color: #5c6773;
+}
+.host-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.host-card {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid #1e2430;
+  border-radius: 8px;
+  background: #11151d;
+}
+.host-card:hover {
+  border-color: #2f3947;
+}
+.host-card-main {
+  flex: 1;
+  cursor: pointer;
+}
+.host-card-label {
+  color: #e6edf3;
+}
+.host-card-sub {
+  color: #5c6773;
+  font-size: 12px;
+}
+.host-icon {
+  background: transparent;
+  border: 0;
+  color: #5c6773;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px;
+}
+.host-icon:hover {
+  color: #c5cdd9;
+}
+.host-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.host-field span {
+  color: #8b949e;
+  font-size: 12px;
+}
+.host-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #2f3947;
+  border-radius: 6px;
+  background: #0d1017;
+  color: #e6edf3;
+  font: inherit;
+  box-sizing: border-box;
+}
+.host-input:focus {
+  outline: none;
+  border-color: #2f81f7;
+}
+.host-btn {
+  padding: 8px 12px;
+  border: 1px solid #2f3947;
+  border-radius: 6px;
+  background: #161b27;
+  color: #c5cdd9;
+  cursor: pointer;
+  font: inherit;
+}
+.host-btn:hover {
+  border-color: #3f4b5b;
+}
+.host-btn.primary {
+  background: #238636;
+  border-color: #238636;
+  color: #fff;
+}
+.host-btn.primary:hover {
+  background: #2ea043;
+}
+.host-back {
+  align-self: flex-start;
+  background: transparent;
+  border: 0;
+  color: #5c6773;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+}
+.host-back:hover {
+  color: #c5cdd9;
+}
+.host-status {
+  min-height: 18px;
+  white-space: pre-wrap;
+  font-size: 12px;
+}
+.host-status.info {
+  color: #8b949e;
+}
+.host-status.error {
+  color: #f85149;
+}
+.host-status.warn {
+  color: #d6a04c;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}

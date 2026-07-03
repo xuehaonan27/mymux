@@ -22,6 +22,8 @@ use tokio::process::{Child, Command};
 /// path below stays as a fallback until this is proven end-to-end.
 pub mod russh_tunnel;
 pub use russh_tunnel::{run_russh_tunnel, HostConfig, Status};
+pub mod hosts;
+pub use hosts::{config_dir, Host, HostStore};
 
 /// One control socket per (user, host, port) tunnel. ssh expands the `%r@%h:%p`
 /// tokens and the leading `~`.

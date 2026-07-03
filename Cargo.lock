@@ -1190,6 +1190,8 @@ name = "mymux-connect"
 version = "0.1.0"
 dependencies = [
  "russh",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

@@ -4,6 +4,7 @@ import './style.css';
 import { measureCell } from './metrics';
 import { initCodePanel } from './code';
 import { initProcPanel } from './proc';
+import { initHostManager } from './hostmanager';
 
 // M1.2: render tmux's full window layout. The daemon pushes a JSON state
 // snapshot (window list + layout tree + active pane) and pane-addressed output;
@@ -421,4 +422,21 @@ document.addEventListener(
   true,
 );
 
-connect();
+// In the Tauri app the host manager owns the SSH tunnel: on `connected` we start
+// the terminal WS. In a browser (dev) the WS talks to a manually-forwarded :8088.
+if (isTauri) {
+  let terminalStarted = false;
+  const hostManager = initHostManager(() => {
+    if (!terminalStarted) {
+      terminalStarted = true;
+      connect();
+    }
+  });
+  const hostBtn = document.getElementById('btn-host');
+  if (hostBtn) {
+    hostBtn.style.display = '';
+    hostBtn.addEventListener('click', () => hostManager.open());
+  }
+} else {
+  connect();
+}

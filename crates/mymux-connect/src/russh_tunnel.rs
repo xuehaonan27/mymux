@@ -12,6 +12,7 @@ use russh::client::{self, Config, Handler};
 use russh::keys::known_hosts::{check_known_hosts_path, learn_known_hosts_path};
 use russh::keys::ssh_key::PublicKey;
 use russh::keys::{load_secret_key, HashAlg, PrivateKeyWithHashAlg};
+use serde::Serialize;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -34,7 +35,8 @@ pub struct HostConfig {
 }
 
 /// Connection lifecycle, surfaced to the UI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Status {
     Connecting,
     Connected,
