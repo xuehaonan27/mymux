@@ -161,6 +161,7 @@ function onState(json: string) {
   } catch {
     return;
   }
+  if (msg.t === 'session_end') return onSessionEnd();
   if (msg.t !== 'state') return;
   windowList = msg.windows;
   activeWindow = msg.active_window;
@@ -168,6 +169,29 @@ function onState(json: string) {
   if (msg.layout) applyLayout(msg.layout);
   setActivePane(msg.active_pane);
   updateMeta(msg.windows.length);
+}
+
+// The tmux session is over (the last pane exited) — "done with this host". In
+// the app we return to the host manager; in a browser (no host manager) we
+// close the socket and let the reconnect start a fresh session.
+function onSessionEnd() {
+  for (const [pid, p] of panes) {
+    p.term.dispose();
+    p.el.remove();
+    panes.delete(pid);
+  }
+  windowList = [];
+  activeWindow = null;
+  setActivePane(null);
+  renderTabs([]);
+  updateMeta(0);
+  if (hostManager) {
+    suspended = true;
+    ws?.close();
+    hostManager.open();
+  } else {
+    ws?.close();
+  }
 }
 
 function onBinary(buf: ArrayBuffer) {
@@ -206,8 +230,13 @@ function setStatus(state: 'connecting' | 'open' | 'closed') {
 }
 
 let reconnectPending = false;
+// True while the host manager is in charge (session ended / switching hosts):
+// the terminal must not touch the socket until the next successful connect.
+let suspended = false;
+let hostManager: { open(): void } | null = null;
+
 function scheduleReconnect() {
-  if (reconnectPending) return;
+  if (suspended || reconnectPending) return;
   reconnectPending = true;
   setStatus('closed');
   window.setTimeout(() => {
@@ -217,6 +246,8 @@ function scheduleReconnect() {
 }
 
 function connect() {
+  if (suspended) return;
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   setStatus('connecting');
   ws = new WebSocket(WS_URL);
   ws.binaryType = 'arraybuffer';
@@ -425,17 +456,14 @@ document.addEventListener(
 // In the Tauri app the host manager owns the SSH tunnel: on `connected` we start
 // the terminal WS. In a browser (dev) the WS talks to a manually-forwarded :8088.
 if (isTauri) {
-  let terminalStarted = false;
-  const hostManager = initHostManager(() => {
-    if (!terminalStarted) {
-      terminalStarted = true;
-      connect();
-    }
+  hostManager = initHostManager(() => {
+    suspended = false;
+    connect(); // no-op if the socket is already open
   });
   const hostBtn = document.getElementById('btn-host');
   if (hostBtn) {
     hostBtn.style.display = '';
-    hostBtn.addEventListener('click', () => hostManager.open());
+    hostBtn.addEventListener('click', () => hostManager!.open());
   }
 } else {
   connect();

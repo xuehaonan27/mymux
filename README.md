@@ -116,7 +116,8 @@ migrated automatically). Pick one, enter the key's passphrase, **Connect**:
   refused outright — MITM protection.
 - The app starts `mymuxd` on the remote if needed (the systemd service, else a
   detached fallback), keeps `localhost:8088` forwarded with auto-reconnect, and
-  reveals the workspace. The `host` button in the bar switches hosts.
+  reveals the workspace. The `host` button in the bar switches hosts, and
+  **exiting the last pane ends the session and returns you to the host manager**.
 
 For a signed release bundle, first regenerate the icon set:
 `cargo tauri icon src-tauri/icons/icon.png`.

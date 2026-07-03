@@ -23,6 +23,34 @@ Deferred refinements — captured so we don't lose them. Not blocking.
 - Optional: a dedicated persistent ControlMaster (separate from the forward) so a
   forward restart never re-auths even without an agent.
 
+## Multi-host (planned, not started)
+One app connected to several hosts at once. Phases:
+- **A. Tunnel layer** — `run_russh_tunnel` accepts `local_port: 0` and reports the
+  bound port (extend `Status::Connected` or the event payload). `src-tauri`
+  `ConnState` becomes `HashMap<host_id, Active>`; `connect(host_id)` no longer
+  tears down other tunnels; add `disconnect(host_id)` + `conns_list()`; the
+  `mymux:status` event carries `host_id`.
+- **B. UI workspaces (the bulk)** — fold `main.ts`'s module globals
+  (ws/panes/windowList/activePane/…) into a `Workspace` class, one per host,
+  each with its own `ws://127.0.0.1:<port>/ws`; parameterize the code/proc
+  panels' API base (currently a hard-coded `:8088`). A top-level host strip in
+  the bar (chips / ⌘⇧1-9) switches the visible workspace; background ones stay
+  connected.
+- **C. Cross-host agent aggregation** — the bar sums waiting/done across all
+  connected hosts (the real payoff of multi-host).
+- **D. Polish** — per-host reconnect banners, remember open hosts in hosts.json.
+
+## Attach to an existing tmux session (planned, not started)
+Today mymuxd only drives its own socket + session (`tmux -L mymux … -s mymux`;
+socket overridable via `MYMUX_SOCKET`, session name hard-coded) — an existing
+`tmux new -s foo` on the default socket is invisible to it. To support:
+- Make the session configurable (`MYMUX_SESSION`), and/or list remote sessions
+  (`tmux ls`) in the host manager and attach `-A -s <picked>`.
+- Caveats to verify: an existing server keeps *its* config (our `-f` truecolor
+  conf only applies at server start); size coupling when a regular client is
+  attached simultaneously (tmux sizes to the smallest client); our model assumes
+  a single session per control client.
+
 ## Misc
 - Tighten the daemon's HTTP surface (per-session token in addition to the CORS allowlist).
 - M2.2: unify the `cargo tauri dev` vs `npm install` working directories.

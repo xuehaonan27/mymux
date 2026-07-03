@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mux_core::{parse_layout, ControlEvent, Model, PaneId, Parser, WindowId};
@@ -90,8 +90,6 @@ pub struct Hub {
     /// Last whole-window size (cols, rows) the UI reported — the sizer for
     /// ephemeral panes, which tmux does not lay out.
     last_size: Mutex<(u16, u16)>,
-    /// Self-reference so `send_cmd` can respawn the control client on demand.
-    me: Weak<Hub>,
 }
 
 impl Hub {
@@ -101,7 +99,7 @@ impl Hub {
         if let Err(e) = std::fs::write(&conf_path, TMUX_CONF) {
             eprintln!("mymuxd: could not write tmux config: {e}");
         }
-        Arc::new_cyclic(|me| Self {
+        Arc::new(Self {
             events_tx,
             state: Mutex::new(TmuxState::default()),
             model: Arc::new(Mutex::new(Model::new())),
@@ -110,7 +108,6 @@ impl Hub {
             ptys: Mutex::new(PtyManager::default()),
             active_view: Mutex::new(ActiveView::Tmux),
             last_size: Mutex::new((80, 24)),
-            me: me.clone(),
         })
     }
 
@@ -152,6 +149,11 @@ impl Hub {
 
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
+        // Size the fresh session to the last known client size right away, so a
+        // (re)spawned session lays out correctly even before the UI's next
+        // resize event arrives.
+        let (cols, rows) = *self.last_size.lock().unwrap();
+        let _ = cmd_tx.try_send(format!("refresh-client -C {cols}x{rows}"));
         state.running = true;
         state.cmd_tx = Some(cmd_tx);
         drop(state);
@@ -164,7 +166,6 @@ impl Hub {
 
         let hub = self.clone();
         tokio::spawn(async move {
-            let started = Instant::now();
             let status = child.wait().await;
             eprintln!("mymuxd: tmux control client exited: {status:?}");
             {
@@ -172,35 +173,17 @@ impl Hub {
                 state.running = false;
                 state.cmd_tx = None;
             }
-            // Self-heal: while UIs are attached, respawn the session so exiting
-            // the last pane never bricks the workspace. A client that died fast
-            // backs off, so a broken tmux can't crash-loop us.
-            if hub.events_tx.receiver_count() == 0 {
-                return; // the next WS connection respawns via ensure_started
-            }
-            let delay = if started.elapsed() < Duration::from_secs(10) {
-                Duration::from_secs(5)
-            } else {
-                Duration::from_millis(500)
-            };
-            tokio::time::sleep(delay).await;
-            if hub.events_tx.receiver_count() > 0 {
-                hub.ensure_started();
-            }
+            // The tmux session is over (e.g. the last pane exited). Deliberately
+            // no respawn: ending the session means "done with this host" — the
+            // UIs are told and return to their host picker (or reconnect, in the
+            // browser). The next WebSocket connection starts a fresh session via
+            // ensure_started.
+            hub.emit(ServerEvent::State(r#"{"t":"session_end"}"#.to_string()));
         });
     }
 
     async fn send_cmd(&self, cmd: String) {
-        let mut tx = self.state.lock().unwrap().cmd_tx.clone();
-        if tx.is_none() {
-            // The control client is gone (e.g. the last pane exited and took the
-            // session with it). Respawn on demand so a live UI never sends into
-            // the void; `new-session -A` re-attaches or creates as needed.
-            if let Some(hub) = self.me.upgrade() {
-                hub.ensure_started();
-                tx = self.state.lock().unwrap().cmd_tx.clone();
-            }
-        }
+        let tx = self.state.lock().unwrap().cmd_tx.clone();
         if let Some(tx) = tx {
             let _ = tx.send(cmd).await;
         }
