@@ -16,6 +16,11 @@ KillMode=process
 Restart=on-failure
 RestartSec=2
 
+# systemd --user gives services a minimal PATH; include the per-user tool dirs
+# so language servers (rust-analyzer via rustup, etc.) resolve. The daemon also
+# searches these itself, so this is belt-and-braces.
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:%h/go/bin:/usr/local/bin:/usr/bin:/bin
+
 # Optional overrides:
 # Environment=MYMUX_ROOT=%h
 # Environment=MYMUX_ADDR=127.0.0.1:8088

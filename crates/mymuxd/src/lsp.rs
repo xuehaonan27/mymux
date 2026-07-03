@@ -39,6 +39,26 @@ fn server_cmd(lang: &str) -> Option<(&'static str, &'static [&'static str])> {
     }
 }
 
+/// Locate a server binary. Under systemd --user the daemon's PATH is minimal
+/// (no `~/.cargo/bin` etc.), so after env PATH we search the usual per-user
+/// tool directories explicitly.
+fn find_server(cmd: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        dirs.push(home.join(".cargo/bin"));
+        dirs.push(home.join(".local/bin"));
+        dirs.push(home.join("go/bin"));
+    }
+    dirs.into_iter().map(|d| d.join(cmd)).find(|p| {
+        p.metadata()
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    })
+}
+
 /// The workspace root for a language, walking up from the pane's cwd. For rust
 /// that's the OUTERMOST ancestor with a Cargo.toml (the cargo workspace root).
 async fn lsp_root(pane: Option<u32>, lang: &str) -> Option<PathBuf> {
@@ -81,9 +101,13 @@ pub async fn info(Query(q): Query<LspQuery>) -> Json<LspInfo> {
     let Some((cmd, _)) = server_cmd(&q.lang) else {
         return unavailable(format!("unsupported language: {}", q.lang), None);
     };
+    let fs_root = root_for(q.pane).await.display().to_string();
     // The binary must actually RUN — a rustup shim can be on PATH while the
-    // component is missing, so probe `--version` instead of a PATH lookup.
-    let runs = Command::new(cmd)
+    // component is missing, so probe `--version` on the resolved path.
+    let Some(bin) = find_server(cmd) else {
+        return unavailable(format!("{cmd} is not installed"), Some(fs_root));
+    };
+    let runs = Command::new(&bin)
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -91,7 +115,6 @@ pub async fn info(Query(q): Query<LspQuery>) -> Json<LspInfo> {
         .await
         .map(|s| s.success())
         .unwrap_or(false);
-    let fs_root = root_for(q.pane).await.display().to_string();
     if !runs {
         return unavailable(format!("{cmd} is not installed"), Some(fs_root));
     }
@@ -113,9 +136,10 @@ pub async fn ws_handler(ws: WebSocketUpgrade, Query(q): Query<LspQuery>) -> Resp
 
 async fn handle(socket: WebSocket, q: LspQuery) {
     let Some((cmd, args)) = server_cmd(&q.lang) else { return };
+    let Some(bin) = find_server(cmd) else { return };
     let Some(root) = lsp_root(q.pane, &q.lang).await else { return };
 
-    let spawn = Command::new(cmd)
+    let spawn = Command::new(&bin)
         .args(args)
         .current_dir(&root)
         .stdin(Stdio::piped())
