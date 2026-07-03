@@ -166,7 +166,10 @@ function onState(json: string) {
   windowList = msg.windows;
   activeWindow = msg.active_window;
   renderTabs(msg.windows);
-  if (msg.layout) applyLayout(msg.layout);
+  if (msg.layout) {
+    applyLayout(msg.layout);
+    nudgeSizeIfMismatched(msg.layout);
+  }
   setActivePane(msg.active_pane);
   updateMeta(msg.windows.length);
 }
@@ -219,9 +222,29 @@ function sendInput(pane: number, data: string) {
 
 // We are the screen; tmux is the authoritative sizer. Report the whole-window
 // size in cells; tmux splits it and pushes back the per-pane layout.
+function desiredSize() {
+  return {
+    cols: Math.max(20, Math.floor(termArea.clientWidth / cellW)),
+    rows: Math.max(5, Math.floor(termArea.clientHeight / cellH)),
+  };
+}
+
 function sendResize() {
-  const cols = Math.max(20, Math.floor(termArea.clientWidth / cellW));
-  const rows = Math.max(5, Math.floor(termArea.clientHeight / cellH));
+  const { cols, rows } = desiredSize();
+  sendJson({ t: 'resize', cols, rows });
+}
+
+// Size self-healing: if a state snapshot is laid out at a size other than ours
+// (e.g. a session created at tmux's default 80x24 before our resize landed),
+// nudge the daemon. Rate-limited so a size we can't win (another attached tmux
+// client clamping it) degrades to a slow nudge instead of a loop.
+let lastSizeNudge = 0;
+function nudgeSizeIfMismatched(root: LayoutNode) {
+  const { cols, rows } = desiredSize();
+  if (root.w === cols && root.h === rows) return;
+  const now = Date.now();
+  if (now - lastSizeNudge < 1500) return;
+  lastSizeNudge = now;
   sendJson({ t: 'resize', cols, rows });
 }
 

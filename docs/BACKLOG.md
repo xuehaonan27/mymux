@@ -40,16 +40,12 @@ One app connected to several hosts at once. Phases:
   connected hosts (the real payoff of multi-host).
 - **D. Polish** — per-host reconnect banners, remember open hosts in hosts.json.
 
-## Attach to an existing tmux session (planned, not started)
-Today mymuxd only drives its own socket + session (`tmux -L mymux … -s mymux`;
-socket overridable via `MYMUX_SOCKET`, session name hard-coded) — an existing
-`tmux new -s foo` on the default socket is invisible to it. To support:
-- Make the session configurable (`MYMUX_SESSION`), and/or list remote sessions
-  (`tmux ls`) in the host manager and attach `-A -s <picked>`.
-- Caveats to verify: an existing server keeps *its* config (our `-f` truecolor
-  conf only applies at server start); size coupling when a regular client is
-  attached simultaneously (tmux sizes to the smallest client); our model assumes
-  a single session per control client.
+## Attach to an existing tmux session — decided against (2026-07-03)
+mymuxd only drives its own socket + session (`tmux -L mymux … -s mymux`). Cleanly
+attaching to a user's pre-existing tmux (default socket) would inherit *that*
+server's config (no truecolor conf), couple sizes with other attached clients,
+and break the one-session-per-control-client model — not worth it; a standalone
+tmux stays standalone.
 
 ## Misc
 - Tighten the daemon's HTTP surface (per-session token in addition to the CORS allowlist).
