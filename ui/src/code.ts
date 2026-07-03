@@ -7,6 +7,7 @@ import { javascript } from '@codemirror/lang-javascript';
 import { python } from '@codemirror/lang-python';
 import { json } from '@codemirror/lang-json';
 import { markdown } from '@codemirror/lang-markdown';
+import { lspExtensionFor } from './lsp';
 
 // Resolved per call so the panel follows the active workspace's daemon.
 let apiBase = () => 'http://127.0.0.1:8088';
@@ -189,7 +190,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       extensions: [basicSetup, oneDark, editorTheme, EditorView.editable.of(false)],
     });
 
-  function fileState(path: string, doc: string): EditorState {
+  function fileState(path: string, doc: string, lsp: Extension | null): EditorState {
     return EditorState.create({
       doc,
       extensions: [
@@ -197,6 +198,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
         oneDark,
         editorTheme,
         langFor(path),
+        ...(lsp ? [lsp] : []),
         keymap.of([{ key: 'Mod-s', preventDefault: true, run: () => (void save(), true) }]),
         EditorView.updateListener.of((u) => {
           if (u.docChanged) renderHeader();
@@ -274,9 +276,12 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     // Only now can opening actually discard edits — an unreadable file never
     // should have prompted (nor clobbered the buffer).
     if (!confirmDiscard()) return;
+    // Language smarts when available (rust for now); absent/failed → plain editor.
+    const lsp = await lspExtensionFor(apiBase(), s.pane, path);
+    if (current !== s) return;
     s.path = path;
     s.savedDoc = content;
-    s.state = fileState(path, content);
+    s.state = fileState(path, content, lsp);
     mount(s.state);
     renderHeader();
     editor!.focus();

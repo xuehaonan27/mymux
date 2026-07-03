@@ -217,8 +217,16 @@ git-changes list on the left, a CodeMirror editor / unified diff on the right
 (loaded on first use, so the app itself stays small). **⌘P** fuzzy-opens any
 file in the repo. Open a file to read or edit it (⌘S saves); click a changed
 file to see its diff. Each pane gets its own session rooted at that pane's cwd,
-preserved across switches. It's a "quick look," not an IDE — no LSP yet (the
-last open pain point), just fast browse/edit/diff without opening VSCode.
+preserved across switches.
+
+**Language smarts (LSP)**: opening a `.rs` file inside a Cargo project wires the
+editor to a daemon-managed **rust-analyzer** — live diagnostics (squiggles),
+hover docs, completion and signature help, with rename (F2) / go-to-definition
+(F12) bound where the server supports them. Nothing to configure: install
+rust-analyzer on the dev box (`rustup component add rust-analyzer`) and it's
+picked up; without it the editor simply opens plain. The daemon speaks raw LSP
+over `/lsp` on the existing port — see `docs/LSP-PLAN.md` for the roadmap
+(more languages + Open VSX-based server install are next).
 
 The daemon serves `/fs/*` and `/git/*` confined to a root (the pane's cwd, else
 `MYMUX_ROOT`/cwd) — rejecting path escapes, with a CORS allowlist so only the
