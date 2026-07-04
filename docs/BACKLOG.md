@@ -3,6 +3,8 @@
 Deferred refinements — captured so we don't lose them. Not blocking.
 
 ## Code panel (M4)
+- **Editor ergonomics pass** — the user finds the editor "有点难用" (2026-07-03,
+  deferred by their call); collect concrete complaints and address as a batch.
 - Lazy-load CodeMirror (dynamic `import()` on first ⌘E) to shrink the initial bundle.
 - Side-by-side (split) diff view, in addition to the unified one.
 - File-tree search / fuzzy open (⌘P).

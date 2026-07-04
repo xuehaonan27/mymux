@@ -4,7 +4,9 @@
 // editor bindings are library-specific).
 
 import { Extension } from '@codemirror/state';
-import { LSPClient, languageServerExtensions, Transport } from '@codemirror/lsp-client';
+import { EditorView, ViewPlugin, ViewUpdate } from '@codemirror/view';
+import { setDiagnostics, Diagnostic } from '@codemirror/lint';
+import { LSPClient, LSPPlugin, languageServerExtensions, Transport } from '@codemirror/lsp-client';
 
 interface LspInfo {
   available: boolean;
@@ -46,6 +48,86 @@ function wsTransport(url: string, onDown: () => void): Transport {
 
 const langOf = (path: string) => (path.endsWith('.rs') ? 'rust' : null);
 
+// The library ADVERTISES LSP 3.17 pull diagnostics (`textDocument.diagnostic`
+// in its default capabilities) but implements no puller — so servers like
+// rust-analyzer stop pushing `publishDiagnostics` and nothing ever renders.
+// This plugin closes the gap: pull on open, debounced on edits, with a gentle
+// warm-up retry while the server is still indexing.
+interface PullResult {
+  kind: 'full' | 'unchanged';
+  items?: Array<{
+    range: { start: { line: number; character: number }; end: { line: number; character: number } };
+    severity?: number;
+    message: string;
+  }>;
+}
+
+function pullDiagnostics(): Extension {
+  return ViewPlugin.fromClass(
+    class {
+      private timer: number | undefined;
+      private gen = 0;
+      private warmupLeft = 20; // ~60s of 3s retries while indexing / empty
+
+      constructor(private readonly view: EditorView) {
+        this.schedule(300);
+      }
+
+      update(u: ViewUpdate) {
+        if (u.docChanged) this.schedule(500);
+      }
+
+      private schedule(ms: number) {
+        window.clearTimeout(this.timer);
+        this.timer = window.setTimeout(() => void this.pull(), ms);
+      }
+
+      private async pull() {
+        const plugin = LSPPlugin.get(this.view);
+        if (!plugin) return;
+        const gen = ++this.gen;
+        try {
+          await plugin.client.initializing;
+          plugin.client.sync();
+          const res = await plugin.client.request<{ textDocument: { uri: string } }, PullResult>(
+            'textDocument/diagnostic',
+            { textDocument: { uri: plugin.uri } },
+          );
+          if (gen !== this.gen || res.kind === 'unchanged') return;
+          const items = res.items ?? [];
+          const sev = (n?: number): Diagnostic['severity'] =>
+            n === 1 ? 'error' : n === 2 ? 'warning' : n === 4 ? 'hint' : 'info';
+          const diags: Diagnostic[] = items.map((d) => ({
+            from: plugin.fromPosition(d.range.start),
+            to: plugin.fromPosition(d.range.end),
+            severity: sev(d.severity),
+            message: d.message,
+          }));
+          this.view.dispatch(setDiagnostics(this.view.state, diags));
+          if (items.length === 0 && this.warmupLeft > 0) {
+            // Possibly still indexing — an empty answer now isn't final.
+            this.warmupLeft -= 1;
+            this.schedule(3000);
+          } else {
+            this.warmupLeft = 0;
+          }
+        } catch {
+          if (gen !== this.gen) return;
+          if (this.warmupLeft > 0) {
+            this.warmupLeft -= 1;
+            this.schedule(3000);
+          }
+        }
+      }
+
+      destroy() {
+        this.gen += 1;
+        window.clearTimeout(this.timer);
+      }
+    },
+  );
+}
+
 /**
  * The LSP editor extension for a file (diagnostics, hover, completion, …), or
  * null when the language is unsupported or the server is unavailable — the
@@ -71,6 +153,9 @@ export async function lspExtensionFor(
       client = new LSPClient({
         rootUri: `file://${info.root}`,
         extensions: languageServerExtensions(),
+        // rust-analyzer can block requests while indexing a big workspace; the
+        // 3s default would spuriously fail the first pulls.
+        timeout: 30000,
       });
       const wsUrl = `${apiBase.replace(/^http/, 'ws')}/lsp?${paneQ}lang=${lang}`;
       client.connect(wsTransport(wsUrl, () => conns.delete(key)));
@@ -79,7 +164,7 @@ export async function lspExtensionFor(
     // Relative paths resolve against the pane's cwd (fs_root), which may sit
     // below the language server's workspace root.
     const uri = encodeURI(`file://${info.fs_root}/${relPath}`);
-    return client.plugin(uri, lang);
+    return [client.plugin(uri, lang), pullDiagnostics()];
   } catch {
     return null;
   }

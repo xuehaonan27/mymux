@@ -66,6 +66,26 @@ still zero extensions, and lose our CodeMirror investment. No.
   per-platform server binary (rust-analyzer ships it), register it; then gopls
   / pyright / clangd. Version-pin + prefer verified publishers (Open VSX had a
   2026 supply-chain incident).
+  **Server resolution order (decided 2026-07-03; supersedes the C1 stopgap):**
+  ① the mymux-managed install dir (`~/.local/share/mymux/lsp/<lang>/…`,
+  recorded in a manifest — explicit and versioned, no guessing), ② a
+  user-configured path (settings), ③ the C1 heuristic (`find_server`: env PATH
+  + `~/.cargo/bin` + `~/.local/bin` + `~/go/bin`) kept only as a zero-config
+  convenience fallback. The heuristic exists because systemd --user services
+  get a minimal PATH; once ①/② exist they are the primary mechanism.
+
+### C1 field notes (2026-07-03)
+- The client library **advertises** LSP 3.17 pull diagnostics
+  (`textDocument.diagnostic` in its default capabilities) **but implements no
+  puller** — servers like rust-analyzer then stop pushing `publishDiagnostics`
+  entirely (hover worked, squiggles never appeared). Fixed in our seam:
+  `pullDiagnostics()` in `ui/src/lsp.ts` pulls `textDocument/diagnostic` on
+  open + debounced on edits, with a bounded warm-up retry while the server
+  indexes; client `timeout` raised to 30s (first pulls can block on indexing).
+  Exactly the kind of gap the seam is for.
+- `@codemirror/view` pinned to 6.42.1 (the 6.43.x line shipped a DOM-update
+  corruption regression family that broke rendering after fold/unfold cycles);
+  revisit the pin when 6.43.x stabilizes.
 
 **Client-library choice (`@codemirror/lsp-client`) and the replacement
 principles.** An LSP client decomposes into three layers, and their portability
