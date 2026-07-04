@@ -239,12 +239,16 @@ function renderTabs(w: Workspace | null) {
       e.preventDefault();
       beginRename(tab, w, win);
     });
-    tab.title = 'double-click to rename';
+    tab.title = 'double-click to rename · click away to save · Esc to cancel';
     tabsEl.appendChild(tab);
   }
 }
 
 // Inline tab rename (native dialogs are unreliable in the Tauri webview).
+// Click away to save, Esc to cancel. Enter is deliberately inert: committing
+// on Enter and refocusing the pane would let the tail of the keystroke
+// (keypress/keyup) land in the shell's terminal — a stray \r there executes
+// whatever is sitting on the prompt.
 function beginRename(tab: HTMLElement, w: Workspace, win: WinInfo) {
   const input = document.createElement('input');
   input.className = 'tab-rename';
@@ -261,16 +265,21 @@ function beginRename(tab: HTMLElement, w: Workspace, win: WinInfo) {
     if (commit && name !== (win.name || '')) {
       w.sendJson({ t: 'rename_window', id: win.id, name });
     }
-    const ws = active();
-    renderTabs(ws); // restore now; the server state re-renders with the new name
-    ws?.refocusActive();
+    renderTabs(active()); // restore now; the server state re-renders with the new name
   };
   input.addEventListener('keydown', (e) => {
     e.stopPropagation();
-    if (e.key === 'Enter') finish(true);
-    else if (e.key === 'Escape') finish(false);
+    if (e.key === 'Enter') {
+      e.preventDefault(); // swallowed — see above; click away to save
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      finish(false);
+      // Cancelled by key, not by clicking elsewhere: focus goes back to the
+      // pane (Esc produces no keypress, so nothing can leak into the shell).
+      active()?.refocusActive();
+    }
   });
-  input.addEventListener('blur', () => finish(false));
+  input.addEventListener('blur', () => finish(true));
   input.focus();
   input.select();
 }
