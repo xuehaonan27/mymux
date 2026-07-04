@@ -75,6 +75,24 @@ still zero extensions, and lose our CodeMirror investment. No.
   get a minimal PATH; once ①/② exist they are the primary mechanism.
 
 ### C1 field notes (2026-07-03)
+- **Diagnostics are two-tier, and C1 only wires tier 1.** Tier 1 = rust-analyzer's
+  *native* diagnostics (syntax errors like a missing `;`, some inference) —
+  served by our pull loop. Tier 2 = full compiler errors (`cargo check` /
+  flycheck: E0425 unresolved name, borrowck, …) — these run **on save** and are
+  announced via `workspace/diagnostic/refresh`, and neither link is wired: our
+  editor never sends `textDocument/didSave` (⌘S writes over HTTP only), and the
+  client library **auto-rejects all server→client requests** (refresh included)
+  with no hook to intercept. Empirically verified: `asdf;` (semantically bogus,
+  syntactically fine) pulls 0 items even after 200s. Fix belongs to the
+  adaptation batch: send didSave on ⌘S + scheduled post-save re-pulls; proper
+  refresh handling needs forking the lib — or the self-built client.
+- **Absorption principle (user, 2026-07-03): every seam compensation is design
+  input for the self-built client, to be absorbed — not ported.** The list so
+  far: the pull-diagnostics plugin (lib advertises pull, implements none), the
+  30s timeout override, `find_server`'s PATH heuristic (→ C3 managed installs),
+  didSave/flycheck wiring (pending), server→client request handling (refresh —
+  impossible through the lib today). A self-built LSP client owns all of these
+  natively instead of patching around someone else's defaults.
 - The client library **advertises** LSP 3.17 pull diagnostics
   (`textDocument.diagnostic` in its default capabilities) **but implements no
   puller** — servers like rust-analyzer then stop pushing `publishDiagnostics`
@@ -82,7 +100,6 @@ still zero extensions, and lose our CodeMirror investment. No.
   `pullDiagnostics()` in `ui/src/lsp.ts` pulls `textDocument/diagnostic` on
   open + debounced on edits, with a bounded warm-up retry while the server
   indexes; client `timeout` raised to 30s (first pulls can block on indexing).
-  Exactly the kind of gap the seam is for.
 - `@codemirror/view` pinned to 6.42.1 (the 6.43.x line shipped a DOM-update
   corruption regression family that broke rendering after fold/unfold cycles);
   revisit the pin when 6.43.x stabilizes.

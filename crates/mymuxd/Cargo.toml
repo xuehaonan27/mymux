@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+avt = "0.18.0"
 axum = { version = "0.8.9", features = ["ws"] }
 futures-util = "0.3.32"
 mux-core = { path = "../mux-core" }

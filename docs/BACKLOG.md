@@ -2,6 +2,20 @@
 
 Deferred refinements — captured so we don't lose them. Not blocking.
 
+## LSP + editor adaptation batch (parked 2026-07-03 — mainline first, user's call)
+Deferred until the mainline (native engine, …) is mostly done; several items are
+really arguments for the self-built editor/LSP client (see LSP-PLAN's absorption
+principle):
+- Compiler-tier diagnostics: send `textDocument/didSave` on ⌘S + scheduled
+  post-save re-pulls (cargo check takes seconds); real `workspace/diagnostic/
+  refresh` handling needs a lib fork or the self-built client.
+- **Dirty-file lock**: with unsaved changes you can't open another file —
+  suspected root cause: `window.confirm()` is a no-op/falsy in the Tauri v2
+  webview, so the discard prompt can never be accepted. Verify; fix = async
+  in-panel confirm, or better: per-file buffers (multi-buffer lite).
+- Multi-file buffers + tabs in the code panel (editor architecture).
+- General editor ergonomics pass (user: "有点难用" — collect concrete complaints).
+
 ## Code panel (M4)
 - **Editor ergonomics pass** — the user finds the editor "有点难用" (2026-07-03,
   deferred by their call); collect concrete complaints and address as a batch.
@@ -28,10 +42,9 @@ Deferred refinements — captured so we don't lose them. Not blocking.
 ## Replace tmux with a native engine — declared endgame (2026-07-03)
 Since external-tmux interop is rejected, tmux is a pure implementation detail —
 replacing it is coherent. Strangler-fig path (each step ships alone, no big bang):
-1. **Server-side grid for ephemeral panes** (use a proven crate:
-   `alacritty_terminal` / `termwiz` / `avt`; serialize grid → escapes for reseed).
-   Standalone win: fixes ephemeral's "rough reseed" limitation and de-risks the
-   core tech. Do this first.
+1. ~~**Server-side grid for ephemeral panes**~~ — **DONE 2026-07-03**
+   (`crates/mymuxd/src/grid.rs`: avt-based `PaneGrid`; faithful reseed with
+   colors/cursor/alt-screen + styled scrollback history; UTF-8 carry decoding).
 2. Persistent native panes: same engine + restart survival — design fork to
    settle: a tiny `mymux-ptyd` holder process (our own client/server split)
    vs systemd FD store (single process, fd + serialized grid across restarts).
@@ -41,7 +54,7 @@ replacing it is coherent. Strangler-fig path (each step ships alone, no big bang
 4. New windows default to native; tmux engine kept for a transition, then removed.
 Honest counterweight: no acute pain forces this — drivers are strategic (own the
 stack; per-window sizes; multi-client semantics; kill the control-mode boundary
-that caused most historical bugs). Don't start before multi-host/LSP priorities.
+that caused most historical bugs).
 
 ## Multi-host — SHIPPED 2026-07-03; remaining polish
 - ~~Remember open hosts~~ → the manager now boots into last time's host

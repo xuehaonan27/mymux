@@ -7,6 +7,7 @@
 mod agent;
 mod fs;
 mod git;
+mod grid;
 mod lsp;
 mod proc;
 mod pty;

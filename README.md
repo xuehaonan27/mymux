@@ -249,7 +249,8 @@ non-tmux shell in its own top-level tab (marked `⌁`, dashed) — ideal for qui
 throwaway commands without nesting inside a persistent agent session. It's a
 mymuxd-owned pty: it inherits the focused pane's cwd (with `$TMUX` stripped, so
 you can even nest a tmux in it) and **survives a disconnect** (the daemon holds
-it), but is intentionally ephemeral — it dies with the daemon and reseeds
-best-effort (a raw byte replay, not a reconstructed screen, so a full-screen TUI
-may look rough on reconnect). Close it like any pane. Persistent (agent) work
-stays on tmux windows.
+it). Reconnects and tab switches restore a **faithful terminal snapshot** —
+colors, cursor, alternate screen (vim & co.) and recent scrollback — from a
+server-side terminal grid, the first building block of the future native
+engine. It still dies with the daemon (by design). Close it like any pane;
+persistent (agent) work stays on tmux windows.

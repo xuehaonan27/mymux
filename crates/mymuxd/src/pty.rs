@@ -1,10 +1,11 @@
 //! Ephemeral (non-tmux) panes: a raw shell on a mymuxd-owned pty, shown as its
-//! own top-level tab. Unlike tmux panes these are best-effort — they survive a WS
-//! disconnect (the daemon holds them) but die with the daemon, and reseed from a
-//! raw byte ring rather than a reconstructed screen. Routing keys off a high-bit
-//! id so the rest of the daemon stays a single `is_ephemeral` test.
+//! own top-level tab. They survive a WS disconnect (the daemon holds them) but
+//! die with the daemon, and reseed from a server-side terminal grid
+//! ([`PaneGrid`]) — full colors/cursor/alt-screen fidelity, same as tmux panes.
+//! Routing keys off a high-bit id so the rest of the daemon stays a single
+//! `is_ephemeral` test.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -12,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::broadcast;
 
+use crate::grid::PaneGrid;
 use crate::tmux::{Hub, ServerEvent};
 
 /// High bit marks an ephemeral id, so it can never collide with tmux's small
@@ -21,15 +23,13 @@ pub fn is_ephemeral(id: u32) -> bool {
     id & EPH_BIT != 0
 }
 
-/// Cap on the per-pane best-effort reseed buffer (raw pty bytes).
-const RING_CAP: usize = 256 * 1024;
-
 struct Ephemeral {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     child_pid: u32,
-    ring: Arc<Mutex<VecDeque<u8>>>,
+    /// Server-side terminal state; the reseed source.
+    grid: Arc<Mutex<PaneGrid>>,
     name: String,
 }
 
@@ -87,10 +87,10 @@ impl PtyManager {
         let master = pair.master;
         drop(pair.slave); // so the master reader EOFs when the shell exits
 
-        let ring = Arc::new(Mutex::new(VecDeque::with_capacity(4096)));
+        let grid = Arc::new(Mutex::new(PaneGrid::new(cols, rows)));
 
-        // Reader thread: pty → ring + broadcast; on EOF schedule Hub cleanup.
-        let ring2 = ring.clone();
+        // Reader thread: pty → grid + broadcast; on EOF schedule Hub cleanup.
+        let grid2 = grid.clone();
         std::thread::spawn(move || {
             let mut reader = reader;
             let mut buf = [0u8; 8192];
@@ -99,12 +99,7 @@ impl PtyManager {
                     Ok(0) | Err(_) => break, // shell exited / pty closed
                     Ok(n) => {
                         let chunk = &buf[..n];
-                        {
-                            let mut r = ring2.lock().unwrap();
-                            r.extend(chunk.iter().copied());
-                            let overflow = r.len().saturating_sub(RING_CAP);
-                            r.drain(..overflow);
-                        }
+                        grid2.lock().unwrap().feed(chunk);
                         let _ = tx.send(ServerEvent::Output { pane: id, data: chunk.to_vec() });
                     }
                 }
@@ -119,7 +114,7 @@ impl PtyManager {
                 master,
                 child,
                 child_pid,
-                ring,
+                grid,
                 name: "shell".to_string(),
             },
         );
@@ -142,20 +137,15 @@ impl PtyManager {
             let _ = e
                 .master
                 .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+            e.grid.lock().unwrap().resize(cols, rows);
         }
     }
 
-    /// A clean-screen reseed of the pane's recent output (best effort — a raw
-    /// byte replay, not a reconstructed screen like tmux `capture-pane`).
-    pub fn ring_snapshot(&self, id: u32) -> Vec<u8> {
+    /// A faithful reseed of the pane's terminal state (grid + colors + cursor +
+    /// alt screen), safe to send to a fresh or mid-state client terminal.
+    pub fn snapshot(&self, id: u32) -> Vec<u8> {
         match self.map.get(&id) {
-            Some(e) => {
-                let r = e.ring.lock().unwrap();
-                let mut out = Vec::with_capacity(r.len() + 8);
-                out.extend_from_slice(b"\x1b[2J\x1b[H");
-                out.extend(r.iter().copied());
-                out
-            }
+            Some(e) => e.grid.lock().unwrap().snapshot(),
             None => Vec::new(),
         }
     }

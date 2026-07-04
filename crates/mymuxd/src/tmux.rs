@@ -244,7 +244,7 @@ impl Hub {
             }
             *self.active_view.lock().unwrap() = ActiveView::Ephemeral(id);
             self.emit(ServerEvent::State(self.state_json()));
-            let seed = self.ptys.lock().unwrap().ring_snapshot(id);
+            let seed = self.ptys.lock().unwrap().snapshot(id);
             if !seed.is_empty() {
                 self.emit(ServerEvent::Output { pane: id, data: seed });
             }
@@ -513,7 +513,7 @@ impl Hub {
         // An ephemeral tab reseeds from its raw ring, not from tmux.
         let view = *self.active_view.lock().unwrap();
         if let ActiveView::Ephemeral(id) = view {
-            let seed = self.ptys.lock().unwrap().ring_snapshot(id);
+            let seed = self.ptys.lock().unwrap().snapshot(id);
             return if seed.is_empty() { Vec::new() } else { vec![(id, seed)] };
         }
         let panes: Vec<u32> = self
