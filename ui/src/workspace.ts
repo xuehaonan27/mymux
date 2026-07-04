@@ -292,6 +292,11 @@ export class Workspace {
     this.panes.get(id)?.term.focus();
   }
 
+  /** Return keyboard focus to the active pane (e.g. after an inline input). */
+  refocusActive() {
+    if (this.activePane != null && this.visible) this.panes.get(this.activePane)?.term.focus();
+  }
+
   private setActivePane(id: number | null) {
     const changed = id !== this.activePane;
     this.activePane = id;

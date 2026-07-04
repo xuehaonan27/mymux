@@ -255,10 +255,15 @@ function beginRename(tab: HTMLElement, w: Workspace, win: WinInfo) {
     if (done) return;
     done = true;
     const name = input.value.trim();
+    // Remove the input BEFORE re-rendering: renderTabs skips rebuilds while a
+    // rename input is present, so leaving it attached would wedge the bar.
+    input.remove();
     if (commit && name !== (win.name || '')) {
       w.sendJson({ t: 'rename_window', id: win.id, name });
     }
-    renderTabs(active()); // restore now; the server state re-renders with the new name
+    const ws = active();
+    renderTabs(ws); // restore now; the server state re-renders with the new name
+    ws?.refocusActive();
   };
   input.addEventListener('keydown', (e) => {
     e.stopPropagation();
