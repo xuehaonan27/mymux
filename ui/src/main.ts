@@ -206,6 +206,10 @@ function endWorkspace(w: Workspace, disconnectTunnel: boolean) {
 // ---- shared bar rendering ----------------------------------------------------
 
 function renderTabs(w: Workspace | null) {
+  // A rename is in progress: don't rebuild the bar under the input (state
+  // updates arrive constantly — e.g. the dblclick's own select_window echo).
+  // finish() re-renders with the then-current windowList.
+  if (tabsEl.querySelector('input.tab-rename')) return;
   tabsEl.replaceChildren();
   if (!w) return;
   const low = (id: number) => id % 0x40000000;
@@ -225,7 +229,12 @@ function renderTabs(w: Workspace | null) {
     const label =
       win.name || (win.ephemeral || win.persistent ? String(low(win.id)) : `@${win.id}`);
     tab.appendChild(document.createTextNode(glyph + label));
-    tab.addEventListener('click', () => w.sendJson({ t: 'select_window', id: win.id }));
+    tab.addEventListener('click', (e) => {
+      // The 2nd click of a double-click must not re-select (its state echo
+      // would race the rename input).
+      if (e.detail > 1) return;
+      w.sendJson({ t: 'select_window', id: win.id });
+    });
     tab.addEventListener('dblclick', (e) => {
       e.preventDefault();
       beginRename(tab, w, win);
@@ -249,7 +258,7 @@ function beginRename(tab: HTMLElement, w: Workspace, win: WinInfo) {
     if (commit && name !== (win.name || '')) {
       w.sendJson({ t: 'rename_window', id: win.id, name });
     }
-    renderTabs(w); // restore now; the server state re-renders with the new name
+    renderTabs(active()); // restore now; the server state re-renders with the new name
   };
   input.addEventListener('keydown', (e) => {
     e.stopPropagation();

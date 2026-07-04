@@ -301,7 +301,9 @@ export class Workspace {
     // Also refocus when focus fell back to <body>: switching windows disposes
     // the previously-focused terminal, and no one else has claimed focus.
     const orphaned = document.activeElement === document.body;
-    if ((changed || orphaned) && id != null && this.visible) {
+    // Never steal focus from a text input (tab rename, host manager, …).
+    const typing = document.activeElement instanceof HTMLInputElement;
+    if ((changed || orphaned) && !typing && id != null && this.visible) {
       this.panes.get(id)?.term.focus();
     }
   }
