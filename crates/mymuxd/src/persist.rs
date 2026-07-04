@@ -17,13 +17,22 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use crate::native::NativeWindows;
 use crate::tmux::{Hub, ServerEvent};
 
+/// What we mirror per live pane. `ephemeral` is the pane's CURRENT kind (the
+/// id keeps its birth bits; ⌁→∞ promotion flips only this flag).
+#[derive(Clone)]
+pub struct PaneMeta {
+    pub name: String,
+    pub pid: u32,
+    pub ephemeral: bool,
+}
+
 #[derive(Default)]
 pub struct Persist {
     client: RwLock<Option<Arc<Client>>>,
     connect_lock: AsyncMutex<()>,
-    /// Live native panes as we know them — `id → (name, shell pid)` — kept in
-    /// step with ptyd via the resync-on-connect List plus spawn/exit events.
-    mirror: Mutex<BTreeMap<u32, (String, u32)>>,
+    /// Live native panes as we know them, kept in step with ptyd via the
+    /// resync-on-connect List plus spawn/exit events.
+    mirror: Mutex<BTreeMap<u32, PaneMeta>>,
     next: Mutex<u32>,
 }
 
@@ -33,7 +42,7 @@ impl Persist {
             .lock()
             .unwrap()
             .iter()
-            .map(|(&id, (n, _))| (id, n.clone()))
+            .map(|(&id, m)| (id, m.name.clone()))
             .collect()
     }
 
@@ -43,7 +52,7 @@ impl Persist {
             .lock()
             .unwrap()
             .iter()
-            .map(|(&id, (n, pid))| (id, *pid, n.clone()))
+            .map(|(&id, m)| (id, m.pid, m.name.clone()))
             .collect()
     }
 
@@ -53,7 +62,26 @@ impl Persist {
 
     /// Shell pid of a pane (to read its cwd for splits).
     pub fn pid_of(&self, id: u32) -> Option<u32> {
-        self.mirror.lock().unwrap().get(&id).map(|(_, pid)| *pid)
+        self.mirror.lock().unwrap().get(&id).map(|m| m.pid)
+    }
+
+    pub fn name_of(&self, id: u32) -> Option<String> {
+        self.mirror.lock().unwrap().get(&id).map(|m| m.name.clone())
+    }
+
+    /// The pane's CURRENT kind (flag truth, not the id bit).
+    pub fn pane_ephemeral(&self, id: u32) -> Option<bool> {
+        self.mirror.lock().unwrap().get(&id).map(|m| m.ephemeral)
+    }
+
+    /// Flip a pane persistent in place (⌁→∞ "keep this shell").
+    pub fn promote(&self, id: u32) {
+        if let Some(m) = self.mirror.lock().unwrap().get_mut(&id) {
+            m.ephemeral = false;
+        }
+        if let Some(c) = self.current() {
+            c.set_ephemeral(id, false);
+        }
     }
 
     pub fn remove_mirror(&self, id: u32) -> bool {
@@ -99,8 +127,9 @@ impl Persist {
                     // Ephemeral panes must never survive a mymuxd restart.
                     // ptyd kills them when our old connection drops; sweeping
                     // here covers an old ptyd that kept them as plain panes.
+                    // Kind = the FLAG (a promoted ⌁ is persistent and stays).
                     let (stale, panes): (Vec<_>, Vec<_>) =
-                        listed.into_iter().partition(|p| is_ephemeral(p.id));
+                        listed.into_iter().partition(|p| p.is_ephemeral());
                     for p in &stale {
                         client.kill(p.id);
                     }
@@ -108,7 +137,14 @@ impl Persist {
                         let mut m = self.mirror.lock().unwrap();
                         m.clear();
                         for p in &panes {
-                            m.insert(p.id, (p.name.clone(), p.pid));
+                            m.insert(
+                                p.id,
+                                PaneMeta {
+                                    name: p.name.clone(),
+                                    pid: p.pid,
+                                    ephemeral: false, // survivors are persistent by definition
+                                },
+                            );
                         }
                     }
                     {
@@ -174,7 +210,14 @@ impl Persist {
             )
             .await?;
         // Empty name = unnamed; the UI/attach show the short numeric id then.
-        self.mirror.lock().unwrap().insert(id, (String::new(), pid));
+        self.mirror.lock().unwrap().insert(
+            id,
+            PaneMeta {
+                name: String::new(),
+                pid,
+                ephemeral,
+            },
+        );
         Ok(id)
     }
 
@@ -191,8 +234,8 @@ impl Persist {
     }
 
     pub fn rename(&self, id: u32, name: String) {
-        if let Some(entry) = self.mirror.lock().unwrap().get_mut(&id) {
-            entry.0 = name.clone();
+        if let Some(m) = self.mirror.lock().unwrap().get_mut(&id) {
+            m.name = name.clone();
         }
         if let Some(c) = self.current() {
             c.rename(id, name);

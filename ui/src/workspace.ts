@@ -33,6 +33,10 @@ interface StateMsg {
   active_pane: number | null;
   windows: WinInfo[];
   layout: LayoutNode | null;
+  zoomed?: boolean;
+  // confirm_close payload
+  pane?: number;
+  cmd?: string;
 }
 
 export type WsState = 'connecting' | 'open' | 'closed';
@@ -53,6 +57,8 @@ export interface WorkspaceHooks {
   onStatus(w: Workspace, s: WsState): void;
   /** The tmux session ended ("done with this host"); reconnects already stopped. */
   onSessionEnd(w: Workspace): void;
+  /** The daemon wants the user to confirm closing a busy pane. */
+  onConfirmClose(w: Workspace, pane: number, cmd: string): void;
 }
 
 interface Pane {
@@ -75,6 +81,8 @@ export class Workspace {
   activePane: number | null = null;
   activeWindow: number | null = null;
   windowList: WinInfo[] = [];
+  /** True while the active native window has a maximized pane. */
+  zoomed = false;
   visible = false;
 
   private dead = false;
@@ -214,9 +222,14 @@ export class Workspace {
       this.hooks.onSessionEnd(this);
       return;
     }
+    if (msg.t === 'confirm_close') {
+      if (msg.pane != null) this.hooks.onConfirmClose(this, msg.pane, msg.cmd ?? '');
+      return;
+    }
     if (msg.t !== 'state') return;
     this.windowList = msg.windows;
     this.activeWindow = msg.active_window;
+    this.zoomed = msg.zoomed ?? false;
     if (msg.layout) {
       this.applyLayout(msg.layout);
       this.nudgeSizeIfMismatched(msg.layout);

@@ -83,17 +83,29 @@ that caused most historical bugs).
 
 ## Persistent shells as first-class citizens — polish track (2026-07-03)
 Native ∞ windows are the default; keep closing the gap to a great daily driver:
-- Zoom pane (tmux `resize-pane -Z` equivalent: temporarily maximize one leaf).
-- Rearrange panes/windows: swap panes, move a pane out to its own window
-  (break-pane), reorder tabs.
-- Promote ⌁ → ∞ ("keep this shell"): needs the ephemeral flag decoupled from
-  the id bit or an id migration — design first.
-- Drag the split divider to resize panes (UI + a `resize_pane` verb).
-- Close confirmation when a pane still has a foreground process.
-- Paged fetch of older scrollback beyond the reseed window.
+- ~~Zoom pane~~ — **DONE 2026-07-03** (⌘K z: full-leaf state + `zoomed` flag,
+  auto-unzoom on any layout op, persisted in the blob, `resize-pane -Z`
+  passthrough on tmux views).
+- ~~Swap panes~~ / ~~break-pane~~ — **DONE 2026-07-03** (⌘K { } trades
+  rectangles with the layout-order neighbour, focus follows the shell;
+  ⌘K ! breaks a pane out into its own window; tmux passthroughs).
+- ~~Promote ⌁ → ∞~~ — **DONE 2026-07-03** (⌘K k "keep this shell"): the kind
+  TRUTH moved from the id bit to an explicit flag (ptyd `SetEphemeral` +
+  `PaneInfo.ephemeral`, mirror `PaneMeta`, state/proc/attach all read the
+  flag; ids and MYMUX_PANE stay put). Verified across a restart.
+- ~~Close confirmation~~ — **DONE 2026-07-03**: `close_pane` without `force`
+  checks the shell's foreground group (`/proc` tpgid vs pgrp) and emits
+  `confirm_close` instead of killing; inline mouse-only bar in the UI. Works
+  for native and tmux panes.
+- ~~Help overlay~~ — **DONE 2026-07-03** (⌘K ?, static keymap card,
+  click-to-dismiss — Esc stays inert by design).
+- Rearrange tabs (custom window order, drag) — needs an order model beyond
+  BTreeMap id order + tmux/native interleaving rules.
+- Drag the split divider to resize panes (UI + a `resize_leaf` verb).
+- Paged fetch of older scrollback beyond the reseed window (blocked on
+  xterm.js not supporting prepend; SCROLLBACK bump is the stopgap).
 - Alt-screen/agent heuristics for native panes (ptyd could report alt state
   with output events; hooks already cover claude/codex).
-- Help overlay documenting the key map (old ask, fits here).
 
 ## Multi-host — SHIPPED 2026-07-03; remaining polish
 - ~~Remember open hosts~~ → the manager now boots into last time's host

@@ -115,6 +115,67 @@ function toast(msg: string) {
   toastTimer = window.setTimeout(() => toastEl.classList.remove('show'), 1800);
 }
 
+// Busy-pane close confirmation (the daemon refused a non-forced close).
+// Mouse-only, like every inline control: keys stay with the terminal.
+const confirmEl = document.createElement('div');
+confirmEl.className = 'confirm-bar';
+document.body.appendChild(confirmEl);
+function showConfirmClose(w: Workspace, pane: number, cmd: string) {
+  confirmEl.replaceChildren();
+  const label = document.createElement('span');
+  label.textContent = `Pane is running ${cmd || 'a job'} — close it anyway?`;
+  const mk = (text: string, cls: string, fn: () => void) => {
+    const b = document.createElement('button');
+    b.textContent = text;
+    b.className = cls;
+    b.addEventListener('click', () => {
+      confirmEl.classList.remove('show');
+      fn();
+    });
+    return b;
+  };
+  confirmEl.append(
+    label,
+    mk('Close', 'danger', () => w.sendJson({ t: 'close_pane', pane, force: true })),
+    mk('Keep', '', () => {}),
+  );
+  confirmEl.classList.add('show');
+}
+
+// Keymap help (⌘K ?). Click anywhere to dismiss — no Esc, keys stay inert.
+const helpEl = document.createElement('div');
+helpEl.className = 'help-panel';
+helpEl.innerHTML = `<div class="help-card">
+  <h2>mymux keys</h2>
+  <table>
+    <tr><th colspan="2">Windows</th></tr>
+    <tr><td>⌘T / +win / ⌘K c</td><td>new window (∞ persistent — survives restarts)</td></tr>
+    <tr><td>⌘K s</td><td>new throwaway shell (⌁ — dies with the daemon)</td></tr>
+    <tr><td>⌘K w</td><td>new tmux window</td></tr>
+    <tr><td>⌘K k</td><td>keep this shell: promote ⌁ → ∞</td></tr>
+    <tr><td>⌘1–9, ⌘K n/p</td><td>switch window</td></tr>
+    <tr><td>double-click tab</td><td>rename (✓ or click away = save, ✕ = cancel)</td></tr>
+    <tr><th colspan="2">Panes</th></tr>
+    <tr><td>⌘D / ⌘⇧D</td><td>split right / down</td></tr>
+    <tr><td>⌘⌥arrows</td><td>move focus between panes</td></tr>
+    <tr><td>⌘K z</td><td>zoom (maximize) the pane</td></tr>
+    <tr><td>⌘K { / }</td><td>swap pane with its neighbour</td></tr>
+    <tr><td>⌘K !</td><td>break the pane out into its own window</td></tr>
+    <tr><td>⌘W / ⌘K x</td><td>close pane (asks first when a job is running)</td></tr>
+    <tr><th colspan="2">Panels &amp; hosts</th></tr>
+    <tr><td>⌘E</td><td>code / diff panel</td></tr>
+    <tr><td>⌘K t</td><td>process tree</td></tr>
+    <tr><td>⌘J / ⌘K a</td><td>jump to the agent that needs you</td></tr>
+    <tr><td>⌘⇧1–9</td><td>switch host</td></tr>
+    <tr><td>⌘K ?</td><td>this help</td></tr>
+  </table>
+</div>`;
+document.body.appendChild(helpEl);
+helpEl.addEventListener('click', () => helpEl.classList.remove('show'));
+function toggleHelp() {
+  helpEl.classList.toggle('show');
+}
+
 // ---- workspace registry ----------------------------------------------------
 
 const workspaces = new Map<string, Workspace>();
@@ -147,6 +208,9 @@ function ensureWorkspace(id: string, label: string, port: number): Workspace {
       },
       onSessionEnd(w) {
         endWorkspace(w, true);
+      },
+      onConfirmClose(w, pane, cmd) {
+        showConfirmClose(w, pane, cmd);
       },
     },
   });
@@ -228,7 +292,8 @@ function renderTabs(w: Workspace | null) {
     const glyph = win.ephemeral ? '⌁ ' : win.persistent ? '∞ ' : '';
     const label =
       win.name || (win.ephemeral || win.persistent ? String(low(win.id)) : `@${win.id}`);
-    tab.appendChild(document.createTextNode(glyph + label));
+    const zoomMark = win.active && w.zoomed ? ' ⤢' : '';
+    tab.appendChild(document.createTextNode(glyph + label + zoomMark));
     tab.addEventListener('click', (e) => {
       // The 2nd click of a double-click must not re-select (its state echo
       // would race the rename input).
@@ -454,6 +519,27 @@ function handleLeaderKey(e: KeyboardEvent) {
   if (lower === 'd') return w.splitActive(e.shiftKey ? 'v' : 'h');
   if (k === '|' || k === '\\') return w.splitActive('h');
   if (k === '-') return w.splitActive('v');
+  if (lower === 'z') {
+    if (w.activePane != null) w.sendJson({ t: 'zoom', pane: w.activePane });
+    return;
+  }
+  if (k === '{') return w.sendJson({ t: 'swap_pane', next: false });
+  if (k === '}') return w.sendJson({ t: 'swap_pane', next: true });
+  if (k === '!') {
+    if (w.activePane != null) w.sendJson({ t: 'break_pane', pane: w.activePane });
+    return;
+  }
+  if (lower === 'k') {
+    const win = w.windowList.find((x) => x.active);
+    if (win?.ephemeral) {
+      w.sendJson({ t: 'promote_window', id: win.id });
+      toast('Promoted to ∞ — this shell now survives restarts.');
+    } else if (win) {
+      toast(win.persistent ? 'Already persistent.' : 'tmux windows are managed by tmux.');
+    }
+    return;
+  }
+  if (k === '?') return toggleHelp();
   if (k === 'n' || k === ']') return w.switchWindowRel(1);
   if (k === 'p' || k === '[') return w.switchWindowRel(-1);
   if (k >= '1' && k <= '9') return w.switchWindowIndex(parseInt(k, 10) - 1);

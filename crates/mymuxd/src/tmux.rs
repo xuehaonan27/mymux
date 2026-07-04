@@ -247,6 +247,9 @@ impl Hub {
     pub async fn select_pane_dir(&self, dir: &str) {
         let view = *self.active_view.lock().unwrap();
         if let ActiveView::Native(id) = view {
+            // Navigating away needs the other panes visible again (tmux
+            // semantics: select-pane unzooms).
+            let unzoomed = self.unzoom_backend(id);
             let moved = {
                 let mut nw = self.natives.lock().unwrap();
                 match nw.active_pane_of(id).and_then(|cur| nw.nav(id, cur, dir)) {
@@ -254,9 +257,12 @@ impl Hub {
                     None => false,
                 }
             };
-            if moved {
+            if moved || unzoomed {
                 self.save_layout_blob();
                 self.emit(ServerEvent::State(self.state_json()));
+            }
+            if unzoomed {
+                self.reseed_visible().await;
             }
             return;
         }
@@ -285,18 +291,144 @@ impl Hub {
     }
 
     /// Scale a native window's tree to a new view size and resize each
-    /// member pane in ptyd to its cell.
+    /// member pane in ptyd to its cell — except a zoomed pane, which gets the
+    /// full view (the tree underneath keeps tracking the size for unzoom).
     fn resize_native_window(&self, win: u32, cols: u16, rows: u16) {
-        let sizes = self.natives.lock().unwrap().resize_window(win, cols, rows);
+        let (sizes, zoomed) = {
+            let mut nw = self.natives.lock().unwrap();
+            (nw.resize_window(win, cols, rows), nw.zoomed_of(win))
+        };
         if sizes.is_empty() {
             // Not in any window (adoption race) — size the lone pane directly.
             self.persist.resize(win, cols, rows);
             return;
         }
         for (p, w, h) in sizes {
+            if zoomed != Some(p) {
+                self.persist.resize(p, w, h);
+            }
+        }
+        if let Some(z) = zoomed {
+            self.persist.resize(z, cols, rows);
+        }
+        self.save_layout_blob();
+    }
+
+    /// If the window is zoomed, unzoom and restore the tree's pane sizes.
+    /// Returns true when panes were un-hidden (caller reseeds after its own
+    /// state emit — the UI re-creates their terminals empty).
+    fn unzoom_backend(&self, win: u32) -> bool {
+        let Some(sizes) = self.natives.lock().unwrap().clear_zoom(win) else {
+            return false;
+        };
+        for (p, w, h) in sizes {
+            self.persist.resize(p, w, h);
+        }
+        true
+    }
+
+    /// Reseed every visible pane (used after zoom changes re-created panes).
+    async fn reseed_visible(&self) {
+        for (pane, seed) in self.snapshot_visible().await {
+            self.emit(ServerEvent::Output { pane, data: seed });
+        }
+    }
+
+    /// Toggle zoom (maximize) on a native pane; tmux views pass through.
+    pub async fn toggle_zoom(&self, pane: u32) {
+        if !is_native_id(pane) {
+            self.send_cmd("resize-pane -Z".to_string()).await;
+            return;
+        }
+        let win = {
+            let mut nw = self.natives.lock().unwrap();
+            if nw.toggle_zoom(pane).is_none() {
+                return;
+            }
+            nw.window_of(pane)
+        };
+        let Some(win) = win else { return };
+        let (cols, rows) = *self.last_size.lock().unwrap();
+        self.resize_native_window(win, cols, rows);
+        self.save_layout_blob();
+        self.emit(ServerEvent::State(self.state_json()));
+        // Panes appeared or vanished either way — reseed what's visible now.
+        self.reseed_visible().await;
+    }
+
+    /// Swap the focused pane with its next/previous neighbour in layout order.
+    pub async fn swap_pane(&self, next: bool) {
+        let view = *self.active_view.lock().unwrap();
+        let ActiveView::Native(id) = view else {
+            let flag = if next { "-D" } else { "-U" };
+            self.send_cmd(format!("swap-pane {flag}")).await;
+            return;
+        };
+        let unzoomed = self.unzoom_backend(id);
+        let sizes = {
+            let mut nw = self.natives.lock().unwrap();
+            nw.active_pane_of(id).and_then(|cur| nw.swap(cur, next))
+        };
+        let Some(sizes) = sizes else {
+            if unzoomed {
+                self.emit(ServerEvent::State(self.state_json()));
+                self.reseed_visible().await;
+            }
+            return;
+        };
+        for (p, w, h) in sizes {
             self.persist.resize(p, w, h);
         }
         self.save_layout_blob();
+        self.emit(ServerEvent::State(self.state_json()));
+        if unzoomed {
+            self.reseed_visible().await;
+        }
+    }
+
+    /// Break a pane out of its split into its own window (keeps running).
+    pub async fn break_pane(&self, pane: u32) {
+        if !is_native_id(pane) {
+            self.send_cmd(format!("break-pane -t %{pane}")).await;
+            return;
+        }
+        let Some(win) = self.natives.lock().unwrap().window_of(pane) else {
+            return;
+        };
+        if self.natives.lock().unwrap().panes_of(win).len() < 2 {
+            return; // already its own window
+        }
+        let _ = self.unzoom_backend(win);
+        if let Remove::Collapsed { resizes, .. } = self.natives.lock().unwrap().remove_pane(pane) {
+            for (p, w, h) in resizes {
+                self.persist.resize(p, w, h);
+            }
+        }
+        let (cols, rows) = *self.last_size.lock().unwrap();
+        let name = self.persist.name_of(pane).unwrap_or_default();
+        self.natives
+            .lock()
+            .unwrap()
+            .add_single(pane, name, cols, rows);
+        self.persist.resize(pane, cols, rows);
+        *self.active_view.lock().unwrap() = ActiveView::Native(pane);
+        self.save_layout_blob();
+        self.emit(ServerEvent::State(self.state_json()));
+        self.reseed_visible().await;
+    }
+
+    /// Promote an ephemeral window to persistent in place (⌁→∞): every member
+    /// pane flips its flag; ids (and MYMUX_PANE) stay put.
+    pub async fn promote_window(&self, id: u32) {
+        if !is_native_id(id) {
+            return;
+        }
+        let panes = self.natives.lock().unwrap().panes_of(id);
+        let targets = if panes.is_empty() { vec![id] } else { panes };
+        for p in targets {
+            self.persist.promote(p);
+        }
+        self.emit(ServerEvent::State(self.state_json()));
     }
 
     pub async fn select_window(&self, id: u32) {
@@ -364,18 +496,61 @@ impl Hub {
         self.emit(ServerEvent::State(self.state_json()));
     }
 
-    pub async fn close_pane(&self, pane: u32) {
+    pub async fn close_pane(&self, pane: u32, force: bool) {
         if is_native_id(pane) {
+            if !force {
+                if let Some(cmd) = self.persist.pid_of(pane).and_then(foreground_cmd) {
+                    self.emit_confirm_close(pane, &cmd);
+                    return;
+                }
+            }
             self.persist.kill(pane);
             self.native_pane_removed(pane).await;
             return;
         }
+        if !force {
+            if let Some(cmd) = self.tmux_pane_pid(pane).await.and_then(foreground_cmd) {
+                self.emit_confirm_close(pane, &cmd);
+                return;
+            }
+        }
         self.send_cmd(format!("kill-pane -t %{pane}")).await;
+    }
+
+    /// The pane's shell is busy: ask the user instead of killing it blind.
+    fn emit_confirm_close(&self, pane: u32, cmd: &str) {
+        let msg = serde_json::json!({ "t": "confirm_close", "pane": pane, "cmd": cmd });
+        self.emit(ServerEvent::State(msg.to_string()));
+    }
+
+    async fn tmux_pane_pid(&self, pane: u32) -> Option<u32> {
+        let out = Command::new("tmux")
+            .args([
+                "-L",
+                socket(),
+                "display-message",
+                "-p",
+                "-t",
+                &format!("%{pane}"),
+                "#{pane_pid}",
+            ])
+            .output()
+            .await
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
     }
 
     /// A native pane is gone (killed or exited on its own): collapse its
     /// window's layout, resize the survivors, fix the view, repaint.
     async fn native_pane_removed(&self, pane: u32) {
+        // If the window was zoomed, panes are about to reappear — reseed then.
+        let was_zoomed = {
+            let nw = self.natives.lock().unwrap();
+            nw.window_of(pane).and_then(|w| nw.zoomed_of(w)).is_some()
+        };
         let rm = self.natives.lock().unwrap().remove_pane(pane);
         match rm {
             Remove::None => {
@@ -392,12 +567,7 @@ impl Hub {
                 self.save_layout_blob();
                 self.emit(ServerEvent::State(self.state_json()));
                 if was_active {
-                    for (p, seed) in self.snapshot_visible().await {
-                        self.emit(ServerEvent::Output {
-                            pane: p,
-                            data: seed,
-                        });
-                    }
+                    self.reseed_visible().await;
                 }
             }
             Remove::Collapsed { resizes, .. } => {
@@ -406,6 +576,9 @@ impl Hub {
                 }
                 self.save_layout_blob();
                 self.emit(ServerEvent::State(self.state_json()));
+                if was_zoomed {
+                    self.reseed_visible().await;
+                }
             }
         }
     }
@@ -426,10 +599,18 @@ impl Hub {
     /// target — an ⌁ window splits into ⌁ panes) in the target's cwd, insert
     /// it into the layout, and resize both halves.
     async fn split_native(self: &Arc<Self>, pane: u32, horizontal: bool) {
-        let Some(((ow, oh), (new_w, new_h))) =
-            self.natives.lock().unwrap().split_sizes(pane, horizontal)
-        else {
-            return; // unknown pane, or too small to split
+        let Some(win) = self.natives.lock().unwrap().window_of(pane) else {
+            return;
+        };
+        let unzoomed = self.unzoom_backend(win);
+        let sizes = self.natives.lock().unwrap().split_sizes(pane, horizontal);
+        let Some(((ow, oh), (new_w, new_h))) = sizes else {
+            // Too small to split; still repaint if we just unzoomed.
+            if unzoomed {
+                self.emit(ServerEvent::State(self.state_json()));
+                self.reseed_visible().await;
+            }
+            return;
         };
         let cwd = self
             .persist
@@ -456,6 +637,9 @@ impl Hub {
         self.persist.resize(pane, ow, oh);
         self.save_layout_blob();
         self.emit(ServerEvent::State(self.state_json()));
+        if unzoomed {
+            self.reseed_visible().await;
+        }
     }
 
     /// The current state snapshot as JSON (for initial sync / resync).
@@ -466,30 +650,44 @@ impl Hub {
             .unwrap()
             .tabs()
             .into_iter()
-            .map(|(id, name, panes)| NativeTab { id, name, panes })
+            .map(|(id, name, panes)| NativeTab {
+                // Kind = the mirror's flag (a promoted ⌁ shows as ∞); the id
+                // bit is only the birth kind, kept as a fallback.
+                ephemeral: self
+                    .persist
+                    .pane_ephemeral(id)
+                    .unwrap_or_else(|| is_ephemeral(id)),
+                id,
+                name,
+                panes,
+            })
             .collect();
         let active = match *self.active_view.lock().unwrap() {
             ActiveView::Native(id) => {
                 let nw = self.natives.lock().unwrap();
-                let (pane, layout) = match (nw.active_pane_of(id), nw.layout_of(id)) {
-                    (Some(p), Some(l)) => (p, l),
-                    // Ephemeral tab (or a not-yet-grouped pane): one full leaf.
-                    _ => {
-                        let (cols, rows) = *self.last_size.lock().unwrap();
-                        let cell = LayoutCell {
-                            x: 0,
-                            y: 0,
-                            w: cols,
-                            h: rows,
-                            kind: CellKind::Leaf(PaneId(id)),
-                        };
-                        (id, cell)
+                let zoomed = nw.zoomed_of(id);
+                let full = |pane: u32| {
+                    let (cols, rows) = *self.last_size.lock().unwrap();
+                    LayoutCell {
+                        x: 0,
+                        y: 0,
+                        w: cols,
+                        h: rows,
+                        kind: CellKind::Leaf(PaneId(pane)),
                     }
+                };
+                let (pane, layout) = match (zoomed, nw.active_pane_of(id), nw.layout_of(id)) {
+                    // Zoomed: the UI sees just that pane, full-view.
+                    (Some(z), _, Some(_)) => (z, full(z)),
+                    (None, Some(p), Some(l)) => (p, l),
+                    // Not-yet-grouped pane (adoption race): one full leaf.
+                    _ => (id, full(id)),
                 };
                 Some(ActiveNative {
                     window: id,
                     pane,
                     layout,
+                    zoomed: zoomed.is_some(),
                 })
             }
             ActiveView::Tmux => None,
@@ -720,7 +918,7 @@ impl Hub {
         let view = *self.active_view.lock().unwrap();
         if let ActiveView::Native(id) = view {
             let panes = {
-                let p = self.natives.lock().unwrap().panes_of(id);
+                let p = self.natives.lock().unwrap().visible_panes_of(id);
                 if p.is_empty() {
                     vec![id]
                 } else {
@@ -815,8 +1013,8 @@ impl Hub {
     }
 
     /// Every pane across all windows with its shell pid, for the process tree:
-    /// `(window_id, pane_id, pane_pid, window_name)`.
-    pub async fn pane_pids(&self) -> Vec<(u32, u32, u32, String)> {
+    /// `(window_id, pane_id, pane_pid, window_name, ephemeral)`.
+    pub async fn pane_pids(&self) -> Vec<(u32, u32, u32, String, bool)> {
         let out = Command::new("tmux")
             .args([
                 "-L",
@@ -846,14 +1044,18 @@ impl Hub {
             else {
                 continue;
             };
-            rows.push((wid.0, pane.0, pid, name));
+            rows.push((wid.0, pane.0, pid, name, false));
         }
         // Native (ptyd-held) shells, grouped under their layout windows.
         {
             let nw = self.natives.lock().unwrap();
             for (id, pid, name) in self.persist.pids() {
                 let win = nw.window_of(id).unwrap_or(id);
-                rows.push((win, id, pid, name));
+                let eph = self
+                    .persist
+                    .pane_ephemeral(id)
+                    .unwrap_or_else(|| is_ephemeral(id));
+                rows.push((win, id, pid, name, eph));
             }
         }
         rows
@@ -1033,6 +1235,23 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty()
         && hay.len() >= needle.len()
         && hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// The shell's current foreground job (`None` at an idle prompt): the tty's
+/// foreground process group (tpgid, /proc stat field 8) differs from the
+/// shell's own group when something like vim or an agent holds the terminal.
+fn foreground_cmd(shell_pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{shell_pid}/stat")).ok()?;
+    let rest = stat.rsplit_once(')')?.1; // skip "pid (comm" — comm may hold spaces
+    let mut fields = rest.split_whitespace();
+    let pgrp: i32 = fields.clone().nth(2)?.parse().ok()?;
+    let tpgid: i32 = fields.nth(5)?.parse().ok()?;
+    if tpgid <= 0 || tpgid == pgrp {
+        return None;
+    }
+    let comm = std::fs::read_to_string(format!("/proc/{tpgid}/comm")).ok()?;
+    let c = comm.trim().to_string();
+    (!c.is_empty()).then_some(c)
 }
 
 /// Periodically recompute heuristic agent badges for un-hooked panes.

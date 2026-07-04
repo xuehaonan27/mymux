@@ -62,6 +62,12 @@ pub enum Req {
         id: u32,
         name: String,
     },
+    /// Flip a pane's ephemeral flag in place (⌁→∞ "keep this shell"). The id
+    /// keeps its birth bits — the FLAG is the truth about a pane's kind.
+    SetEphemeral {
+        id: u32,
+        ephemeral: bool,
+    },
     Kill {
         id: u32,
     },
@@ -90,6 +96,18 @@ pub struct PaneInfo {
     pub name: String,
     pub cols: u16,
     pub rows: u16,
+    /// The pane's CURRENT kind — the flag is the truth, the id keeps its
+    /// birth bits (a promoted ⌁ reports `Some(false)` under EPH_BIT). `None`
+    /// = an old ptyd that predates the field; fall back to the id bit then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ephemeral: Option<bool>,
+}
+
+impl PaneInfo {
+    /// Resolved kind: the explicit flag, else the id-bit convention.
+    pub fn is_ephemeral(&self) -> bool {
+        self.ephemeral.unwrap_or_else(|| is_ephemeral(self.id))
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]

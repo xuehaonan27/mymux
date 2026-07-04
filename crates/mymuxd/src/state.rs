@@ -15,6 +15,9 @@ struct StateMsg {
     active_pane: Option<u32>,
     windows: Vec<WinMsg>,
     layout: Option<LayoutMsg>,
+    /// True while the active native window has a zoomed (maximized) pane.
+    #[serde(skip_serializing_if = "is_false")]
+    zoomed: bool,
 }
 
 /// `skip_serializing_if` helper: omit a bool when it's false.
@@ -95,6 +98,8 @@ pub struct NativeTab {
     pub id: u32,
     pub name: String,
     pub panes: Vec<u32>,
+    /// The window's CURRENT kind (flag truth — a promoted ⌁ reports false).
+    pub ephemeral: bool,
 }
 
 /// The active native view: which window, its focused pane, and the real
@@ -103,6 +108,9 @@ pub struct ActiveNative {
     pub window: u32,
     pub pane: u32,
     pub layout: LayoutCell,
+    /// True while one pane is temporarily maximized (the layout is then a
+    /// single full leaf of that pane).
+    pub zoomed: bool,
 }
 
 /// Aggregate the most attention-worthy agent state among a set of panes, and
@@ -167,8 +175,8 @@ pub fn build_state_json(
             active: active_win == Some(tab.id),
             agent: wa.map(|(s, _)| s),
             agent_pane: wa.map(|(_, p)| p),
-            ephemeral: crate::persist::is_ephemeral(tab.id),
-            persistent: crate::persist::is_persistent(tab.id),
+            ephemeral: tab.ephemeral,
+            persistent: !tab.ephemeral,
         });
     }
 
@@ -186,6 +194,7 @@ pub fn build_state_json(
         active_pane,
         windows,
         layout,
+        zoomed: active_native.map(|a| a.zoomed).unwrap_or(false),
     };
     serde_json::to_string(&msg).unwrap_or_else(|_| r#"{"t":"state"}"#.to_string())
 }
@@ -241,10 +250,12 @@ mod tests {
             id: p1,
             name: String::new(),
             panes: vec![p1, p2],
+            ephemeral: false,
         };
         let active = ActiveNative {
             window: p1,
             pane: p2,
+            zoomed: false,
             layout: LayoutCell {
                 x: 0,
                 y: 0,

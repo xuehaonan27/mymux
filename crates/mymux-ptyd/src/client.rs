@@ -162,6 +162,10 @@ impl Client {
         self.send_json(&Req::Rename { id, name });
     }
 
+    pub fn set_ephemeral(&self, id: u32, ephemeral: bool) {
+        self.send_json(&Req::SetEphemeral { id, ephemeral });
+    }
+
     pub fn set_meta(&self, data: String) {
         self.send_json(&Req::SetMeta { data });
     }

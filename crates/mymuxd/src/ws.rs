@@ -22,16 +22,47 @@ use crate::tmux::{Hub, ServerEvent};
 #[derive(Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 enum ClientMsg {
-    Resize { cols: u16, rows: u16 },
-    Focus { pane: u32 },
-    SelectPane { dir: String },
-    Split { pane: u32, dir: String },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+    Focus {
+        pane: u32,
+    },
+    SelectPane {
+        dir: String,
+    },
+    Split {
+        pane: u32,
+        dir: String,
+    },
     NewWindow,
-    SelectWindow { id: u32 },
-    ClosePane { pane: u32 },
+    SelectWindow {
+        id: u32,
+    },
+    ClosePane {
+        pane: u32,
+        #[serde(default)]
+        force: bool,
+    },
     NewEphemeral,
     NewPersistent,
-    RenameWindow { id: u32, name: String },
+    RenameWindow {
+        id: u32,
+        name: String,
+    },
+    Zoom {
+        pane: u32,
+    },
+    SwapPane {
+        next: bool,
+    },
+    BreakPane {
+        pane: u32,
+    },
+    PromoteWindow {
+        id: u32,
+    },
 }
 
 /// Prepend the pane id as a 4-byte LE header to a payload.
@@ -125,12 +156,18 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
                             ClientMsg::Split { pane, dir } => hub.split(pane, dir == "h").await,
                             ClientMsg::NewWindow => hub.new_window().await,
                             ClientMsg::SelectWindow { id } => hub.select_window(id).await,
-                            ClientMsg::ClosePane { pane } => hub.close_pane(pane).await,
+                            ClientMsg::ClosePane { pane, force } => {
+                                hub.close_pane(pane, force).await
+                            }
                             ClientMsg::NewEphemeral => hub.new_ephemeral().await,
                             ClientMsg::NewPersistent => hub.new_persistent().await,
                             ClientMsg::RenameWindow { id, name } => {
                                 hub.rename_window(id, name).await
                             }
+                            ClientMsg::Zoom { pane } => hub.toggle_zoom(pane).await,
+                            ClientMsg::SwapPane { next } => hub.swap_pane(next).await,
+                            ClientMsg::BreakPane { pane } => hub.break_pane(pane).await,
+                            ClientMsg::PromoteWindow { id } => hub.promote_window(id).await,
                         }
                     }
                 }

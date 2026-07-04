@@ -33,8 +33,9 @@ struct Pane {
     size: Mutex<(u16, u16)>,
     grid: Arc<Mutex<PaneGrid>>,
     /// Ephemeral panes die when `owner` (the connection that spawned them)
-    /// disconnects; persistent panes die only with this daemon.
-    ephemeral: bool,
+    /// disconnects; persistent panes die only with this daemon. Mutable:
+    /// a pane can be promoted to persistent in place (⌁→∞).
+    ephemeral: std::sync::atomic::AtomicBool,
     owner: u64,
 }
 
@@ -153,7 +154,9 @@ async fn handle_conn(stream: UnixStream, store: Arc<Store>) {
         let panes = store.panes.lock().unwrap();
         panes
             .iter()
-            .filter(|(_, p)| p.ephemeral && p.owner == conn)
+            .filter(|(_, p)| {
+                p.ephemeral.load(std::sync::atomic::Ordering::Relaxed) && p.owner == conn
+            })
             .map(|(&id, _)| id)
             .collect()
     };
@@ -243,6 +246,12 @@ fn handle_req(req: Req, store: &Arc<Store>, out: &mpsc::UnboundedSender<(u8, Vec
                 *p.name.lock().unwrap() = name;
             }
         }
+        Req::SetEphemeral { id, ephemeral } => {
+            if let Some(p) = store.panes.lock().unwrap().get(&id) {
+                p.ephemeral
+                    .store(ephemeral, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         Req::Kill { id } => {
             // Dropping the pane closes the pty; the reader thread sees EOF and
             // emits the Exit event (single exit path).
@@ -290,6 +299,7 @@ fn handle_req(req: Req, store: &Arc<Store>, out: &mpsc::UnboundedSender<(u8, Vec
                         name: p.name.lock().unwrap().clone(),
                         cols,
                         rows,
+                        ephemeral: Some(p.ephemeral.load(std::sync::atomic::Ordering::Relaxed)),
                     }
                 })
                 .collect();
@@ -360,7 +370,7 @@ fn spawn_pane(
         name: Mutex::new(name),
         size: Mutex::new((cols, rows)),
         grid: grid.clone(),
-        ephemeral,
+        ephemeral: std::sync::atomic::AtomicBool::new(ephemeral),
         owner,
     });
     store.panes.lock().unwrap().insert(id, pane);

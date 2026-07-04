@@ -22,6 +22,8 @@ pub struct NativeWindow {
     pub name: String,
     pub active_pane: u32,
     pub root: LayoutCell,
+    /// Temporarily maximized pane (tmux zoom). Cleared by any layout change.
+    pub zoomed: Option<u32>,
 }
 
 /// What removing a pane did to its window.
@@ -202,6 +204,7 @@ impl NativeWindows {
                 name,
                 active_pane: pane,
                 root: leaf(pane, 0, 0, cols.max(1), rows.max(1)),
+                zoomed: None,
             },
         );
     }
@@ -246,6 +249,71 @@ impl NativeWindows {
 
     pub fn active_pane_of(&self, win: u32) -> Option<u32> {
         self.wins.get(&win).map(|w| w.active_pane)
+    }
+
+    pub fn zoomed_of(&self, win: u32) -> Option<u32> {
+        self.wins.get(&win).and_then(|w| w.zoomed)
+    }
+
+    /// The panes the UI can currently see: the zoomed pane alone, else all.
+    pub fn visible_panes_of(&self, win: u32) -> Vec<u32> {
+        match self.zoomed_of(win) {
+            Some(z) => vec![z],
+            None => self.panes_of(win),
+        }
+    }
+
+    /// Toggle zoom on a member pane; `Some(now_zoomed)` if the pane exists.
+    pub fn toggle_zoom(&mut self, pane: u32) -> Option<bool> {
+        let win = self.window_of(pane)?;
+        let w = self.wins.get_mut(&win)?;
+        w.zoomed = if w.zoomed == Some(pane) {
+            None
+        } else {
+            Some(pane)
+        };
+        Some(w.zoomed.is_some())
+    }
+
+    /// Drop any zoom on the window; returns the tree's pane sizes to restore
+    /// (the zoomed pane had been resized to the full view).
+    pub fn clear_zoom(&mut self, win: u32) -> Option<Vec<(u32, u16, u16)>> {
+        let w = self.wins.get_mut(&win)?;
+        w.zoomed.take()?;
+        Some(
+            leaves_of(&w.root)
+                .into_iter()
+                .map(|(p, c)| (p, c.w, c.h))
+                .collect(),
+        )
+    }
+
+    /// Swap a pane with its next/previous neighbour in layout order; the two
+    /// shells trade rectangles, focus follows the moved pane. Returns the two
+    /// panes' new sizes.
+    pub fn swap(&mut self, pane: u32, next: bool) -> Option<Vec<(u32, u16, u16)>> {
+        let win = self.window_of(pane)?;
+        let w = self.wins.get_mut(&win)?;
+        w.zoomed = None; // layout change
+        let order: Vec<u32> = leaves_of(&w.root).into_iter().map(|(p, _)| p).collect();
+        if order.len() < 2 {
+            return None;
+        }
+        let i = order.iter().position(|&p| p == pane)?;
+        let j = if next {
+            (i + 1) % order.len()
+        } else {
+            (i + order.len() - 1) % order.len()
+        };
+        let other = order[j];
+        swap_leaves(&mut w.root, pane, other);
+        w.active_pane = pane;
+        let sizes: Vec<(u32, u16, u16)> = leaves_of(&w.root)
+            .into_iter()
+            .filter(|(p, _)| *p == pane || *p == other)
+            .map(|(p, c)| (p, c.w, c.h))
+            .collect();
+        Some(sizes)
     }
 
     /// Mark `pane` active within its window; `Some(window)` when it changed.
@@ -299,6 +367,7 @@ impl NativeWindows {
             return false;
         }
         w.active_pane = new_pane;
+        w.zoomed = None; // layout change
         true
     }
 
@@ -315,6 +384,7 @@ impl NativeWindows {
             return Remove::WindowGone(win);
         }
         remove_leaf(&mut w.root, pane);
+        w.zoomed = None; // layout change
         let leaves = leaves_of(&w.root);
         if !leaves.iter().any(|(p, _)| *p == w.active_pane) {
             w.active_pane = leaves.first().map(|(p, _)| *p).unwrap_or(w.id);
@@ -415,6 +485,7 @@ impl NativeWindows {
                     id: w.id,
                     name: w.name.clone(),
                     active: w.active_pane,
+                    zoomed: w.zoomed,
                     root: cell_to_blob(&w.root),
                 })
                 .collect(),
@@ -437,22 +508,38 @@ impl NativeWindows {
             if leaves.is_empty() {
                 continue;
             }
-            let active = leaves
-                .iter()
-                .any(|(p, _)| *p == bw.active)
-                .then_some(bw.active)
-                .unwrap_or(leaves[0].0);
+            let member = |p: Option<u32>| p.filter(|p| leaves.iter().any(|(l, _)| l == p));
+            let active = member(Some(bw.active)).unwrap_or(leaves[0].0);
             out.wins.insert(
                 bw.id,
                 NativeWindow {
                     id: bw.id,
                     name: bw.name,
                     active_pane: active,
+                    zoomed: member(bw.zoomed),
                     root: cell,
                 },
             );
         }
         out
+    }
+}
+
+/// Swap the pane ids of two leaves (rectangles stay put — the shells move).
+fn swap_leaves(cell: &mut LayoutCell, a: u32, b: u32) {
+    match &mut cell.kind {
+        CellKind::Leaf(p) => {
+            if p.0 == a {
+                *p = PaneId(b);
+            } else if p.0 == b {
+                *p = PaneId(a);
+            }
+        }
+        CellKind::Cols(children) | CellKind::Rows(children) => {
+            for c in children {
+                swap_leaves(c, a, b);
+            }
+        }
     }
 }
 
@@ -467,6 +554,8 @@ struct BlobWin {
     id: u32,
     name: String,
     active: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    zoomed: Option<u32>,
     root: BlobCell,
 }
 
@@ -673,5 +762,52 @@ mod tests {
         nw2.add_single(P1, String::new(), 80, 24);
         nw2.reconcile(&[]);
         assert!(nw2.tabs().is_empty());
+    }
+
+    #[test]
+    fn zoom_toggles_persists_and_clears_on_layout_change() {
+        let mut nw = NativeWindows::default();
+        nw.add_single(P1, String::new(), 80, 24);
+        nw.split(P1, true, P2);
+        assert_eq!(nw.toggle_zoom(P2), Some(true));
+        assert_eq!(nw.zoomed_of(P1), Some(P2));
+        assert_eq!(nw.visible_panes_of(P1), vec![P2]);
+        // Survives the blob roundtrip.
+        let back = NativeWindows::from_blob(&nw.to_blob());
+        assert_eq!(back.zoomed_of(P1), Some(P2));
+        // clear_zoom returns the tree sizes to restore.
+        let restore = nw.clear_zoom(P1).unwrap();
+        assert_eq!(restore.len(), 2);
+        assert_eq!(nw.zoomed_of(P1), None);
+        assert!(nw.clear_zoom(P1).is_none(), "idempotent");
+        // Any layout change drops an active zoom.
+        nw.toggle_zoom(P1);
+        nw.split(P2, false, P3);
+        assert_eq!(nw.zoomed_of(P1), None, "split unzooms");
+        // Toggle off works too.
+        nw.toggle_zoom(P3);
+        assert_eq!(nw.toggle_zoom(P3), Some(false));
+    }
+
+    #[test]
+    fn swap_trades_rectangles_and_keeps_focus_on_the_moved_pane() {
+        let mut nw = NativeWindows::default();
+        nw.add_single(P1, String::new(), 80, 24);
+        nw.split(P1, true, P2);
+        nw.split(P2, false, P3);
+        let before = rects(&nw, P1);
+        let sizes = nw.swap(P1, true).unwrap();
+        assert_eq!(sizes.len(), 2);
+        let after = rects(&nw, P1);
+        assert_eq!(after[&P1], before[&P2], "P1 took P2's rect");
+        assert_eq!(after[&P2], before[&P1], "P2 took P1's rect");
+        assert_eq!(nw.active_pane_of(P1), Some(P1), "focus follows the shell");
+        // prev wraps around the layout order.
+        let order_first = leaves_of(&nw.layout_of(P1).unwrap())[0].0;
+        nw.swap(order_first, false); // swaps with the last leaf, no panic
+                                     // Single-pane windows can't swap.
+        let mut solo = NativeWindows::default();
+        solo.add_single(P1, String::new(), 80, 24);
+        assert!(solo.swap(P1, true).is_none());
     }
 }

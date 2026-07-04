@@ -135,7 +135,7 @@ fn subtree(
 
 /// Every pid inside any pane's subtree — the set a kill is allowed to touch.
 fn allowed_pids(
-    panes: &[(u32, u32, u32, String)],
+    panes: &[(u32, u32, u32, String, bool)],
     kids: &BTreeMap<u32, Vec<u32>>,
 ) -> BTreeSet<u32> {
     fn collect(root: u32, kids: &BTreeMap<u32, Vec<u32>>, out: &mut BTreeSet<u32>) {
@@ -149,7 +149,7 @@ fn allowed_pids(
         }
     }
     let mut out = BTreeSet::new();
-    for &(_, _, shell_pid, _) in panes {
+    for &(_, _, shell_pid, _, _) in panes {
         collect(shell_pid, kids, &mut out);
     }
     out
@@ -166,6 +166,8 @@ struct PaneProcs {
 struct WinProcs {
     id: u32,
     name: String,
+    /// Current kind for native windows (⌁ vs ∞ glyph); false for tmux.
+    ephemeral: bool,
     panes: Vec<PaneProcs>,
 }
 
@@ -183,7 +185,7 @@ pub async fn tree(State(hub): State<Arc<Hub>>) -> Json<ProcTree> {
 
     // Group panes under their window, in window-id order.
     let mut wins: BTreeMap<u32, WinProcs> = BTreeMap::new();
-    for (win, pane, pid, name) in panes {
+    for (win, pane, pid, name, ephemeral) in panes {
         let mut procs = Vec::new();
         let mut seen = BTreeSet::new();
         subtree(pid, &info, &kids, &mut seen, &mut procs, 0);
@@ -191,6 +193,7 @@ pub async fn tree(State(hub): State<Arc<Hub>>) -> Json<ProcTree> {
             .or_insert_with(|| WinProcs {
                 id: win,
                 name,
+                ephemeral,
                 panes: Vec::new(),
             })
             .panes
@@ -268,7 +271,7 @@ mod tests {
         let me = std::process::id();
         let (_, kids) = scan_procs();
         // Treat our own pid as a pane shell: the allow-set is its subtree.
-        let panes = vec![(0u32, 0u32, me, String::new())];
+        let panes = vec![(0u32, 0u32, me, String::new(), false)];
         let allowed = allowed_pids(&panes, &kids);
         assert!(allowed.contains(&me)); // the root itself
         assert!(!allowed.contains(&1)); // an ancestor (init) is never in a subtree

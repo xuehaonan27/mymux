@@ -23,6 +23,7 @@ interface PaneProcs {
 interface WinProcs {
   id: number;
   name: string;
+  ephemeral?: boolean;
   panes: PaneProcs[];
 }
 interface ProcTree {
@@ -127,9 +128,10 @@ export function initProcPanel(opts: { getApiBase: () => string }): ProcPanel {
 
     body.replaceChildren();
     for (const w of tree.windows) {
-      // High-bit ids are daemon-native tabs: bit31 ⌁ ephemeral, bit30 ∞ persistent.
+      // High-bit ids are daemon-native tabs; the kind flag tells ⌁ from ∞
+      // (a promoted shell keeps its birth id but reports ephemeral=false).
       const native = w.id >= 0x40000000;
-      const glyph = w.id >= 0x80000000 ? '⌁' : native ? '∞' : '▸';
+      const glyph = w.ephemeral ? '⌁' : native ? '∞' : '▸';
       const wh = document.createElement('div');
       wh.className = 'pwin' + (native ? ' eph' : '');
       wh.textContent = native

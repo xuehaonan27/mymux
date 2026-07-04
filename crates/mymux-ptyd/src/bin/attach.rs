@@ -94,11 +94,7 @@ async fn main() {
                 p.name.as_str()
             };
             // ⌁ ephemeral panes vanish with their mymuxd; ∞ persistent stay.
-            let kind = if mymux_ptyd::proto::is_ephemeral(p.id) {
-                "⌁"
-            } else {
-                "∞"
-            };
+            let kind = if p.is_ephemeral() { "⌁" } else { "∞" };
             eprintln!(
                 "  {:<4} {} {:<20} pid {:<8} {}x{}  (id {})",
                 short(p.id),

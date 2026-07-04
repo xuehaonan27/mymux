@@ -276,7 +276,14 @@ reach. Persistent panes also show up in the ⌘K t process tree (marked `∞`) w
 scoped kill.
 
 **Splits work too** (⌘D / ⌘⇧D), tmux-free, for `⌁` and `∞` tabs alike: mymuxd
-is the layout engine — splits, collapse-on-close, and ⌘⌥-arrow navigation are
-computed natively, and the layout tree rides along in ptyd next to the panes
-it describes. Kill and restart mymuxd and a persistent window comes back
+is the layout engine — splits, collapse-on-close, ⌘⌥-arrow navigation, zoom
+(⌘K z), pane swap (⌘K { }) and break-out-to-window (⌘K !) are computed
+natively, and the layout tree (zoom included) rides along in ptyd next to the
+panes it describes. Kill and restart mymuxd and a persistent window comes back
 whole: grouping, geometry, focused pane, every pane's scrollback.
+
+More daily-driver guardrails: an `⌁` shell you decide to keep promotes to `∞`
+in place with **⌘K k** (nothing restarts — the flag flips, the pid and
+`MYMUX_PANE` stay); closing a pane whose shell is running something (vim, an
+agent, a build) asks first instead of killing it blind; and **⌘K ?** shows
+the key map.
