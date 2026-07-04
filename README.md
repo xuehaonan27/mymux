@@ -265,3 +265,10 @@ crash mymuxd all you like — on the next start it re-adopts these tabs, full
 screen state included. Tabs are marked `∞` (violet). The contract mirrors tmux's
 server: panes die only if **ptyd itself** stops, so the installer never restarts
 a live ptyd — do that yourself when idle.
+
+**Escape hatch**: from any plain SSH shell, `mymux-attach` lists persistent
+panes and `mymux-attach <id>` attaches — faithful snapshot first, then live
+bytes; `Ctrl-\` detaches, the pane keeps running. The equivalent of
+`tmux -L mymux attach` for the native engine, for the day the app is out of
+reach. Persistent panes also show up in the ⌘K t process tree (marked `∞`) with
+scoped kill.

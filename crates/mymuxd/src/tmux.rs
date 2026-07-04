@@ -665,6 +665,10 @@ impl Hub {
         for (id, pid, name) in self.ptys.lock().unwrap().entries() {
             rows.push((id, id, pid, name));
         }
+        // Persistent (ptyd-held) shells likewise — visible and safely killable.
+        for (id, pid, name) in self.persist.pids() {
+            rows.push((id, id, pid, name));
+        }
         rows
     }
 

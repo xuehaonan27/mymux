@@ -127,13 +127,15 @@ export function initProcPanel(opts: { getApiBase: () => string }): ProcPanel {
 
     body.replaceChildren();
     for (const w of tree.windows) {
-      const eph = w.id >= 0x80000000; // high-bit id = ephemeral (non-tmux) tab
+      // High-bit ids are daemon-native tabs: bit31 ⌁ ephemeral, bit30 ∞ persistent.
+      const native = w.id >= 0x40000000;
+      const glyph = w.id >= 0x80000000 ? '⌁' : native ? '∞' : '▸';
       const wh = document.createElement('div');
-      wh.className = 'pwin' + (eph ? ' eph' : '');
-      wh.textContent = eph ? `⌁ ${w.name}` : `▸ @${w.id} ${w.name}`;
+      wh.className = 'pwin' + (native ? ' eph' : '');
+      wh.textContent = native ? `${glyph} ${w.name}` : `▸ @${w.id} ${w.name}`;
       body.appendChild(wh);
       for (const pane of w.panes) {
-        if (!eph) {
+        if (!native) {
           const ph = document.createElement('div');
           ph.className = 'ppane';
           ph.textContent = `pane %${pane.pane}`;

@@ -1216,6 +1216,7 @@ name = "mymux-ptyd"
 version = "0.1.0"
 dependencies = [
  "avt",
+ "libc",
  "portable-pty",
  "serde",
  "serde_json",

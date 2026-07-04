@@ -24,15 +24,25 @@ pub fn is_persistent(id: u32) -> bool {
 pub struct Persist {
     client: RwLock<Option<Arc<Client>>>,
     connect_lock: AsyncMutex<()>,
-    /// Live persistent panes as we know them (kept in step with ptyd via the
-    /// resync-on-connect List plus spawn/exit events).
-    mirror: Mutex<BTreeMap<u32, String>>,
+    /// Live persistent panes as we know them — `id → (name, shell pid)` — kept
+    /// in step with ptyd via the resync-on-connect List plus spawn/exit events.
+    mirror: Mutex<BTreeMap<u32, (String, u32)>>,
     next: Mutex<u32>,
 }
 
 impl Persist {
     pub fn list(&self) -> Vec<(u32, String)> {
-        self.mirror.lock().unwrap().iter().map(|(&id, n)| (id, n.clone())).collect()
+        self.mirror.lock().unwrap().iter().map(|(&id, (n, _))| (id, n.clone())).collect()
+    }
+
+    /// `(id, shell pid, name)` for the process tree + scoped-kill allow-set.
+    pub fn pids(&self) -> Vec<(u32, u32, String)> {
+        self.mirror
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(&id, (n, pid))| (id, *pid, n.clone()))
+            .collect()
     }
 
     pub fn contains(&self, id: u32) -> bool {
@@ -83,7 +93,7 @@ impl Persist {
                         let mut m = self.mirror.lock().unwrap();
                         m.clear();
                         for p in &panes {
-                            m.insert(p.id, p.name.clone());
+                            m.insert(p.id, (p.name.clone(), p.pid));
                         }
                     }
                     {
@@ -123,12 +133,12 @@ impl Persist {
             *n += 1;
             id
         };
-        client
+        let pid = client
             .spawn(id, cwd, cols, rows, "shell".to_string(), vec![
                 ("MYMUX_PANE".to_string(), id.to_string()),
             ])
             .await?;
-        self.mirror.lock().unwrap().insert(id, "shell".to_string());
+        self.mirror.lock().unwrap().insert(id, ("shell".to_string(), pid));
         Ok(id)
     }
 

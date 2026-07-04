@@ -23,6 +23,7 @@ echo "mymux: building the release daemons…"
 mkdir -p "$(dirname "$BIN_DST")" "$(dirname "$UNIT_DST")"
 install -m 0755 "$BIN_SRC" "$BIN_DST"
 install -m 0755 "$DIR/target/release/mymux-ptyd" "$HOME/.local/bin/mymux-ptyd"
+install -m 0755 "$DIR/target/release/mymux-attach" "$HOME/.local/bin/mymux-attach"
 cp "$DIR/systemd/mymuxd.service" "$UNIT_DST"
 cp "$DIR/systemd/mymux-ptyd.service" "$HOME/.config/systemd/user/mymux-ptyd.service"
 

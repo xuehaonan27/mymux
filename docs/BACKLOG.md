@@ -51,10 +51,13 @@ replacing it is coherent. Strangler-fig path (each step ships alone, no big bang
    protocol; mymuxd bootstraps it, adopts survivors on startup, and routes
    `PERSIST_BIT` ids to it. Verified: panes survive a SIGKILL'd mymuxd with
    full grid state.
-3. Native splits/layout (the layout tree is already ours) + a `mymux attach`
-   CLI escape hatch (today `tmux -L mymux attach` is the rescue path — keep an
-   equivalent). Also: migrate ephemeral panes onto ptyd (ephemeral/persistent
-   becomes a flag), and agent/proc-tree integration for persistent panes.
+3. Native splits/layout (the layout tree is already ours). ~~`mymux attach`
+   CLI escape hatch~~ — **DONE 2026-07-04** (snapshot + raw bridge, Ctrl-\
+   detaches, list mode; installed by install-systemd.sh). ~~agent/proc-tree
+   integration for persistent panes~~ — **DONE 2026-07-04** (∞ panes in
+   /proc/tree + scoped kill; agent badges already worked via MYMUX_PANE).
+   Still open here: migrate ephemeral panes onto ptyd (ephemeral/persistent
+   becomes a flag) — deferred until the splits work lands.
 4. New windows default to native; tmux engine kept for a transition, then removed.
 Honest counterweight: no acute pain forces this — drivers are strategic (own the
 stack; per-window sizes; multi-client semantics; kill the control-mode boundary
