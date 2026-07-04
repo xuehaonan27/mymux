@@ -105,6 +105,24 @@ body {
   font: inherit;
   outline: none;
 }
+.tab-rename-btn {
+  display: inline-block;
+  margin-left: 3px;
+  padding: 0 4px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+  color: #9aa5b1;
+}
+.tab-rename-btn:hover {
+  background: #1c2128;
+}
+.tab-rename-btn.ok:hover {
+  color: #3fb950;
+}
+.tab-rename-btn.cancel:hover {
+  color: #f85149;
+}
 .barbtn {
   font: 11px ui-monospace, Menlo, monospace;
   color: #9aa5b1;

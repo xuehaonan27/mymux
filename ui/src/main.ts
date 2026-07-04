@@ -239,21 +239,39 @@ function renderTabs(w: Workspace | null) {
       e.preventDefault();
       beginRename(tab, w, win);
     });
-    tab.title = 'double-click to rename · click away to save · Esc to cancel';
+    tab.title = 'double-click to rename · click away or ✓ to save · ✕ to cancel';
     tabsEl.appendChild(tab);
   }
 }
 
 // Inline tab rename (native dialogs are unreliable in the Tauri webview).
-// Click away to save, Esc to cancel. Enter is deliberately inert: committing
-// on Enter and refocusing the pane would let the tail of the keystroke
-// (keypress/keyup) land in the shell's terminal — a stray \r there executes
-// whatever is sitting on the prompt.
+// Mouse-only contract: click away or ✓ saves, ✕ cancels. Enter AND Esc are
+// deliberately swallowed — both carry hot semantics in a terminal (\r runs
+// the prompt line, Esc interrupts coding agents), so while renaming they must
+// go nowhere; muscle-memory presses die safely in the input.
 function beginRename(tab: HTMLElement, w: Workspace, win: WinInfo) {
   const input = document.createElement('input');
   input.className = 'tab-rename';
   input.value = win.name || '';
-  tab.replaceChildren(input);
+  const mkBtn = (cls: string, label: string, title: string, commit: boolean) => {
+    const b = document.createElement('span');
+    b.className = `tab-rename-btn ${cls}`;
+    b.textContent = label;
+    b.title = title;
+    // mousedown, not click: a click would first blur the input (= save),
+    // making ✕ commit before it could cancel. preventDefault keeps focus in
+    // the input, so no blur fires and the outcome is exactly ours.
+    b.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      finish(commit);
+      active()?.refocusActive();
+    });
+    return b;
+  };
+  const btnOk = mkBtn('ok', '✓', 'save', true);
+  const btnCancel = mkBtn('cancel', '✕', 'cancel', false);
+  tab.replaceChildren(input, btnOk, btnCancel);
   let done = false;
   const finish = (commit: boolean) => {
     if (done) return;
@@ -269,16 +287,13 @@ function beginRename(tab: HTMLElement, w: Workspace, win: WinInfo) {
   };
   input.addEventListener('keydown', (e) => {
     e.stopPropagation();
-    if (e.key === 'Enter') {
-      e.preventDefault(); // swallowed — see above; click away to save
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      finish(false);
-      // Cancelled by key, not by clicking elsewhere: focus goes back to the
-      // pane (Esc produces no keypress, so nothing can leak into the shell).
-      active()?.refocusActive();
-    }
+    if (e.key === 'Enter' || e.key === 'Escape') e.preventDefault(); // swallowed, see above
   });
+  // Clicks inside the input must not bubble to the tab (select_window /
+  // re-entering beginRename on a double-click-to-select-word).
+  for (const ev of ['mousedown', 'click', 'dblclick'] as const) {
+    input.addEventListener(ev, (e) => e.stopPropagation());
+  }
   input.addEventListener('blur', () => finish(true));
   input.focus();
   input.select();
