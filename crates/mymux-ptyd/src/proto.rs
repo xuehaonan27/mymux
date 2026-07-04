@@ -176,6 +176,21 @@ pub fn socket_path() -> PathBuf {
     PathBuf::from(format!("/tmp/mymux-ptyd-{user}.sock"))
 }
 
+/// Where per-pane raw output logs live (the "unlimited scrollback"):
+/// `$MYMUX_HISTORY_DIR`, else `$XDG_STATE_HOME/mymux/history`, else
+/// `~/.local/state/mymux/history`. Files are `<short-id>-<shell-pid>.log`
+/// (pid disambiguates reused short ids across ptyd generations) plus a
+/// single rotated `.log.1` sibling.
+pub fn history_dir() -> Option<PathBuf> {
+    if let Some(d) = std::env::var_os("MYMUX_HISTORY_DIR") {
+        return Some(PathBuf::from(d));
+    }
+    if let Some(s) = std::env::var_os("XDG_STATE_HOME") {
+        return Some(PathBuf::from(s).join("mymux/history"));
+    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state/mymux/history"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

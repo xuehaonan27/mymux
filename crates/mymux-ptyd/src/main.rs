@@ -375,8 +375,10 @@ fn spawn_pane(
     });
     store.panes.lock().unwrap().insert(id, pane);
 
-    // Reader thread: pty → grid + broadcast; on EOF drop the pane and announce.
+    // Reader thread: pty → grid + broadcast + raw history log; on EOF drop
+    // the pane and announce.
     let store2 = store.clone();
+    let mut hist = HistLog::open(id, pid);
     std::thread::spawn(move || {
         let mut reader = reader;
         let mut buf = [0u8; 8192];
@@ -386,6 +388,9 @@ fn spawn_pane(
                 Ok(n) => {
                     let chunk = &buf[..n];
                     grid.lock().unwrap().feed(chunk);
+                    if let Some(h) = hist.as_mut() {
+                        h.write(chunk);
+                    }
                     let _ = store2.events.send(Ev::Output {
                         id,
                         data: chunk.to_vec(),
@@ -398,4 +403,63 @@ fn spawn_pane(
     });
 
     Ok(pid)
+}
+
+/// Raw per-pane output log (ANSI included) — the unlimited-scrollback tier.
+/// Appends until `cap` (default 64 MB, `MYMUX_HISTORY_CAP` overrides), then
+/// rotates once to `<path>.1`, bounding disk use at ~2×cap per pane. Disable
+/// with `MYMUX_HISTORY=0`. View with `less -R` / grep via `mymux-attach hist`.
+struct HistLog {
+    file: std::fs::File,
+    path: std::path::PathBuf,
+    len: u64,
+    cap: u64,
+}
+
+impl HistLog {
+    fn open(id: u32, pid: u32) -> Option<HistLog> {
+        if std::env::var_os("MYMUX_HISTORY").is_some_and(|v| v == "0") {
+            return None;
+        }
+        let dir = mymux_ptyd::proto::history_dir()?;
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join(format!("{}-{pid}.log", id & 0x3fff_ffff));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok()?;
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let cap = std::env::var("MYMUX_HISTORY_CAP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(64 * 1024 * 1024);
+        Some(HistLog {
+            file,
+            path,
+            len,
+            cap,
+        })
+    }
+
+    fn write(&mut self, chunk: &[u8]) {
+        let _ = self.file.write_all(chunk);
+        self.len += chunk.len() as u64;
+        if self.len > self.cap {
+            self.rotate();
+        }
+    }
+
+    fn rotate(&mut self) {
+        let old = std::path::PathBuf::from(format!("{}.1", self.path.display()));
+        let _ = std::fs::rename(&self.path, old);
+        if let Ok(f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            self.file = f;
+            self.len = 0;
+        }
+    }
 }

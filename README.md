@@ -287,3 +287,10 @@ in place with **⌘K k** (nothing restarts — the flag flips, the pid and
 `MYMUX_PANE` stay); closing a pane whose shell is running something (vim, an
 agent, a build) asks first instead of killing it blind; and **⌘K ?** shows
 the key map.
+
+**Unlimited history**: every native pane's raw output (colors included) is
+also appended to `~/.local/state/mymux/history/<id>-<pid>.log` — 64 MB plus
+one rotated sibling per pane, `MYMUX_HISTORY=0` to opt out. In-app scrollback
+stays fast and bounded (10k lines live, 2k after a reseed); when you need
+last Tuesday, `less -R $(mymux-attach hist <id>)` — logs survive their panes,
+mymuxd, and even ptyd restarts. Bare `mymux-attach hist` lists everything.

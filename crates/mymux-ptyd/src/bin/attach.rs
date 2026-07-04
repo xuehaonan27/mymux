@@ -10,12 +10,16 @@
 //!   mymux-attach ls         list panes
 //!   mymux-attach <target>   attach — target is a pane's short id, full id, or
 //!                           a unique NAME PREFIX (like `tmux a -t`)
+//!   mymux-attach hist [t]   full raw output logs (unlimited scrollback):
+//!                           bare lists every log, with a target prints that
+//!                           pane's file paths — `less -R $(mymux-attach hist 3)`
 
 use std::io::Write as _;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use mymux_ptyd::client::{Client, PtydEvent};
-use mymux_ptyd::proto::socket_path;
+use mymux_ptyd::proto::{history_dir, socket_path};
 
 /// Restore the terminal on drop (any exit path).
 struct RawGuard(libc::termios);
@@ -25,6 +29,95 @@ impl Drop for RawGuard {
         unsafe {
             libc::tcsetattr(0, libc::TCSANOW, &self.0);
         }
+    }
+}
+
+/// `hist` subcommand: locate the raw output logs ptyd keeps per pane (they
+/// outlive the panes — histories of DEAD shells are the whole point). Bare
+/// lists everything; a numeric target matches `<short>-*.log` right in the
+/// directory (works with ptyd down); a name prefix needs a live ptyd.
+async fn hist_cmd(target: Option<String>) {
+    let Some(dir) = history_dir() else {
+        eprintln!("mymux-attach: cannot locate the history dir (HOME unset?)");
+        std::process::exit(1);
+    };
+    let list = |short: Option<u32>| -> Vec<(PathBuf, u64)> {
+        let mut v = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !name.contains(".log") {
+                    continue;
+                }
+                if let Some(s) = short {
+                    if !name.starts_with(&format!("{s}-")) {
+                        continue;
+                    }
+                }
+                v.push((e.path(), e.metadata().map(|m| m.len()).unwrap_or(0)));
+            }
+        }
+        v.sort();
+        v
+    };
+    let human = |len: u64| -> String {
+        if len >= 1 << 20 {
+            format!("{:.1}M", len as f64 / (1 << 20) as f64)
+        } else {
+            format!("{}K", len >> 10)
+        }
+    };
+    let Some(t) = target else {
+        let all = list(None);
+        if all.is_empty() {
+            eprintln!("mymux-attach: no history logs in {}", dir.display());
+            return;
+        }
+        eprintln!(
+            "history logs in {} (view with: less -R <file>):",
+            dir.display()
+        );
+        for (p, len) in all {
+            eprintln!("  {:>8}  {}", human(len), p.display());
+        }
+        return;
+    };
+    let short = match t.parse::<u32>() {
+        Ok(n) => n & 0x3fff_ffff,
+        Err(_) => {
+            // Name prefix: names live only on live panes — ask ptyd.
+            let Ok((client, _)) = Client::connect(&socket_path()).await else {
+                eprintln!("mymux-attach: ptyd unreachable — use the numeric id (see `hist`).");
+                std::process::exit(1);
+            };
+            let panes = client.list().await.unwrap_or_default();
+            let m: Vec<_> = panes
+                .iter()
+                .filter(|p| !p.name.is_empty() && p.name.starts_with(&t))
+                .collect();
+            match m.as_slice() {
+                [one] => one.id & 0x3fff_ffff,
+                [] => {
+                    eprintln!("mymux-attach: no pane matches '{t}'.");
+                    std::process::exit(1);
+                }
+                many => {
+                    eprintln!("mymux-attach: '{t}' is ambiguous:");
+                    for p in many {
+                        eprintln!("  {:<4} {}", p.id & 0x3fff_ffff, p.name);
+                    }
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+    let files = list(Some(short));
+    if files.is_empty() {
+        eprintln!("mymux-attach: no history for pane {t}.");
+        std::process::exit(1);
+    }
+    for (p, _) in files {
+        println!("{}", p.display()); // stdout: pipeable into less -R / grep
     }
 }
 
@@ -66,8 +159,12 @@ async fn main() {
     let arg = std::env::args().nth(1);
     if matches!(arg.as_deref(), Some("-h") | Some("--help")) {
         eprintln!(
-            "usage: mymux-attach [ls | <short-id> | <full-id> | <name-prefix>]   (Ctrl-\\ detaches)"
+            "usage: mymux-attach [ls | hist [pane] | <short-id> | <full-id> | <name-prefix>]   (Ctrl-\\ detaches)"
         );
+        return;
+    }
+    if arg.as_deref() == Some("hist") {
+        hist_cmd(std::env::args().nth(2)).await;
         return;
     }
 

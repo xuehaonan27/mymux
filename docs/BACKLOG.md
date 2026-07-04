@@ -102,8 +102,13 @@ Native ∞ windows are the default; keep closing the gap to a great daily driver
 - Rearrange tabs (custom window order, drag) — needs an order model beyond
   BTreeMap id order + tmux/native interleaving rules.
 - Drag the split divider to resize panes (UI + a `resize_leaf` verb).
-- Paged fetch of older scrollback beyond the reseed window (blocked on
-  xterm.js not supporting prepend; SCROLLBACK bump is the stopgap).
+- ~~Unlimited history~~ — **DONE 2026-07-03** via raw per-pane output logs in
+  ptyd (`$XDG_STATE_HOME/mymux/history/<short>-<pid>.log`, ANSI included,
+  64 MB cap + one rotation, `MYMUX_HISTORY=0` opt-out, `MYMUX_HISTORY_CAP`
+  tunable; `mymux-attach hist [pane]` locates the files — numeric lookup
+  works without ptyd, and logs outlive panes/ptyd). In-app paging of older
+  scrollback stays blocked on xterm.js prepend; the log is the answer until
+  a self-built renderer exists.
 - Alt-screen/agent heuristics for native panes (ptyd could report alt state
   with output events; hooks already cover claude/codex).
 
