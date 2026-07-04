@@ -167,7 +167,7 @@ pub fn build_state_json(
             active: active_win == Some(tab.id),
             agent: wa.map(|(s, _)| s),
             agent_pane: wa.map(|(_, p)| p),
-            ephemeral: crate::pty::is_ephemeral(tab.id),
+            ephemeral: crate::persist::is_ephemeral(tab.id),
             persistent: crate::persist::is_persistent(tab.id),
         });
     }

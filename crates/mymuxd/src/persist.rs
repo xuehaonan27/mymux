@@ -1,6 +1,8 @@
-//! Bridge to mymux-ptyd: **persistent** native panes survive mymuxd restarts
-//! because the tiny holder daemon owns their PTYs and terminal grids. mymuxd
-//! reconnects on startup, adopts whatever panes survived, and keeps routing.
+//! Bridge to mymux-ptyd: ALL native panes (⌁ ephemeral and ∞ persistent) are
+//! held by the tiny holder daemon, which owns their PTYs and terminal grids.
+//! Persistence is a per-pane flag: ptyd kills a pane spawned as ephemeral
+//! when our connection drops (so ⌁ still dies with mymuxd, as before), while
+//! persistent panes survive mymuxd restarts — we reconnect and re-adopt them.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -9,24 +11,18 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use mymux_ptyd::client::{Client, PtydEvent};
 use mymux_ptyd::proto::socket_path;
+pub use mymux_ptyd::proto::{is_ephemeral, is_persistent, EPH_BIT, PERSIST_BIT};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::native::NativeWindows;
-use crate::pty::EPH_BIT;
 use crate::tmux::{Hub, ServerEvent};
-
-/// Bit 30 marks a ptyd-backed persistent pane (bit 31 = local ephemeral).
-pub const PERSIST_BIT: u32 = 1 << 30;
-pub fn is_persistent(id: u32) -> bool {
-    id & PERSIST_BIT != 0 && id & EPH_BIT == 0
-}
 
 #[derive(Default)]
 pub struct Persist {
     client: RwLock<Option<Arc<Client>>>,
     connect_lock: AsyncMutex<()>,
-    /// Live persistent panes as we know them — `id → (name, shell pid)` — kept
-    /// in step with ptyd via the resync-on-connect List plus spawn/exit events.
+    /// Live native panes as we know them — `id → (name, shell pid)` — kept in
+    /// step with ptyd via the resync-on-connect List plus spawn/exit events.
     mirror: Mutex<BTreeMap<u32, (String, u32)>>,
     next: Mutex<u32>,
 }
@@ -99,7 +95,15 @@ impl Persist {
         for _ in 0..25 {
             match Client::connect(&path).await {
                 Ok((client, events)) => {
-                    let panes = client.list().await.unwrap_or_default();
+                    let listed = client.list().await.unwrap_or_default();
+                    // Ephemeral panes must never survive a mymuxd restart.
+                    // ptyd kills them when our old connection drops; sweeping
+                    // here covers an old ptyd that kept them as plain panes.
+                    let (stale, panes): (Vec<_>, Vec<_>) =
+                        listed.into_iter().partition(|p| is_ephemeral(p.id));
+                    for p in &stale {
+                        client.kill(p.id);
+                    }
                     {
                         let mut m = self.mirror.lock().unwrap();
                         m.clear();
@@ -109,7 +113,7 @@ impl Persist {
                     }
                     {
                         let mut n = self.next.lock().unwrap();
-                        let max_low = panes.iter().map(|p| p.id & !PERSIST_BIT).max().unwrap_or(0);
+                        let max_low = panes.iter().map(|p| p.id & 0x3fff_ffff).max().unwrap_or(0);
                         *n = (*n).max(max_low + 1).max(1);
                     }
                     // Adopt the layout blob and reconcile it against the panes
@@ -147,12 +151,14 @@ impl Persist {
         cwd: Option<String>,
         cols: u16,
         rows: u16,
+        ephemeral: bool,
     ) -> Result<u32, String> {
         let client = self.ensure(hub).await?;
         let id = {
             let mut n = self.next.lock().unwrap();
             *n = (*n).max(1);
-            let id = PERSIST_BIT | *n;
+            let bit = if ephemeral { EPH_BIT } else { PERSIST_BIT };
+            let id = bit | *n;
             *n += 1;
             id
         };
@@ -164,6 +170,7 @@ impl Persist {
                 rows,
                 String::new(),
                 vec![("MYMUX_PANE".to_string(), id.to_string())],
+                ephemeral,
             )
             .await?;
         // Empty name = unnamed; the UI/attach show the short numeric id then.

@@ -86,16 +86,23 @@ async fn main() {
     let panes = client.list().await.unwrap_or_default();
     let short = |id: u32| id & 0x3fff_ffff;
     let print_panes = |panes: &[mymux_ptyd::proto::PaneInfo]| {
-        eprintln!("persistent panes (attach with: mymux-attach <short-id | name-prefix>):");
+        eprintln!("panes (attach with: mymux-attach <short-id | name-prefix>):");
         for p in panes {
             let name = if p.name.is_empty() {
                 "-"
             } else {
                 p.name.as_str()
             };
+            // ⌁ ephemeral panes vanish with their mymuxd; ∞ persistent stay.
+            let kind = if mymux_ptyd::proto::is_ephemeral(p.id) {
+                "⌁"
+            } else {
+                "∞"
+            };
             eprintln!(
-                "  {:<4} {:<20} pid {:<8} {}x{}  (id {})",
+                "  {:<4} {} {:<20} pid {:<8} {}x{}  (id {})",
                 short(p.id),
+                kind,
                 name,
                 p.pid,
                 p.cols,

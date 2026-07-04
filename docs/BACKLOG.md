@@ -63,9 +63,13 @@ replacing it is coherent. Strangler-fig path (each step ships alone, no big bang
    opaque `SetMeta`/`GetMeta` blob so layout and panes share fate; adopted
    and reconciled on reconnect. UI unchanged — it already spoke layout
    trees. E2E: 3-pane window survives a SIGKILL'd mymuxd with tree, focus,
-   names and scrollback intact). Still open here: migrate ephemeral panes
-   onto ptyd (ephemeral/persistent becomes a flag) — the ⌁ tab stays
-   single-pane until then.
+   names and scrollback intact). ~~Migrate ephemeral panes onto ptyd~~ —
+   **DONE 2026-07-03**: ephemeral is now just a Spawn flag; ptyd tracks the
+   spawning connection per pane and kills its ephemeral panes when that
+   connection drops (so ⌁ still dies with mymuxd, verified down to the shell
+   pid), mymuxd sweeps EPH_BIT survivors on reconnect (old-ptyd fallback),
+   in-process pty.rs is deleted, and ⌁ tabs gained splits + attach (`ls`
+   marks ⌁/∞). **Step ③ complete.**
 4. New windows default to native; tmux engine kept for a transition, then removed.
 Honest counterweight: no acute pain forces this — drivers are strategic (own the
 stack; per-window sizes; multi-client semantics; kill the control-mode boundary

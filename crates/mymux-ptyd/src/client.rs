@@ -95,6 +95,7 @@ impl Client {
         (req, rrx, want_snapshot.then_some(srx))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn spawn(
         &self,
         id: u32,
@@ -103,6 +104,7 @@ impl Client {
         rows: u16,
         name: String,
         env: Vec<(String, String)>,
+        ephemeral: bool,
     ) -> Result<u32, String> {
         let (_r, rx, _) = self.request(
             |req| Req::Spawn {
@@ -113,6 +115,7 @@ impl Client {
                 rows,
                 name,
                 env,
+                ephemeral,
             },
             false,
         );

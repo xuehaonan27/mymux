@@ -32,6 +32,10 @@ struct Pane {
     name: Mutex<String>,
     size: Mutex<(u16, u16)>,
     grid: Arc<Mutex<PaneGrid>>,
+    /// Ephemeral panes die when `owner` (the connection that spawned them)
+    /// disconnects; persistent panes die only with this daemon.
+    ephemeral: bool,
+    owner: u64,
 }
 
 impl Drop for Pane {
@@ -48,6 +52,7 @@ struct Store {
     /// Opaque client metadata (mymuxd's layout blob) — memory-only, so it dies
     /// together with the panes it describes.
     meta: Mutex<String>,
+    next_conn: std::sync::atomic::AtomicU64,
 }
 
 #[tokio::main]
@@ -80,6 +85,7 @@ async fn main() {
         panes: Mutex::new(BTreeMap::new()),
         events,
         meta: Mutex::new(String::new()),
+        next_conn: std::sync::atomic::AtomicU64::new(1),
     });
 
     loop {
@@ -96,6 +102,9 @@ async fn main() {
 }
 
 async fn handle_conn(stream: UnixStream, store: Arc<Store>) {
+    let conn = store
+        .next_conn
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (mut rd, wr) = tokio::io::split(stream);
     let (out, out_rx) = mpsc::unbounded_channel::<(u8, Vec<u8>)>();
     tokio::spawn(async move {
@@ -132,10 +141,24 @@ async fn handle_conn(stream: UnixStream, store: Arc<Store>) {
                 let Ok(req) = serde_json::from_slice::<Req>(&body) else {
                     continue;
                 };
-                handle_req(req, &store, &out);
+                handle_req(req, &store, &out, conn);
             }
             _ => {}
         }
+    }
+
+    // The spawning connection is gone: its ephemeral panes go with it (map
+    // removal closes the pty; the reader thread emits the single Exit).
+    let orphans: Vec<u32> = {
+        let panes = store.panes.lock().unwrap();
+        panes
+            .iter()
+            .filter(|(_, p)| p.ephemeral && p.owner == conn)
+            .map(|(&id, _)| id)
+            .collect()
+    };
+    for id in orphans {
+        let _ = store.panes.lock().unwrap().remove(&id);
     }
 }
 
@@ -143,7 +166,7 @@ fn reply(out: &mpsc::UnboundedSender<(u8, Vec<u8>)>, rep: Reply) {
     let _ = out.send((KIND_JSON, serde_json::to_vec(&rep).unwrap_or_default()));
 }
 
-fn handle_req(req: Req, store: &Arc<Store>, out: &mpsc::UnboundedSender<(u8, Vec<u8>)>) {
+fn handle_req(req: Req, store: &Arc<Store>, out: &mpsc::UnboundedSender<(u8, Vec<u8>)>, conn: u64) {
     match req {
         Req::Subscribe => {
             let mut rx = store.events.subscribe();
@@ -185,8 +208,9 @@ fn handle_req(req: Req, store: &Arc<Store>, out: &mpsc::UnboundedSender<(u8, Vec
             rows,
             name,
             env,
+            ephemeral,
         } => {
-            let rep = match spawn_pane(store, id, cwd, cols, rows, name, env) {
+            let rep = match spawn_pane(store, id, cwd, cols, rows, name, env, ephemeral, conn) {
                 Ok(pid) => Reply {
                     rep: req,
                     ok: true,
@@ -282,6 +306,7 @@ fn handle_req(req: Req, store: &Arc<Store>, out: &mpsc::UnboundedSender<(u8, Vec
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_pane(
     store: &Arc<Store>,
     id: u32,
@@ -290,6 +315,8 @@ fn spawn_pane(
     rows: u16,
     name: String,
     env: Vec<(String, String)>,
+    ephemeral: bool,
+    owner: u64,
 ) -> Result<u32, String> {
     if store.panes.lock().unwrap().contains_key(&id) {
         return Err(format!("pane id {id} already in use"));
@@ -333,6 +360,8 @@ fn spawn_pane(
         name: Mutex::new(name),
         size: Mutex::new((cols, rows)),
         grid: grid.clone(),
+        ephemeral,
+        owner,
     });
     store.panes.lock().unwrap().insert(id, pane);
 

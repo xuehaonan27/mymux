@@ -11,7 +11,6 @@ mod lsp;
 mod native;
 mod persist;
 mod proc;
-mod pty;
 mod state;
 mod tmux;
 mod ws;

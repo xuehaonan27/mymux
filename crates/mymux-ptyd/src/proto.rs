@@ -20,6 +20,19 @@ pub const KIND_SNAPSHOT: u8 = 3;
 /// Sanity bound; snapshots are the largest frames (tens of KB).
 pub const MAX_FRAME: u32 = 8 * 1024 * 1024;
 
+/// Pane-id namespace convention (proposed by the client, honored everywhere):
+/// bit 31 marks an ephemeral pane, bit 30 a persistent one. ptyd itself acts
+/// on [`Req::Spawn`]'s `ephemeral` flag; the bits let tools like
+/// `mymux-attach` tell the kinds apart from the id alone.
+pub const EPH_BIT: u32 = 1 << 31;
+pub const PERSIST_BIT: u32 = 1 << 30;
+pub fn is_ephemeral(id: u32) -> bool {
+    id & EPH_BIT != 0
+}
+pub fn is_persistent(id: u32) -> bool {
+    id & PERSIST_BIT != 0 && id & EPH_BIT == 0
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Req {
@@ -33,6 +46,12 @@ pub enum Req {
         rows: u16,
         name: String,
         env: Vec<(String, String)>,
+        /// Ephemeral panes are killed by ptyd when the connection that
+        /// spawned them goes away (mymuxd restart ⇒ its ⌁ tabs die — the old
+        /// in-process semantics). Persistent panes outlive everything but
+        /// ptyd itself. Defaults false so old clients keep old behavior.
+        #[serde(default)]
+        ephemeral: bool,
     },
     Resize {
         id: u32,
@@ -175,10 +194,22 @@ mod tests {
             rows: 24,
             name: "shell".into(),
             env: vec![("MYMUX_PANE".into(), "1073741825".into())],
+            ephemeral: false,
         };
         let s = serde_json::to_string(&req).unwrap();
         assert!(s.contains(r#""op":"spawn""#), "{s}");
         let back: Req = serde_json::from_str(&s).unwrap();
         assert!(matches!(back, Req::Spawn { id, .. } if id == (1 << 30) | 1));
+        // Old clients don't send `ephemeral` — it must default to false.
+        let legacy =
+            r#"{"op":"spawn","req":2,"id":5,"cwd":null,"cols":80,"rows":24,"name":"","env":[]}"#;
+        let back: Req = serde_json::from_str(legacy).unwrap();
+        assert!(matches!(
+            back,
+            Req::Spawn {
+                ephemeral: false,
+                ..
+            }
+        ));
     }
 }

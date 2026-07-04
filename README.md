@@ -7,7 +7,7 @@ single clean layer:
 ```
 Tauri app / browser (xterm.js UI)
    ⇄  SSH tunnel (in-process russh, auto-reconnect)
-   ⇄  mymuxd (Rust daemon)  ⇄  tmux -CC (persistent sessions)  +  ⌁ raw shells (ephemeral PTYs)
+   ⇄  mymuxd (Rust daemon)  ⇄  tmux -CC (persistent sessions)  +  mymux-ptyd (native ⌁/∞ panes)
 ```
 
 - **Native rendering** — terminals render once, in xterm.js. No nested tmux
@@ -246,14 +246,14 @@ down arbitrary processes. It reads `/proc` directly (Linux) and serves
 
 Not everything needs tmux. Press **⌘K s** (or the `+sh` button) for a raw,
 non-tmux shell in its own top-level tab (marked `⌁`, dashed) — ideal for quick
-throwaway commands without nesting inside a persistent agent session. It's a
-mymuxd-owned pty: it inherits the focused pane's cwd (with `$TMUX` stripped, so
-you can even nest a tmux in it) and **survives a disconnect** (the daemon holds
-it). Reconnects and tab switches restore a **faithful terminal snapshot** —
-colors, cursor, alternate screen (vim & co.) and recent scrollback — from a
-server-side terminal grid, the first building block of the future native
-engine. It still dies with the daemon (by design). Close it like any pane;
-persistent (agent) work stays on tmux windows.
+throwaway commands without nesting inside a persistent agent session. Like all
+native panes it lives in mymux-ptyd: it inherits the focused pane's cwd (with
+`$TMUX` stripped, so you can even nest a tmux in it), **survives a disconnect**,
+and reconnects/tab switches restore a **faithful terminal snapshot** — colors,
+cursor, alternate screen (vim & co.) and recent scrollback — from a server-side
+terminal grid. The one thing that separates it from `∞` is fate: ptyd kills it
+the moment its mymuxd goes away (by design — "ephemeral" is just a flag now).
+Close it like any pane.
 
 ## Persistent shells (⌘K ⇧S)
 
@@ -273,8 +273,8 @@ bytes; `Ctrl-\` detaches, the pane keeps running. The equivalent of
 reach. Persistent panes also show up in the ⌘K t process tree (marked `∞`) with
 scoped kill.
 
-**Splits work too** (⌘D / ⌘⇧D), tmux-free: mymuxd is the layout engine —
-splits, collapse-on-close, and ⌘⌥-arrow navigation are computed natively, and
-the layout tree rides along in ptyd next to the panes it describes. Kill and
-restart mymuxd and the whole window comes back: grouping, geometry, focused
-pane, every pane's scrollback.
+**Splits work too** (⌘D / ⌘⇧D), tmux-free, for `⌁` and `∞` tabs alike: mymuxd
+is the layout engine — splits, collapse-on-close, and ⌘⌥-arrow navigation are
+computed natively, and the layout tree rides along in ptyd next to the panes
+it describes. Kill and restart mymuxd and a persistent window comes back
+whole: grouping, geometry, focused pane, every pane's scrollback.
