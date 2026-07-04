@@ -606,6 +606,31 @@ impl Hub {
         }
     }
 
+    /// After layouts refresh, make sure the active pane actually belongs to the
+    /// active window (a bare window switch doesn't re-announce the pane, and
+    /// the layout may only arrive here) — otherwise the UI can't focus it.
+    fn fix_active_pane(&self) {
+        let mut m = self.model.lock().unwrap();
+        let Some(aw) = m.active_window else { return };
+        let (leaves, remembered) = match m.windows.get(&aw) {
+            Some(wi) => {
+                let mut leaves = Vec::new();
+                if let Some(l) = &wi.layout {
+                    l.root.for_each_pane(&mut |p, _| leaves.push(p));
+                }
+                (leaves, wi.active_pane)
+            }
+            None => return,
+        };
+        if leaves.is_empty() {
+            return;
+        }
+        let current_ok = m.active_pane.map(|p| leaves.contains(&p)).unwrap_or(false);
+        if !current_ok {
+            m.active_pane = remembered.filter(|p| leaves.contains(p)).or(Some(leaves[0]));
+        }
+    }
+
     /// Every pane across all windows with its shell pid, for the process tree:
     /// `(window_id, pane_id, pane_pid, window_name)`.
     pub async fn pane_pids(&self) -> Vec<(u32, u32, u32, String)> {
@@ -798,6 +823,7 @@ async fn reader_loop(stdout: ChildStdout, hub: Arc<Hub>) {
             // Inline (not spawned) so the refreshed layout lands in the model
             // before any later event builds its state — kills empty-layout races.
             hub.refresh_layouts().await;
+            hub.fix_active_pane();
             hub.emit(ServerEvent::State(hub.state_json()));
             for (pane, seed) in hub.snapshot_visible().await {
                 hub.emit(ServerEvent::Output { pane, data: seed });

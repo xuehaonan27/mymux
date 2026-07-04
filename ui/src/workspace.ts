@@ -298,7 +298,12 @@ export class Workspace {
     for (const [pid, p] of this.panes) p.el.classList.toggle('active', pid === id);
     // Keyboard focus follows the active pane — but only for the workspace the
     // user is looking at (a background host's state must not steal focus).
-    if (changed && id != null && this.visible) this.panes.get(id)?.term.focus();
+    // Also refocus when focus fell back to <body>: switching windows disposes
+    // the previously-focused terminal, and no one else has claimed focus.
+    const orphaned = document.activeElement === document.body;
+    if ((changed || orphaned) && id != null && this.visible) {
+      this.panes.get(id)?.term.focus();
+    }
   }
 
   // ---- output --------------------------------------------------------------

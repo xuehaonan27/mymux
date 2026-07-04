@@ -67,6 +67,24 @@ impl Model {
             }
             ControlEvent::SessionWindowChanged { window, .. } => {
                 self.active_window = Some(*window);
+                // Keyboard focus follows the window: adopt its active pane —
+                // tmux does not re-announce the pane on a bare window switch.
+                if let Some(wi) = self.windows.get(window) {
+                    let pane = wi.active_pane.or_else(|| {
+                        wi.layout.as_ref().and_then(|l| {
+                            let mut first = None;
+                            l.root.for_each_pane(&mut |p, _| {
+                                if first.is_none() {
+                                    first = Some(p);
+                                }
+                            });
+                            first
+                        })
+                    });
+                    if pane.is_some() {
+                        self.active_pane = pane;
+                    }
+                }
                 true
             }
             ControlEvent::WindowAdd { window } => {
@@ -145,5 +163,22 @@ mod tests {
             window: WindowId(1),
         });
         assert_eq!(m.active_window, Some(WindowId(1)));
+    }
+
+    #[test]
+    fn window_switch_adopts_that_windows_active_pane() {
+        let mut m = Model::new();
+        m.apply(&ControlEvent::WindowAdd { window: WindowId(0) });
+        m.apply(&ControlEvent::WindowPaneChanged { window: WindowId(0), pane: PaneId(3) });
+        m.apply(&ControlEvent::WindowAdd { window: WindowId(1) });
+        m.apply(&ControlEvent::WindowPaneChanged { window: WindowId(1), pane: PaneId(7) });
+        assert_eq!(m.active_pane, Some(PaneId(7)));
+        // Switch back to @0: the active pane must follow (tmux won't repeat it).
+        m.apply(&ControlEvent::SessionWindowChanged {
+            session: crate::SessionId(0),
+            window: WindowId(0),
+        });
+        assert_eq!(m.active_window, Some(WindowId(0)));
+        assert_eq!(m.active_pane, Some(PaneId(3)));
     }
 }
