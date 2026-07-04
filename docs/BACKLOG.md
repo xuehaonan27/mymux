@@ -56,8 +56,16 @@ replacing it is coherent. Strangler-fig path (each step ships alone, no big bang
    detaches, list mode; installed by install-systemd.sh). ~~agent/proc-tree
    integration for persistent panes~~ — **DONE 2026-07-04** (∞ panes in
    /proc/tree + scoped kill; agent badges already worked via MYMUX_PANE).
-   Still open here: migrate ephemeral panes onto ptyd (ephemeral/persistent
-   becomes a flag) — deferred until the splits work lands.
+   ~~Splits/layout for persistent windows~~ — **DONE 2026-07-03** (option 1:
+   mymuxd owns layout semantics in `crates/mymuxd/src/native.rs` — split with
+   same-direction flattening, collapse-on-close, proportional resize,
+   geometric ⌘⌥-arrow navigation; ptyd stores the serialized tree as an
+   opaque `SetMeta`/`GetMeta` blob so layout and panes share fate; adopted
+   and reconciled on reconnect. UI unchanged — it already spoke layout
+   trees. E2E: 3-pane window survives a SIGKILL'd mymuxd with tree, focus,
+   names and scrollback intact). Still open here: migrate ephemeral panes
+   onto ptyd (ephemeral/persistent becomes a flag) — the ⌁ tab stays
+   single-pane until then.
 4. New windows default to native; tmux engine kept for a transition, then removed.
 Honest counterweight: no acute pain forces this — drivers are strategic (own the
 stack; per-window sizes; multi-client semantics; kill the control-mode boundary

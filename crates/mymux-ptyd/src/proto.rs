@@ -34,11 +34,34 @@ pub enum Req {
         name: String,
         env: Vec<(String, String)>,
     },
-    Resize { id: u32, cols: u16, rows: u16 },
-    Kill { id: u32 },
-    Snapshot { req: u64, id: u32 },
-    List { req: u64 },
+    Resize {
+        id: u32,
+        cols: u16,
+        rows: u16,
+    },
+    Rename {
+        id: u32,
+        name: String,
+    },
+    Kill {
+        id: u32,
+    },
+    Snapshot {
+        req: u64,
+        id: u32,
+    },
+    List {
+        req: u64,
+    },
     Subscribe,
+    /// Store an opaque client blob (layout trees etc.). Lives in ptyd memory —
+    /// deliberately sharing fate with the panes it describes.
+    SetMeta {
+        data: String,
+    },
+    GetMeta {
+        req: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -60,6 +83,8 @@ pub struct Reply {
     pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panes: Option<Vec<PaneInfo>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -121,11 +146,18 @@ mod tests {
     #[tokio::test]
     async fn frame_roundtrip() {
         let (mut a, mut b) = tokio::io::duplex(4096);
-        write_frame(&mut a, KIND_OUTPUT, b"\x01\x00\x00\x00hello").await.unwrap();
-        write_frame(&mut a, KIND_JSON, br#"{"ev":"exit","id":7}"#).await.unwrap();
+        write_frame(&mut a, KIND_OUTPUT, b"\x01\x00\x00\x00hello")
+            .await
+            .unwrap();
+        write_frame(&mut a, KIND_JSON, br#"{"ev":"exit","id":7}"#)
+            .await
+            .unwrap();
         drop(a);
         let (k1, b1) = read_frame(&mut b).await.unwrap().unwrap();
-        assert_eq!((k1, b1.as_slice()), (KIND_OUTPUT, &b"\x01\x00\x00\x00hello"[..]));
+        assert_eq!(
+            (k1, b1.as_slice()),
+            (KIND_OUTPUT, &b"\x01\x00\x00\x00hello"[..])
+        );
         let (k2, b2) = read_frame(&mut b).await.unwrap().unwrap();
         assert_eq!(k2, KIND_JSON);
         let ev: Event = serde_json::from_slice(&b2).unwrap();

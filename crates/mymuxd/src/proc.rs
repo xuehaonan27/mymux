@@ -134,7 +134,10 @@ fn subtree(
 }
 
 /// Every pid inside any pane's subtree — the set a kill is allowed to touch.
-fn allowed_pids(panes: &[(u32, u32, u32, String)], kids: &BTreeMap<u32, Vec<u32>>) -> BTreeSet<u32> {
+fn allowed_pids(
+    panes: &[(u32, u32, u32, String)],
+    kids: &BTreeMap<u32, Vec<u32>>,
+) -> BTreeSet<u32> {
     fn collect(root: u32, kids: &BTreeMap<u32, Vec<u32>>, out: &mut BTreeSet<u32>) {
         if !out.insert(root) {
             return;

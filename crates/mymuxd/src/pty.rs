@@ -60,7 +60,12 @@ impl PtyManager {
         rows: u16,
     ) -> Option<u32> {
         let pair = native_pty_system()
-            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .ok()?;
 
         self.next += 1;
@@ -100,7 +105,10 @@ impl PtyManager {
                     Ok(n) => {
                         let chunk = &buf[..n];
                         grid2.lock().unwrap().feed(chunk);
-                        let _ = tx.send(ServerEvent::Output { pane: id, data: chunk.to_vec() });
+                        let _ = tx.send(ServerEvent::Output {
+                            pane: id,
+                            data: chunk.to_vec(),
+                        });
                     }
                 }
             }
@@ -115,7 +123,7 @@ impl PtyManager {
                 child,
                 child_pid,
                 grid,
-                name: "shell".to_string(),
+                name: String::new(), // unnamed → UI shows the short numeric id
             },
         );
         Some(id)
@@ -134,10 +142,19 @@ impl PtyManager {
 
     pub fn resize(&self, id: u32, cols: u16, rows: u16) {
         if let Some(e) = self.map.get(&id) {
-            let _ = e
-                .master
-                .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+            let _ = e.master.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
             e.grid.lock().unwrap().resize(cols, rows);
+        }
+    }
+
+    pub fn rename(&mut self, id: u32, name: String) {
+        if let Some(e) = self.map.get_mut(&id) {
+            e.name = name;
         }
     }
 

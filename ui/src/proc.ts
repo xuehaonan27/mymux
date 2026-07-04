@@ -132,13 +132,16 @@ export function initProcPanel(opts: { getApiBase: () => string }): ProcPanel {
       const glyph = w.id >= 0x80000000 ? '⌁' : native ? '∞' : '▸';
       const wh = document.createElement('div');
       wh.className = 'pwin' + (native ? ' eph' : '');
-      wh.textContent = native ? `${glyph} ${w.name}` : `▸ @${w.id} ${w.name}`;
+      wh.textContent = native
+        ? `${glyph} ${w.name || w.id % 0x40000000}`
+        : `▸ @${w.id} ${w.name}`;
       body.appendChild(wh);
       for (const pane of w.panes) {
-        if (!native) {
+        // Native windows hide the pane header while single-pane; splits get one.
+        if (!native || w.panes.length > 1) {
           const ph = document.createElement('div');
           ph.className = 'ppane';
-          ph.textContent = `pane %${pane.pane}`;
+          ph.textContent = native ? `pane ${pane.pane % 0x40000000}` : `pane %${pane.pane}`;
           body.appendChild(ph);
         }
         for (const p of pane.procs) body.appendChild(procRow(p, tree.clk_tck, dt));

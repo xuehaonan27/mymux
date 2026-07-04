@@ -58,7 +58,13 @@ pub async fn files(Query(q): Query<StatusQuery>) -> Json<Vec<String>> {
     let out = Command::new("git")
         .arg("-C")
         .arg(&root)
-        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
         .output()
         .await;
     let Ok(out) = out else { return Json(vec![]) };

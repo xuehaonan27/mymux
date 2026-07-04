@@ -22,10 +22,16 @@ async fn main() {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--local-port" => {
-                cfg_local = args.next().and_then(|v| v.parse().ok()).unwrap_or(cfg_local)
+                cfg_local = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(cfg_local)
             }
             "--remote-port" => {
-                cfg_remote = args.next().and_then(|v| v.parse().ok()).unwrap_or(cfg_remote)
+                cfg_remote = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(cfg_remote)
             }
             "--ensure-daemon" => ensure = true,
             "-h" | "--help" => {

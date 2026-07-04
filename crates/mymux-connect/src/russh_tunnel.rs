@@ -44,7 +44,9 @@ pub enum Status {
     /// Wrong passphrase / key, or the server rejected our key.
     AuthFailed,
     /// Host key not in `known_hosts`; ask the user, then retry with trust=true.
-    HostKeyUnknown { fingerprint: String },
+    HostKeyUnknown {
+        fingerprint: String,
+    },
     /// Host key CHANGED vs `known_hosts` — possible MITM; refuse.
     HostKeyMismatch,
     Error(String),
@@ -133,7 +135,12 @@ async fn connect_and_serve(
 
     // Public-key auth (RSA needs a hash choice; ed25519 etc. don't).
     let hash_alg = if key.algorithm().is_rsa() {
-        handle.best_supported_rsa_hash().await.ok().flatten().flatten()
+        handle
+            .best_supported_rsa_hash()
+            .await
+            .ok()
+            .flatten()
+            .flatten()
     } else {
         None
     };
@@ -147,7 +154,9 @@ async fn connect_and_serve(
 
     // Best-effort: start the remote daemon over a session channel (fire-and-forget).
     if let Ok(ch) = handle.channel_open_session().await {
-        let _ = ch.exec(false, cfg.remote_daemon_cmd.clone().into_bytes()).await;
+        let _ = ch
+            .exec(false, cfg.remote_daemon_cmd.clone().into_bytes())
+            .await;
     }
 
     let listener = TcpListener::bind(("127.0.0.1", cfg.local_port))
@@ -183,8 +192,9 @@ async fn connect_and_serve(
             tokio::time::sleep(Duration::from_secs(3)).await;
             // Probe liveness with a session channel; the timeout guards against a
             // hang on a half-dead socket (russh may not have noticed the drop yet).
-            match tokio::time::timeout(Duration::from_secs(3), handle.channel_open_session()).await {
-                Ok(Ok(_ch)) => {} // healthy (channel closes on drop)
+            match tokio::time::timeout(Duration::from_secs(3), handle.channel_open_session()).await
+            {
+                Ok(Ok(_ch)) => {}                 // healthy (channel closes on drop)
                 _ => return Status::Reconnecting, // timed out or errored → session dead
             }
         }

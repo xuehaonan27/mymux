@@ -146,7 +146,9 @@ mod tests {
     #[test]
     fn tracks_active_window_and_panes() {
         let mut m = Model::new();
-        m.apply(&ControlEvent::WindowAdd { window: WindowId(0) });
+        m.apply(&ControlEvent::WindowAdd {
+            window: WindowId(0),
+        });
         assert_eq!(m.active_window, Some(WindowId(0)));
 
         let layout = crate::parse_layout("aaaa,80x24,0,0{40x24,0,0,0,39x24,41,0,1}");
@@ -168,10 +170,20 @@ mod tests {
     #[test]
     fn window_switch_adopts_that_windows_active_pane() {
         let mut m = Model::new();
-        m.apply(&ControlEvent::WindowAdd { window: WindowId(0) });
-        m.apply(&ControlEvent::WindowPaneChanged { window: WindowId(0), pane: PaneId(3) });
-        m.apply(&ControlEvent::WindowAdd { window: WindowId(1) });
-        m.apply(&ControlEvent::WindowPaneChanged { window: WindowId(1), pane: PaneId(7) });
+        m.apply(&ControlEvent::WindowAdd {
+            window: WindowId(0),
+        });
+        m.apply(&ControlEvent::WindowPaneChanged {
+            window: WindowId(0),
+            pane: PaneId(3),
+        });
+        m.apply(&ControlEvent::WindowAdd {
+            window: WindowId(1),
+        });
+        m.apply(&ControlEvent::WindowPaneChanged {
+            window: WindowId(1),
+            pane: PaneId(7),
+        });
         assert_eq!(m.active_pane, Some(PaneId(7)));
         // Switch back to @0: the active pane must follow (tmux won't repeat it).
         m.apply(&ControlEvent::SessionWindowChanged {

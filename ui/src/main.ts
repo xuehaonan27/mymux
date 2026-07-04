@@ -208,6 +208,7 @@ function endWorkspace(w: Workspace, disconnectTunnel: boolean) {
 function renderTabs(w: Workspace | null) {
   tabsEl.replaceChildren();
   if (!w) return;
+  const low = (id: number) => id % 0x40000000;
   for (const win of w.windowList) {
     const tab = document.createElement('button');
     tab.className =
@@ -221,10 +222,43 @@ function renderTabs(w: Workspace | null) {
       tab.appendChild(dot);
     }
     const glyph = win.ephemeral ? '⌁ ' : win.persistent ? '∞ ' : '';
-    tab.appendChild(document.createTextNode(glyph + (win.name || `@${win.id}`)));
+    const label =
+      win.name || (win.ephemeral || win.persistent ? String(low(win.id)) : `@${win.id}`);
+    tab.appendChild(document.createTextNode(glyph + label));
     tab.addEventListener('click', () => w.sendJson({ t: 'select_window', id: win.id }));
+    tab.addEventListener('dblclick', (e) => {
+      e.preventDefault();
+      beginRename(tab, w, win);
+    });
+    tab.title = 'double-click to rename';
     tabsEl.appendChild(tab);
   }
+}
+
+// Inline tab rename (native dialogs are unreliable in the Tauri webview).
+function beginRename(tab: HTMLElement, w: Workspace, win: WinInfo) {
+  const input = document.createElement('input');
+  input.className = 'tab-rename';
+  input.value = win.name || '';
+  tab.replaceChildren(input);
+  let done = false;
+  const finish = (commit: boolean) => {
+    if (done) return;
+    done = true;
+    const name = input.value.trim();
+    if (commit && name !== (win.name || '')) {
+      w.sendJson({ t: 'rename_window', id: win.id, name });
+    }
+    renderTabs(w); // restore now; the server state re-renders with the new name
+  };
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') finish(true);
+    else if (e.key === 'Escape') finish(false);
+  });
+  input.addEventListener('blur', () => finish(false));
+  input.focus();
+  input.select();
 }
 
 /** The most attention-worthy agent state across a host's windows. */

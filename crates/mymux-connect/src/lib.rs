@@ -208,7 +208,11 @@ pub async fn run_tunnel(cfg: TunnelConfig) {
         eprintln!("mymux-connect: forward up ({program})");
         let started = Instant::now();
 
-        let mut child = match Command::new(&program).args(&args).kill_on_drop(true).spawn() {
+        let mut child = match Command::new(&program)
+            .args(&args)
+            .kill_on_drop(true)
+            .spawn()
+        {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("mymux-connect: could not spawn forward: {e}");
@@ -271,7 +275,10 @@ mod tests {
         let (_, args) = cfg.forward_program_args();
         assert!(args.iter().any(|a| a == "ControlMaster=auto"));
         assert!(args.contains(&TunnelConfig::control_path_opt()));
-        assert_eq!(TunnelConfig::control_path_opt(), format!("ControlPath={CONTROL_PATH}"));
+        assert_eq!(
+            TunnelConfig::control_path_opt(),
+            format!("ControlPath={CONTROL_PATH}")
+        );
     }
 
     #[test]

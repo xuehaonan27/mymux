@@ -6,8 +6,10 @@
 //! `tmux -L mymux attach` provides for the tmux engine.
 //!
 //! Usage:
-//!   mymux-attach            list panes (attaches directly if there is exactly one)
-//!   mymux-attach <id>       attach to a pane
+//!   mymux-attach            attach when exactly one pane exists, else list
+//!   mymux-attach ls         list panes
+//!   mymux-attach <target>   attach — target is a pane's short id, full id, or
+//!                           a unique NAME PREFIX (like `tmux a -t`)
 
 use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -63,7 +65,9 @@ fn local_size() -> Option<(u16, u16)> {
 async fn main() {
     let arg = std::env::args().nth(1);
     if matches!(arg.as_deref(), Some("-h") | Some("--help")) {
-        eprintln!("usage: mymux-attach [pane-id]   (Ctrl-\\ detaches)");
+        eprintln!(
+            "usage: mymux-attach [ls | <short-id> | <full-id> | <name-prefix>]   (Ctrl-\\ detaches)"
+        );
         return;
     }
 
@@ -71,28 +75,94 @@ async fn main() {
     let (client, mut events) = match Client::connect(&path).await {
         Ok(x) => x,
         Err(e) => {
-            eprintln!("mymux-attach: cannot reach mymux-ptyd at {}: {e}", path.display());
+            eprintln!(
+                "mymux-attach: cannot reach mymux-ptyd at {}: {e}",
+                path.display()
+            );
             std::process::exit(1);
         }
     };
 
     let panes = client.list().await.unwrap_or_default();
+    let short = |id: u32| id & 0x3fff_ffff;
+    let print_panes = |panes: &[mymux_ptyd::proto::PaneInfo]| {
+        eprintln!("persistent panes (attach with: mymux-attach <short-id | name-prefix>):");
+        for p in panes {
+            let name = if p.name.is_empty() {
+                "-"
+            } else {
+                p.name.as_str()
+            };
+            eprintln!(
+                "  {:<4} {:<20} pid {:<8} {}x{}  (id {})",
+                short(p.id),
+                name,
+                p.pid,
+                p.cols,
+                p.rows,
+                p.id
+            );
+        }
+    };
+
     let interactive = unsafe { libc::isatty(0) == 1 };
-    let id: u32 = match arg.and_then(|a| a.parse().ok()) {
-        Some(id) => id,
-        // Convenience for humans only: piped stdin always lists (predictable
-        // for scripts — never silently attaches).
-        None if panes.len() == 1 && interactive => panes[0].id,
-        None => {
+    let id: u32 = match arg.as_deref() {
+        Some("ls") | Some("list") => {
             if panes.is_empty() {
                 eprintln!("mymux-attach: no persistent panes.");
             } else {
-                eprintln!("persistent panes (attach with: mymux-attach <id>):");
-                for p in &panes {
-                    eprintln!("  {}  pid {}  {}x{}  {}", p.id, p.pid, p.cols, p.rows, p.name);
-                }
+                print_panes(&panes);
             }
             return;
+        }
+        None => {
+            // Bare invocation: attach when unambiguous AND a human is driving;
+            // piped stdin always lists (script-safe).
+            if panes.len() == 1 && interactive {
+                panes[0].id
+            } else {
+                if panes.is_empty() {
+                    eprintln!("mymux-attach: no persistent panes.");
+                } else {
+                    print_panes(&panes);
+                }
+                return;
+            }
+        }
+        Some(target) => {
+            // Numeric: full id, else short id. Otherwise: unique name prefix.
+            let by_num = target.parse::<u32>().ok().and_then(|n| {
+                panes
+                    .iter()
+                    .find(|p| p.id == n)
+                    .or_else(|| panes.iter().find(|p| short(p.id) == n))
+            });
+            match by_num {
+                Some(p) => p.id,
+                None => {
+                    let matches: Vec<_> = panes
+                        .iter()
+                        .filter(|p| !p.name.is_empty() && p.name.starts_with(target))
+                        .collect();
+                    match matches.as_slice() {
+                        [one] => one.id,
+                        [] => {
+                            eprintln!("mymux-attach: no pane matches '{target}'.");
+                            if !panes.is_empty() {
+                                print_panes(&panes);
+                            }
+                            std::process::exit(1);
+                        }
+                        many => {
+                            eprintln!("mymux-attach: '{target}' is ambiguous:");
+                            for p in many {
+                                eprintln!("  {:<4} {}", short(p.id), p.name);
+                            }
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
         }
     };
     if !panes.iter().any(|p| p.id == id) {

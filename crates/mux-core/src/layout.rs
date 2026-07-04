@@ -80,7 +80,10 @@ impl Cur<'_> {
         if self.i == start {
             return None;
         }
-        std::str::from_utf8(&self.b[start..self.i]).ok()?.parse().ok()
+        std::str::from_utf8(&self.b[start..self.i])
+            .ok()?
+            .parse()
+            .ok()
     }
 }
 
@@ -172,9 +175,8 @@ mod tests {
     #[test]
     fn nested_split() {
         // left column is a single pane; right column is split top/bottom.
-        let l =
-            parse_layout("aaaa,100x30,0,0{50x30,0,0,0,49x30,51,0[49x15,51,0,1,49x14,51,16,2]}")
-                .unwrap();
+        let l = parse_layout("aaaa,100x30,0,0{50x30,0,0,0,49x30,51,0[49x15,51,0,1,49x14,51,16,2]}")
+            .unwrap();
         let mut panes = Vec::new();
         l.root.for_each_pane(&mut |id, _| panes.push(id));
         assert_eq!(panes, vec![PaneId(0), PaneId(1), PaneId(2)]);

@@ -4,7 +4,10 @@
 
 use mux_core::{CellKind, ControlEvent, Model, PaneId, Parser, WindowId};
 
-const FIXTURE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/basic.ctrl"));
+const FIXTURE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../fixtures/basic.ctrl"
+));
 
 fn parse_all() -> Vec<ControlEvent> {
     let mut parser = Parser::new();
@@ -55,9 +58,12 @@ fn sees_layout_window_and_exit() {
     }
 
     // A second window was opened.
-    assert!(events
-        .iter()
-        .any(|ev| matches!(ev, ControlEvent::WindowAdd { window: WindowId(1) })));
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        ControlEvent::WindowAdd {
+            window: WindowId(1)
+        }
+    )));
 
     // list-windows reply names both windows.
     let reply = events.iter().find_map(|ev| match ev {
@@ -66,7 +72,10 @@ fn sees_layout_window_and_exit() {
         }
         _ => None,
     });
-    assert!(reply.is_some(), "expected list-windows reply mentioning 'logs'");
+    assert!(
+        reply.is_some(),
+        "expected list-windows reply mentioning 'logs'"
+    );
 
     // Stream ends with the control client exiting.
     assert!(matches!(events.last(), Some(ControlEvent::Exit { .. })));

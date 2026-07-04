@@ -93,7 +93,12 @@ pub struct LspInfo {
 }
 
 fn unavailable(reason: String, fs_root: Option<String>) -> Json<LspInfo> {
-    Json(LspInfo { available: false, reason: Some(reason), root: None, fs_root })
+    Json(LspInfo {
+        available: false,
+        reason: Some(reason),
+        root: None,
+        fs_root,
+    })
 }
 
 /// `GET /lsp/info?pane=&lang=` — can we serve LSP for this pane, and where from?
@@ -135,9 +140,13 @@ pub async fn ws_handler(ws: WebSocketUpgrade, Query(q): Query<LspQuery>) -> Resp
 }
 
 async fn handle(socket: WebSocket, q: LspQuery) {
-    let Some((cmd, args)) = server_cmd(&q.lang) else { return };
+    let Some((cmd, args)) = server_cmd(&q.lang) else {
+        return;
+    };
     let Some(bin) = find_server(cmd) else { return };
-    let Some(root) = lsp_root(q.pane, &q.lang).await else { return };
+    let Some(root) = lsp_root(q.pane, &q.lang).await else {
+        return;
+    };
 
     let spawn = Command::new(&bin)
         .args(args)

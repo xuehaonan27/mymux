@@ -55,3 +55,4 @@ systemctl --user --no-pager --lines=0 status mymuxd.service 2>/dev/null | head -
 echo
 echo "  logs:     journalctl --user -u mymuxd -f"
 echo "  restart:  systemctl --user restart mymuxd   # keeps your tmux sessions"
+echo "  restart:  systemctl --user restart mymux-ptyd # NOTE: remote your sessions"

@@ -65,7 +65,10 @@ pub struct AgentQuery {
     state: String,
 }
 
-pub async fn agent_handler(State(hub): State<Arc<Hub>>, Query(q): Query<AgentQuery>) -> &'static str {
+pub async fn agent_handler(
+    State(hub): State<Arc<Hub>>,
+    Query(q): Query<AgentQuery>,
+) -> &'static str {
     hub.set_agent(q.pane, AgentState::parse(&q.state));
     "ok"
 }

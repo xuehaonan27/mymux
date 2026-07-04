@@ -61,7 +61,15 @@ fn cell_to_msg(c: &LayoutCell) -> LayoutMsg {
         CellKind::Cols(v) => ("cols", None, v.iter().map(cell_to_msg).collect()),
         CellKind::Rows(v) => ("rows", None, v.iter().map(cell_to_msg).collect()),
     };
-    LayoutMsg { kind, pane, x: c.x, y: c.y, w: c.w, h: c.h, children }
+    LayoutMsg {
+        kind,
+        pane,
+        x: c.x,
+        y: c.y,
+        w: c.w,
+        h: c.h,
+        children,
+    }
 }
 
 /// Aggregate the most attention-worthy agent state among a window's panes, and
@@ -81,27 +89,47 @@ fn window_agent(
     best.map(|(s, p)| (s.as_str(), p))
 }
 
+/// A native (non-tmux) tab for the state snapshot: ephemeral tabs are always
+/// single-pane; persistent windows may hold several panes under a layout tree.
+pub struct NativeTab {
+    pub id: u32,
+    pub name: String,
+    pub panes: Vec<u32>,
+}
+
+/// The active native view: which window, its focused pane, and the real
+/// layout tree (single full-view leaf for ephemeral tabs).
+pub struct ActiveNative {
+    pub window: u32,
+    pub pane: u32,
+    pub layout: LayoutCell,
+}
+
+/// Aggregate the most attention-worthy agent state among a set of panes, and
+/// which pane holds it — attention jumps focus that pane directly.
+fn panes_agent(panes: &[u32], agents: &BTreeMap<u32, AgentState>) -> Option<(&'static str, u32)> {
+    let mut best: Option<(AgentState, u32)> = None;
+    for &pane in panes {
+        if let Some(&s) = agents.get(&pane) {
+            if best.map_or(true, |(b, _)| s.priority() > b.priority()) {
+                best = Some((s, pane));
+            }
+        }
+    }
+    best.map(|(s, p)| (s.as_str(), p))
+}
+
 /// Build the `{"t":"state",...}` snapshot: tmux windows plus any native tabs
-/// (ephemeral or persistent, told apart by their id's high bits). When a native
-/// tab is the active view, the layout is a single full-view leaf sized from
-/// `size` (tmux does not lay out native panes).
+/// (ephemeral or persistent, told apart by their id's high bits). When a
+/// native view is active, `active_native` carries its real layout tree.
 pub fn build_state_json(
     model: &Model,
     agents: &BTreeMap<u32, AgentState>,
-    natives: &[(u32, String)],
-    active_native: Option<u32>,
-    size: (u16, u16),
+    natives: &[NativeTab],
+    active_native: Option<&ActiveNative>,
 ) -> String {
-    let layout = if let Some(id) = active_native {
-        Some(LayoutMsg {
-            kind: "leaf",
-            pane: Some(id),
-            x: 0,
-            y: 0,
-            w: size.0,
-            h: size.1,
-            children: Vec::new(),
-        })
+    let layout = if let Some(a) = active_native {
+        Some(cell_to_msg(&a.layout))
     } else {
         model
             .active_window
@@ -110,11 +138,15 @@ pub fn build_state_json(
             .map(|l| cell_to_msg(&l.root))
     };
 
+    let active_win = active_native.map(|a| a.window);
     let mut windows: Vec<WinMsg> = model
         .windows
         .iter()
         .map(|(id, wi)| {
-            let wa = wi.layout.as_ref().and_then(|l| window_agent(&l.root, agents));
+            let wa = wi
+                .layout
+                .as_ref()
+                .and_then(|l| window_agent(&l.root, agents));
             WinMsg {
                 id: id.0,
                 name: wi.name.clone().unwrap_or_default(),
@@ -126,21 +158,22 @@ pub fn build_state_json(
             }
         })
         .collect();
-    // Native tabs follow the tmux windows (their pane id == the window id).
-    for (id, name) in natives {
+    // Native tabs follow the tmux windows.
+    for tab in natives {
+        let wa = panes_agent(&tab.panes, agents);
         windows.push(WinMsg {
-            id: *id,
-            name: name.clone(),
-            active: active_native == Some(*id),
-            agent: agents.get(id).map(|s| s.as_str()),
-            agent_pane: agents.get(id).map(|_| *id),
-            ephemeral: crate::pty::is_ephemeral(*id),
-            persistent: crate::persist::is_persistent(*id),
+            id: tab.id,
+            name: tab.name.clone(),
+            active: active_win == Some(tab.id),
+            agent: wa.map(|(s, _)| s),
+            agent_pane: wa.map(|(_, p)| p),
+            ephemeral: crate::pty::is_ephemeral(tab.id),
+            persistent: crate::persist::is_persistent(tab.id),
         });
     }
 
     let (active_window, active_pane) = match active_native {
-        Some(id) => (Some(id), Some(id)),
+        Some(a) => (Some(a.window), Some(a.pane)),
         None => (
             model.active_window.map(|w| w.0),
             model.active_pane.map(|p| p.0),
@@ -192,8 +225,54 @@ mod tests {
         agents.insert(1u32, AgentState::Running);
         agents.insert(2u32, AgentState::Waiting); // higher priority than running
 
-        let json = build_state_json(&m, &agents, &[], None, (81, 24));
+        let json = build_state_json(&m, &agents, &[], None);
         assert!(json.contains(r#""agent":"waiting""#), "{json}");
         assert!(json.contains(r#""agent_pane":2"#), "{json}");
+    }
+
+    #[test]
+    fn native_tab_aggregates_agents_over_member_panes() {
+        let m = Model::new();
+        let mut agents = BTreeMap::new();
+        let p1 = (1u32 << 30) | 1;
+        let p2 = (1u32 << 30) | 2;
+        agents.insert(p2, AgentState::Waiting);
+        let tab = NativeTab {
+            id: p1,
+            name: String::new(),
+            panes: vec![p1, p2],
+        };
+        let active = ActiveNative {
+            window: p1,
+            pane: p2,
+            layout: LayoutCell {
+                x: 0,
+                y: 0,
+                w: 80,
+                h: 24,
+                kind: CellKind::Cols(vec![
+                    LayoutCell {
+                        x: 0,
+                        y: 0,
+                        w: 40,
+                        h: 24,
+                        kind: CellKind::Leaf(PaneId(p1)),
+                    },
+                    LayoutCell {
+                        x: 40,
+                        y: 0,
+                        w: 40,
+                        h: 24,
+                        kind: CellKind::Leaf(PaneId(p2)),
+                    },
+                ]),
+            },
+        };
+        let json = build_state_json(&m, &agents, &[tab], Some(&active));
+        assert!(json.contains(r#""agent":"waiting""#), "{json}");
+        assert!(json.contains(&format!(r#""agent_pane":{p2}"#)), "{json}");
+        assert!(json.contains(&format!(r#""active_pane":{p2}"#)), "{json}");
+        assert!(json.contains(r#""kind":"cols""#), "{json}");
+        assert!(json.contains(r#""persistent":true"#), "{json}");
     }
 }

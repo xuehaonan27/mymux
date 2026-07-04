@@ -123,7 +123,11 @@ impl Parser {
         match verb {
             "%begin" => {
                 // %begin <ts> <num> <flags>
-                let num = rest.split(' ').nth(1).and_then(|n| n.parse().ok()).unwrap_or(0);
+                let num = rest
+                    .split(' ')
+                    .nth(1)
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0);
                 self.block = Some(Block {
                     num,
                     lines: Vec::new(),
@@ -271,17 +275,26 @@ mod tests {
         // First two bytes of '╭' (U+256D), split mid-character by tmux's chunking.
         assert_eq!(
             p.push_line(b"%output %0 \xe2\x95"),
-            Some(ControlEvent::Output { pane: PaneId(0), data: vec![0xe2, 0x95] })
+            Some(ControlEvent::Output {
+                pane: PaneId(0),
+                data: vec![0xe2, 0x95]
+            })
         );
         // A full multi-byte char round-trips byte-exact.
         assert_eq!(
             p.push_line(b"%output %0 \xe2\x95\xad"),
-            Some(ControlEvent::Output { pane: PaneId(0), data: vec![0xe2, 0x95, 0xad] })
+            Some(ControlEvent::Output {
+                pane: PaneId(0),
+                data: vec![0xe2, 0x95, 0xad]
+            })
         );
         // Raw high bytes mixed with an octal control escape (\015 = CR).
         assert_eq!(
             p.push_line(b"%output %0 \xe2\x95\xad\\015"),
-            Some(ControlEvent::Output { pane: PaneId(0), data: vec![0xe2, 0x95, 0xad, 0x0d] })
+            Some(ControlEvent::Output {
+                pane: PaneId(0),
+                data: vec![0xe2, 0x95, 0xad, 0x0d]
+            })
         );
     }
 
@@ -324,7 +337,9 @@ mod tests {
         );
         assert_eq!(
             p.push_line(b"%window-add @1"),
-            Some(ControlEvent::WindowAdd { window: WindowId(1) })
+            Some(ControlEvent::WindowAdd {
+                window: WindowId(1)
+            })
         );
         assert_eq!(
             p.push_line(b"%exit"),

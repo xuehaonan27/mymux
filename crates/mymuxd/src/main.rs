@@ -8,6 +8,7 @@ mod agent;
 mod fs;
 mod git;
 mod lsp;
+mod native;
 mod persist;
 mod proc;
 mod pty;

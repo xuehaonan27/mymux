@@ -45,7 +45,8 @@ impl PaneGrid {
                     let valid = e.valid_up_to();
                     if valid > 0 {
                         // Safe: validated up to `valid`.
-                        self.vt.feed_str(std::str::from_utf8(&rest[..valid]).unwrap());
+                        self.vt
+                            .feed_str(std::str::from_utf8(&rest[..valid]).unwrap());
                     }
                     match e.error_len() {
                         Some(bad) => {
@@ -275,7 +276,10 @@ mod tests {
         let red_at = snap.find("REDMARK").unwrap();
         let sgr_before = snap[..red_at].rfind("\x1b[").map(|i| &snap[i..red_at]);
         // avt normalizes SGR 31 to indexed color 1 (38;5;1) — same red.
-        assert!(sgr_before.is_some_and(|s| s.contains("38;5;1")), "{sgr_before:?}");
+        assert!(
+            sgr_before.is_some_and(|s| s.contains("38;5;1")),
+            "{sgr_before:?}"
+        );
         // And the replayed terminal ends with the same visible screen.
         let vt2 = replay(&g, 40, 5);
         let view = |vt: &Vt| vt.view().map(|l| l.text()).collect::<Vec<_>>();

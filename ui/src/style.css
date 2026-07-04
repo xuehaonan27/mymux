@@ -95,6 +95,16 @@ body {
   background: #a371f7;
   border-color: #a371f7;
 }
+.tab-rename {
+  width: 110px;
+  padding: 0 2px;
+  background: #0d1017;
+  border: 1px solid #2f81f7;
+  border-radius: 3px;
+  color: #e6edf3;
+  font: inherit;
+  outline: none;
+}
 .barbtn {
   font: 11px ui-monospace, Menlo, monospace;
   color: #9aa5b1;

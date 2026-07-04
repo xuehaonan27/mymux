@@ -29,7 +29,7 @@ struct Pane {
     master: Mutex<Box<dyn MasterPty + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     pid: u32,
-    name: String,
+    name: Mutex<String>,
     size: Mutex<(u16, u16)>,
     grid: Arc<Mutex<PaneGrid>>,
 }
@@ -45,6 +45,9 @@ impl Drop for Pane {
 struct Store {
     panes: Mutex<BTreeMap<u32, Arc<Pane>>>,
     events: broadcast::Sender<Ev>,
+    /// Opaque client metadata (mymuxd's layout blob) — memory-only, so it dies
+    /// together with the panes it describes.
+    meta: Mutex<String>,
 }
 
 #[tokio::main]
@@ -73,7 +76,11 @@ async fn main() {
     eprintln!("mymux-ptyd: listening on {}", path.display());
 
     let (events, _) = broadcast::channel(4096);
-    let store = Arc::new(Store { panes: Mutex::new(BTreeMap::new()), events });
+    let store = Arc::new(Store {
+        panes: Mutex::new(BTreeMap::new()),
+        events,
+        meta: Mutex::new(String::new()),
+    });
 
     loop {
         match listener.accept().await {
@@ -109,7 +116,12 @@ async fn handle_conn(stream: UnixStream, store: Arc<Store>) {
         match frame {
             (KIND_INPUT, body) if body.len() >= 4 => {
                 let id = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
-                let writer = store.panes.lock().unwrap().get(&id).map(|p| p.writer.clone());
+                let writer = store
+                    .panes
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .map(|p| p.writer.clone());
                 if let Some(w) = writer {
                     let mut w = w.lock().unwrap();
                     let _ = w.write_all(&body[4..]);
@@ -117,7 +129,9 @@ async fn handle_conn(stream: UnixStream, store: Arc<Store>) {
                 }
             }
             (KIND_JSON, body) => {
-                let Ok(req) = serde_json::from_slice::<Req>(&body) else { continue };
+                let Ok(req) = serde_json::from_slice::<Req>(&body) else {
+                    continue;
+                };
                 handle_req(req, &store, &out);
             }
             _ => {}
@@ -146,7 +160,10 @@ fn handle_req(req: Req, store: &Arc<Store>, out: &mpsc::UnboundedSender<(u8, Vec
                             }
                         }
                         Ok(Ev::Exit { id }) => {
-                            let ev = Event { ev: "exit".into(), id };
+                            let ev = Event {
+                                ev: "exit".into(),
+                                id,
+                            };
                             if out
                                 .send((KIND_JSON, serde_json::to_vec(&ev).unwrap_or_default()))
                                 .is_err()
@@ -160,22 +177,46 @@ fn handle_req(req: Req, store: &Arc<Store>, out: &mpsc::UnboundedSender<(u8, Vec
                 }
             });
         }
-        Req::Spawn { req, id, cwd, cols, rows, name, env } => {
+        Req::Spawn {
+            req,
+            id,
+            cwd,
+            cols,
+            rows,
+            name,
+            env,
+        } => {
             let rep = match spawn_pane(store, id, cwd, cols, rows, name, env) {
-                Ok(pid) => Reply { rep: req, ok: true, pid: Some(pid), ..Default::default() },
-                Err(e) => Reply { rep: req, ok: false, err: Some(e), ..Default::default() },
+                Ok(pid) => Reply {
+                    rep: req,
+                    ok: true,
+                    pid: Some(pid),
+                    ..Default::default()
+                },
+                Err(e) => Reply {
+                    rep: req,
+                    ok: false,
+                    err: Some(e),
+                    ..Default::default()
+                },
             };
             reply(out, rep);
         }
         Req::Resize { id, cols, rows } => {
             if let Some(p) = store.panes.lock().unwrap().get(&id) {
-                let _ = p
-                    .master
-                    .lock()
-                    .unwrap()
-                    .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+                let _ = p.master.lock().unwrap().resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                });
                 p.grid.lock().unwrap().resize(cols, rows);
                 *p.size.lock().unwrap() = (cols, rows);
+            }
+        }
+        Req::Rename { id, name } => {
+            if let Some(p) = store.panes.lock().unwrap().get(&id) {
+                *p.name.lock().unwrap() = name;
             }
         }
         Req::Kill { id } => {
@@ -196,6 +237,21 @@ fn handle_req(req: Req, store: &Arc<Store>, out: &mpsc::UnboundedSender<(u8, Vec
             body.extend_from_slice(&snap);
             let _ = out.send((KIND_SNAPSHOT, body));
         }
+        Req::SetMeta { data } => {
+            *store.meta.lock().unwrap() = data;
+        }
+        Req::GetMeta { req } => {
+            let meta = store.meta.lock().unwrap().clone();
+            reply(
+                out,
+                Reply {
+                    rep: req,
+                    ok: true,
+                    meta: Some(meta),
+                    ..Default::default()
+                },
+            );
+        }
         Req::List { req } => {
             let panes: Vec<PaneInfo> = store
                 .panes
@@ -204,10 +260,24 @@ fn handle_req(req: Req, store: &Arc<Store>, out: &mpsc::UnboundedSender<(u8, Vec
                 .iter()
                 .map(|(&id, p)| {
                     let (cols, rows) = *p.size.lock().unwrap();
-                    PaneInfo { id, pid: p.pid, name: p.name.clone(), cols, rows }
+                    PaneInfo {
+                        id,
+                        pid: p.pid,
+                        name: p.name.lock().unwrap().clone(),
+                        cols,
+                        rows,
+                    }
                 })
                 .collect();
-            reply(out, Reply { rep: req, ok: true, panes: Some(panes), ..Default::default() });
+            reply(
+                out,
+                Reply {
+                    rep: req,
+                    ok: true,
+                    panes: Some(panes),
+                    ..Default::default()
+                },
+            );
         }
     }
 }
@@ -225,7 +295,12 @@ fn spawn_pane(
         return Err(format!("pane id {id} already in use"));
     }
     let pair = native_pty_system()
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .map_err(|e| e.to_string())?;
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
@@ -255,7 +330,7 @@ fn spawn_pane(
         master: Mutex::new(master),
         child: Mutex::new(child),
         pid,
-        name,
+        name: Mutex::new(name),
         size: Mutex::new((cols, rows)),
         grid: grid.clone(),
     });
@@ -272,7 +347,10 @@ fn spawn_pane(
                 Ok(n) => {
                     let chunk = &buf[..n];
                     grid.lock().unwrap().feed(chunk);
-                    let _ = store2.events.send(Ev::Output { id, data: chunk.to_vec() });
+                    let _ = store2.events.send(Ev::Output {
+                        id,
+                        data: chunk.to_vec(),
+                    });
                 }
             }
         }

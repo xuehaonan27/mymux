@@ -11,6 +11,7 @@ use mymux_ptyd::client::{Client, PtydEvent};
 use mymux_ptyd::proto::socket_path;
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
+use crate::native::NativeWindows;
 use crate::pty::EPH_BIT;
 use crate::tmux::{Hub, ServerEvent};
 
@@ -32,7 +33,12 @@ pub struct Persist {
 
 impl Persist {
     pub fn list(&self) -> Vec<(u32, String)> {
-        self.mirror.lock().unwrap().iter().map(|(&id, (n, _))| (id, n.clone())).collect()
+        self.mirror
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(&id, (n, _))| (id, n.clone()))
+            .collect()
     }
 
     /// `(id, shell pid, name)` for the process tree + scoped-kill allow-set.
@@ -47,6 +53,11 @@ impl Persist {
 
     pub fn contains(&self, id: u32) -> bool {
         self.mirror.lock().unwrap().contains_key(&id)
+    }
+
+    /// Shell pid of a pane (to read its cwd for splits).
+    pub fn pid_of(&self, id: u32) -> Option<u32> {
+        self.mirror.lock().unwrap().get(&id).map(|(_, pid)| *pid)
     }
 
     pub fn remove_mirror(&self, id: u32) -> bool {
@@ -98,9 +109,21 @@ impl Persist {
                     }
                     {
                         let mut n = self.next.lock().unwrap();
-                        let max_low =
-                            panes.iter().map(|p| p.id & !PERSIST_BIT).max().unwrap_or(0);
+                        let max_low = panes.iter().map(|p| p.id & !PERSIST_BIT).max().unwrap_or(0);
                         *n = (*n).max(max_low + 1).max(1);
+                    }
+                    // Adopt the layout blob and reconcile it against the panes
+                    // that actually survived, then persist the cleaned view.
+                    let blob = client.get_meta().await.unwrap_or_default();
+                    {
+                        let mut nw = hub.natives.lock().unwrap();
+                        *nw = NativeWindows::from_blob(&blob);
+                        let alive: Vec<(u32, String, u16, u16)> = panes
+                            .iter()
+                            .map(|p| (p.id, p.name.clone(), p.cols, p.rows))
+                            .collect();
+                        nw.reconcile(&alive);
+                        client.set_meta(nw.to_blob());
                     }
                     *self.client.write().unwrap() = Some(client.clone());
                     tokio::spawn(pump(hub.clone(), events));
@@ -134,11 +157,17 @@ impl Persist {
             id
         };
         let pid = client
-            .spawn(id, cwd, cols, rows, "shell".to_string(), vec![
-                ("MYMUX_PANE".to_string(), id.to_string()),
-            ])
+            .spawn(
+                id,
+                cwd,
+                cols,
+                rows,
+                String::new(),
+                vec![("MYMUX_PANE".to_string(), id.to_string())],
+            )
             .await?;
-        self.mirror.lock().unwrap().insert(id, ("shell".to_string(), pid));
+        // Empty name = unnamed; the UI/attach show the short numeric id then.
+        self.mirror.lock().unwrap().insert(id, (String::new(), pid));
         Ok(id)
     }
 
@@ -154,10 +183,27 @@ impl Persist {
         }
     }
 
+    pub fn rename(&self, id: u32, name: String) {
+        if let Some(entry) = self.mirror.lock().unwrap().get_mut(&id) {
+            entry.0 = name.clone();
+        }
+        if let Some(c) = self.current() {
+            c.rename(id, name);
+        }
+    }
+
     pub fn kill(&self, id: u32) {
         self.remove_mirror(id);
         if let Some(c) = self.current() {
             c.kill(id);
+        }
+    }
+
+    /// Store the native layout blob in ptyd (no-op while disconnected — an
+    /// empty ptyd has nothing the blob could describe anyway).
+    pub fn set_meta(&self, data: String) {
+        if let Some(c) = self.current() {
+            c.set_meta(data);
         }
     }
 

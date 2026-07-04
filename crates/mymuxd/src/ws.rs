@@ -31,6 +31,7 @@ enum ClientMsg {
     ClosePane { pane: u32 },
     NewEphemeral,
     NewPersistent,
+    RenameWindow { id: u32, name: String },
 }
 
 /// Prepend the pane id as a 4-byte LE header to a payload.
@@ -54,7 +55,9 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
     // Initial sync: current structure, then a screen reseed for each visible pane.
     let _ = sender.send(Message::Text(hub.state_json().into())).await;
     for (pane, seed) in hub.snapshot_visible().await {
-        let _ = sender.send(Message::Binary(frame(pane, &seed).into())).await;
+        let _ = sender
+            .send(Message::Binary(frame(pane, &seed).into()))
+            .await;
     }
 
     // Server events → client.
@@ -125,6 +128,9 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
                             ClientMsg::ClosePane { pane } => hub.close_pane(pane).await,
                             ClientMsg::NewEphemeral => hub.new_ephemeral().await,
                             ClientMsg::NewPersistent => hub.new_persistent().await,
+                            ClientMsg::RenameWindow { id, name } => {
+                                hub.rename_window(id, name).await
+                            }
                         }
                     }
                 }

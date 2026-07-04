@@ -272,3 +272,9 @@ bytes; `Ctrl-\` detaches, the pane keeps running. The equivalent of
 `tmux -L mymux attach` for the native engine, for the day the app is out of
 reach. Persistent panes also show up in the ⌘K t process tree (marked `∞`) with
 scoped kill.
+
+**Splits work too** (⌘D / ⌘⇧D), tmux-free: mymuxd is the layout engine —
+splits, collapse-on-close, and ⌘⌥-arrow navigation are computed natively, and
+the layout tree rides along in ptyd next to the panes it describes. Kill and
+restart mymuxd and the whole window comes back: grouping, geometry, focused
+pane, every pane's scrollback.

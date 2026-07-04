@@ -19,8 +19,12 @@ async fn main() {
         user: env("SSH_USER").unwrap_or_else(|| "root".into()),
         identity_path: PathBuf::from(env("KEY").expect("KEY")),
         known_hosts_path: PathBuf::from(env("KNOWN_HOSTS").expect("KNOWN_HOSTS")),
-        local_port: env("LOCAL_PORT").and_then(|v| v.parse().ok()).unwrap_or(9099),
-        remote_port: env("REMOTE_PORT").and_then(|v| v.parse().ok()).unwrap_or(9098),
+        local_port: env("LOCAL_PORT")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(9099),
+        remote_port: env("REMOTE_PORT")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(9098),
         remote_daemon_cmd: env("DAEMON_CMD").unwrap_or_else(|| "true".into()),
         trust_unknown_host_key: env("TRUST").as_deref() == Some("1"),
     };
