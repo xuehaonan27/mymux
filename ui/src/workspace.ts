@@ -24,6 +24,8 @@ export interface WinInfo {
   /** The pane holding the agent state — attention jumps focus it directly. */
   agent_pane?: number;
   ephemeral?: boolean;
+  /** ptyd-held native tab: survives mymuxd restarts. */
+  persistent?: boolean;
 }
 interface StateMsg {
   t: string;

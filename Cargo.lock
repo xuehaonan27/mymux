@@ -1212,13 +1212,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "mymuxd"
+name = "mymux-ptyd"
 version = "0.1.0"
 dependencies = [
  "avt",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "mymuxd"
+version = "0.1.0"
+dependencies = [
  "axum",
  "futures-util",
  "mux-core",
+ "mymux-ptyd",
  "portable-pty",
  "serde",
  "serde_json",

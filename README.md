@@ -254,3 +254,14 @@ colors, cursor, alternate screen (vim & co.) and recent scrollback — from a
 server-side terminal grid, the first building block of the future native
 engine. It still dies with the daemon (by design). Close it like any pane;
 persistent (agent) work stays on tmux windows.
+
+## Persistent shells (⌘K ⇧S)
+
+Press **⌘K ⇧S** (or the `+psh` button) for a native shell that **survives
+mymuxd restarts**: its PTY and terminal grid are held by **mymux-ptyd**, a tiny
+companion daemon that changes rarely (installed and started by
+`scripts/install-systemd.sh`; mymuxd can also bootstrap it on demand). Deploy or
+crash mymuxd all you like — on the next start it re-adopts these tabs, full
+screen state included. Tabs are marked `∞` (violet). The contract mirrors tmux's
+server: panes die only if **ptyd itself** stops, so the installer never restarts
+a live ptyd — do that yourself when idle.

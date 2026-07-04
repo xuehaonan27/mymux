@@ -17,12 +17,14 @@ if ! systemctl --user show-environment >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "mymux: building the release daemon…"
-( cd "$DIR" && cargo build --release -p mymuxd )
+echo "mymux: building the release daemons…"
+( cd "$DIR" && cargo build --release -p mymuxd -p mymux-ptyd )
 
 mkdir -p "$(dirname "$BIN_DST")" "$(dirname "$UNIT_DST")"
 install -m 0755 "$BIN_SRC" "$BIN_DST"
+install -m 0755 "$DIR/target/release/mymux-ptyd" "$HOME/.local/bin/mymux-ptyd"
 cp "$DIR/systemd/mymuxd.service" "$UNIT_DST"
+cp "$DIR/systemd/mymux-ptyd.service" "$HOME/.config/systemd/user/mymux-ptyd.service"
 
 # Survive SSH logout. enable-linger for your own user needs no root on most systems.
 if loginctl enable-linger "$USER" 2>/dev/null; then
@@ -33,6 +35,15 @@ fi
 
 systemctl --user daemon-reload
 systemctl --user enable mymuxd.service
+systemctl --user enable mymux-ptyd.service
+# ptyd holds persistent shells: START it if down, but never restart a live one
+# from here (that would kill the shells it exists to protect).
+if ! systemctl --user is-active --quiet mymux-ptyd.service; then
+  systemctl --user start mymux-ptyd.service
+else
+  echo "mymux: mymux-ptyd left running (a restart would kill persistent shells);"
+  echo "       run 'systemctl --user restart mymux-ptyd' yourself when idle."
+fi
 # restart (not start) so an update picks up the new binary — and proves the
 # tmux-preserving restart path.
 systemctl --user restart mymuxd.service

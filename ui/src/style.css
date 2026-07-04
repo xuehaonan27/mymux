@@ -85,6 +85,16 @@ body {
   background: #adbac7;
   border-color: #adbac7;
 }
+/* Persistent native tabs (ptyd-held): solid violet accent. */
+.tab.persist {
+  border-color: #8957e5;
+  color: #c0a7f5;
+}
+.tab.persist.active {
+  color: #0b0e14;
+  background: #a371f7;
+  border-color: #a371f7;
+}
 .barbtn {
   font: 11px ui-monospace, Menlo, monospace;
   color: #9aa5b1;

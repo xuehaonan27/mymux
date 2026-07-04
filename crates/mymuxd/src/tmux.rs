@@ -17,8 +17,14 @@ use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::agent::{AgentEntry, AgentState, Source};
+use crate::persist::{is_persistent, Persist};
 use crate::pty::{is_ephemeral, PtyManager};
 use crate::state::build_state_json;
+
+/// Any daemon-native (non-tmux) pane id: local ephemeral or ptyd persistent.
+fn is_native_id(id: u32) -> bool {
+    is_ephemeral(id) || is_persistent(id)
+}
 
 /// tmux control socket (`tmux -L <socket>`). Overridable via `MYMUX_SOCKET` so a
 /// test or second instance can run without colliding with the default `mymux`.
@@ -68,11 +74,12 @@ struct AgentTracker {
     heur: BTreeMap<u32, PaneHeur>,
 }
 
-/// Which view the shared UI is showing: a tmux window, or an ephemeral pty tab.
+/// Which view the shared UI is showing: a tmux window, or a native tab
+/// (ephemeral or persistent — the id's high bits say which backend).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ActiveView {
     Tmux,
-    Ephemeral(u32),
+    Native(u32),
 }
 
 /// Shared bridge between the WebSocket clients and a single tmux control client.
@@ -85,6 +92,8 @@ pub struct Hub {
     conf_path: PathBuf,
     /// Ephemeral (non-tmux) pty panes, keyed by high-bit id.
     ptys: Mutex<PtyManager>,
+    /// Persistent native panes, held by mymux-ptyd (they survive our restarts).
+    pub(crate) persist: Persist,
     /// Whether the UI is showing tmux or an ephemeral tab (one shared view).
     active_view: Mutex<ActiveView>,
     /// Last whole-window size (cols, rows) the UI reported — the sizer for
@@ -106,6 +115,7 @@ impl Hub {
             agents: Mutex::new(AgentTracker::default()),
             conf_path,
             ptys: Mutex::new(PtyManager::default()),
+            persist: Persist::default(),
             active_view: Mutex::new(ActiveView::Tmux),
             last_size: Mutex::new((80, 24)),
         })
@@ -115,7 +125,7 @@ impl Hub {
         self.events_tx.subscribe()
     }
 
-    fn emit(&self, ev: ServerEvent) {
+    pub(crate) fn emit(&self, ev: ServerEvent) {
         let _ = self.events_tx.send(ev);
     }
 
@@ -198,6 +208,10 @@ impl Hub {
             self.ptys.lock().unwrap().write(pane, bytes);
             return;
         }
+        if is_persistent(pane) {
+            self.persist.input(pane, bytes);
+            return;
+        }
         let mut cmd = format!("send-keys -t %{pane} -H");
         for b in bytes {
             cmd.push_str(&format!(" {b:02x}"));
@@ -206,7 +220,7 @@ impl Hub {
     }
 
     pub async fn focus(&self, pane: u32) {
-        if is_ephemeral(pane) {
+        if is_native_id(pane) {
             return;
         }
         self.send_cmd(format!("select-pane -t %{pane}")).await;
@@ -214,7 +228,7 @@ impl Hub {
 
     /// Move focus to the pane in a direction (`L`/`R`/`U`/`D`).
     pub async fn select_pane_dir(&self, dir: &str) {
-        if matches!(*self.active_view.lock().unwrap(), ActiveView::Ephemeral(_)) {
+        if matches!(*self.active_view.lock().unwrap(), ActiveView::Native(_)) {
             return;
         }
         let flag = match dir {
@@ -230,21 +244,40 @@ impl Hub {
     pub async fn resize(&self, cols: u16, rows: u16) {
         *self.last_size.lock().unwrap() = (cols, rows);
         let view = *self.active_view.lock().unwrap();
-        if let ActiveView::Ephemeral(id) = view {
-            self.ptys.lock().unwrap().resize(id, cols, rows);
+        if let ActiveView::Native(id) = view {
+            if is_ephemeral(id) {
+                self.ptys.lock().unwrap().resize(id, cols, rows);
+            } else {
+                self.persist.resize(id, cols, rows);
+            }
         }
         // Keep tmux sized too, so switching back to a tmux window needs no resync.
         self.send_cmd(format!("refresh-client -C {cols}x{rows}")).await;
     }
 
     pub async fn select_window(&self, id: u32) {
-        if is_ephemeral(id) {
-            if !self.ptys.lock().unwrap().contains(id) {
+        if is_native_id(id) {
+            let known = if is_ephemeral(id) {
+                self.ptys.lock().unwrap().contains(id)
+            } else {
+                self.persist.contains(id)
+            };
+            if !known {
                 return;
             }
-            *self.active_view.lock().unwrap() = ActiveView::Ephemeral(id);
+            *self.active_view.lock().unwrap() = ActiveView::Native(id);
             self.emit(ServerEvent::State(self.state_json()));
-            let seed = self.ptys.lock().unwrap().snapshot(id);
+            // The tab may have been resized while backgrounded; true up the
+            // backend before painting so the seed is laid out correctly.
+            let (cols, rows) = *self.last_size.lock().unwrap();
+            let seed = if is_ephemeral(id) {
+                let ptys = self.ptys.lock().unwrap();
+                ptys.resize(id, cols, rows);
+                ptys.snapshot(id)
+            } else {
+                self.persist.resize(id, cols, rows);
+                self.persist.snapshot(id).await
+            };
             if !seed.is_empty() {
                 self.emit(ServerEvent::Output { pane: id, data: seed });
             }
@@ -270,12 +303,16 @@ impl Hub {
     }
 
     pub async fn close_pane(&self, pane: u32) {
-        if is_ephemeral(pane) {
+        if is_native_id(pane) {
             let was_active = matches!(
                 *self.active_view.lock().unwrap(),
-                ActiveView::Ephemeral(x) if x == pane
+                ActiveView::Native(x) if x == pane
             );
-            self.ptys.lock().unwrap().close(pane);
+            if is_ephemeral(pane) {
+                self.ptys.lock().unwrap().close(pane);
+            } else {
+                self.persist.kill(pane);
+            }
             if was_active {
                 *self.active_view.lock().unwrap() = ActiveView::Tmux;
             }
@@ -291,7 +328,7 @@ impl Hub {
     }
 
     pub async fn split(&self, pane: u32, horizontal: bool) {
-        if is_ephemeral(pane) {
+        if is_native_id(pane) {
             return;
         }
         let flag = if horizontal { "-h" } else { "-v" };
@@ -301,9 +338,10 @@ impl Hub {
 
     /// The current state snapshot as JSON (for initial sync / resync).
     pub fn state_json(&self) -> String {
-        let ephemerals = self.ptys.lock().unwrap().list();
-        let active_ephemeral = match *self.active_view.lock().unwrap() {
-            ActiveView::Ephemeral(id) => Some(id),
+        let mut natives = self.ptys.lock().unwrap().list();
+        natives.extend(self.persist.list());
+        let active_native = match *self.active_view.lock().unwrap() {
+            ActiveView::Native(id) => Some(id),
             ActiveView::Tmux => None,
         };
         let size = *self.last_size.lock().unwrap();
@@ -311,7 +349,7 @@ impl Hub {
         let agents = self.agents.lock().unwrap();
         let view: BTreeMap<u32, AgentState> =
             agents.entries.iter().map(|(&p, e)| (p, e.state)).collect();
-        build_state_json(&model, &view, &ephemerals, active_ephemeral, size)
+        build_state_json(&model, &view, &natives, active_native, size)
     }
 
     /// Update an agent's hook-reported state (`None` clears it), then broadcast.
@@ -510,10 +548,14 @@ impl Hub {
 
     /// Snapshot every pane in the active window: `(paneId, seedBytes)`.
     pub async fn snapshot_visible(&self) -> Vec<(u32, Vec<u8>)> {
-        // An ephemeral tab reseeds from its raw ring, not from tmux.
+        // A native tab reseeds from its server-side grid, not from tmux.
         let view = *self.active_view.lock().unwrap();
-        if let ActiveView::Ephemeral(id) = view {
-            let seed = self.ptys.lock().unwrap().snapshot(id);
+        if let ActiveView::Native(id) = view {
+            let seed = if is_ephemeral(id) {
+                self.ptys.lock().unwrap().snapshot(id)
+            } else {
+                self.persist.snapshot(id).await
+            };
             return if seed.is_empty() { Vec::new() } else { vec![(id, seed)] };
         }
         let panes: Vec<u32> = self
@@ -618,18 +660,38 @@ impl Hub {
             eprintln!("mymuxd: failed to spawn ephemeral shell");
             return;
         };
-        *self.active_view.lock().unwrap() = ActiveView::Ephemeral(id);
+        *self.active_view.lock().unwrap() = ActiveView::Native(id);
         self.emit(ServerEvent::State(self.state_json()));
     }
 
-    /// Called (from the pty reader thread) when an ephemeral shell exits: drop it
-    /// and, if it was the visible view, fall back to tmux and repaint.
-    pub async fn ephemeral_exited(self: Arc<Self>, id: u32) {
-        if !self.ptys.lock().unwrap().close(id) {
+    /// Spawn a new persistent native shell tab (held by mymux-ptyd, so it
+    /// survives mymuxd restarts) and switch to it.
+    pub async fn new_persistent(self: &Arc<Self>) {
+        let cwd = self.active_pane_cwd().await.map(|p| p.display().to_string());
+        let (cols, rows) = *self.last_size.lock().unwrap();
+        match self.persist.spawn_pane(self, cwd, cols, rows).await {
+            Ok(id) => {
+                *self.active_view.lock().unwrap() = ActiveView::Native(id);
+                self.emit(ServerEvent::State(self.state_json()));
+            }
+            Err(e) => eprintln!("mymuxd: failed to spawn persistent shell: {e}"),
+        }
+    }
+
+    /// Called when a native pane's process ended (ephemeral reader EOF, or a
+    /// ptyd exit event): drop it and, if it was the visible view, fall back to
+    /// tmux and repaint.
+    pub async fn native_exited(self: Arc<Self>, id: u32) {
+        let removed = if is_ephemeral(id) {
+            self.ptys.lock().unwrap().close(id)
+        } else {
+            self.persist.remove_mirror(id)
+        };
+        if !removed {
             return;
         }
         let was_active =
-            matches!(*self.active_view.lock().unwrap(), ActiveView::Ephemeral(x) if x == id);
+            matches!(*self.active_view.lock().unwrap(), ActiveView::Native(x) if x == id);
         if was_active {
             *self.active_view.lock().unwrap() = ActiveView::Tmux;
         }
@@ -637,6 +699,27 @@ impl Hub {
         if was_active {
             for (pane, seed) in self.snapshot_visible().await {
                 self.emit(ServerEvent::Output { pane, data: seed });
+            }
+        }
+    }
+
+    /// The ptyd connection died: every persistent pane died with it.
+    pub async fn persist_disconnected(self: &Arc<Self>) {
+        let had = self.persist.clear();
+        let was_native_persist = matches!(
+            *self.active_view.lock().unwrap(),
+            ActiveView::Native(id) if is_persistent(id)
+        );
+        if was_native_persist {
+            *self.active_view.lock().unwrap() = ActiveView::Tmux;
+        }
+        if had || was_native_persist {
+            eprintln!("mymuxd: mymux-ptyd connection lost — persistent panes are gone");
+            self.emit(ServerEvent::State(self.state_json()));
+            if was_native_persist {
+                for (pane, seed) in self.snapshot_visible().await {
+                    self.emit(ServerEvent::Output { pane, data: seed });
+                }
             }
         }
     }

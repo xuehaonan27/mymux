@@ -7,8 +7,8 @@
 mod agent;
 mod fs;
 mod git;
-mod grid;
 mod lsp;
+mod persist;
 mod proc;
 mod pty;
 mod state;
@@ -25,6 +25,11 @@ use tower_http::cors::{Any, CorsLayer};
 async fn main() {
     let hub = tmux::Hub::new();
     tokio::spawn(tmux::heuristic_sweep(hub.clone()));
+    // Adopt persistent panes that survived a previous mymuxd, if ptyd is up.
+    {
+        let hub = hub.clone();
+        tokio::spawn(async move { hub.persist.warmup(&hub).await });
+    }
 
     // The code panel fetches /fs and /git cross-origin. Restrict to the known UI
     // origins (not `*`) so a random website can't read your files via localhost.

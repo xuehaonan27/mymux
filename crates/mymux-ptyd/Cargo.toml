@@ -1,0 +1,13 @@
+[package]
+name = "mymux-ptyd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "mymux persistent-pane holder: a tiny, rarely-changing daemon that owns PTYs and terminal grids so mymuxd can restart freely"
+
+[dependencies]
+avt = "0.18.0"
+portable-pty = "0.9.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }

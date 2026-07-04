@@ -210,15 +210,18 @@ function renderTabs(w: Workspace | null) {
   if (!w) return;
   for (const win of w.windowList) {
     const tab = document.createElement('button');
-    tab.className = 'tab' + (win.active ? ' active' : '') + (win.ephemeral ? ' ephemeral' : '');
+    tab.className =
+      'tab' +
+      (win.active ? ' active' : '') +
+      (win.ephemeral ? ' ephemeral' : '') +
+      (win.persistent ? ' persist' : '');
     if (win.agent) {
       const dot = document.createElement('span');
       dot.className = `adot agent-${win.agent}`;
       tab.appendChild(dot);
     }
-    tab.appendChild(
-      document.createTextNode((win.ephemeral ? '⌁ ' : '') + (win.name || `@${win.id}`)),
-    );
+    const glyph = win.ephemeral ? '⌁ ' : win.persistent ? '∞ ' : '';
+    tab.appendChild(document.createTextNode(glyph + (win.name || `@${win.id}`)));
     tab.addEventListener('click', () => w.sendJson({ t: 'select_window', id: win.id }));
     tabsEl.appendChild(tab);
   }
@@ -303,6 +306,9 @@ document.getElementById('btn-splitv')?.addEventListener('click', () => active()?
 document.getElementById('btn-eph')?.addEventListener('click', () =>
   active()?.sendJson({ t: 'new_ephemeral' }),
 );
+document.getElementById('btn-psh')?.addEventListener('click', () =>
+  active()?.sendJson({ t: 'new_persistent' }),
+);
 
 // ---- overlays ------------------------------------------------------------------
 
@@ -372,7 +378,7 @@ function handleLeaderKey(e: KeyboardEvent) {
   if (lower === 'x') return w.closeActive();
   if (lower === 'a') return jumpToAttention();
   if (lower === 't') return toggleProc();
-  if (lower === 's') return w.sendJson({ t: 'new_ephemeral' });
+  if (lower === 's') return w.sendJson({ t: e.shiftKey ? 'new_persistent' : 'new_ephemeral' });
   if (lower === 'd') return w.splitActive(e.shiftKey ? 'v' : 'h');
   if (k === '|' || k === '\\') return w.splitActive('h');
   if (k === '-') return w.splitActive('v');

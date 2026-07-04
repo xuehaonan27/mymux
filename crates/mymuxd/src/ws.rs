@@ -30,6 +30,7 @@ enum ClientMsg {
     SelectWindow { id: u32 },
     ClosePane { pane: u32 },
     NewEphemeral,
+    NewPersistent,
 }
 
 /// Prepend the pane id as a 4-byte LE header to a payload.
@@ -123,6 +124,7 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
                             ClientMsg::SelectWindow { id } => hub.select_window(id).await,
                             ClientMsg::ClosePane { pane } => hub.close_pane(pane).await,
                             ClientMsg::NewEphemeral => hub.new_ephemeral().await,
+                            ClientMsg::NewPersistent => hub.new_persistent().await,
                         }
                     }
                 }

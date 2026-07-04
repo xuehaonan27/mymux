@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::broadcast;
 
-use crate::grid::PaneGrid;
 use crate::tmux::{Hub, ServerEvent};
+use mymux_ptyd::grid::PaneGrid;
 
 /// High bit marks an ephemeral id, so it can never collide with tmux's small
 /// monotonic `%N`/`@N` ids and routing is one test everywhere.
@@ -104,7 +104,7 @@ impl PtyManager {
                     }
                 }
             }
-            handle.spawn(hub.ephemeral_exited(id));
+            handle.spawn(hub.native_exited(id));
         });
 
         self.map.insert(

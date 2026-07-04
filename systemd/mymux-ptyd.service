@@ -1,0 +1,16 @@
+[Unit]
+Description=mymux ptyd — persistent-pane holder (PTYs + terminal grids)
+
+[Service]
+Type=simple
+# Socket lives in $XDG_RUNTIME_DIR/mymux/ptyd.sock.
+RuntimeDirectory=mymux
+ExecStart=%h/.local/bin/mymux-ptyd
+Restart=on-failure
+RestartSec=2
+
+# NOTE: restarting THIS service kills every persistent shell it holds (that is
+# the tmux-server-like contract). It changes rarely; restart it only when idle.
+
+[Install]
+WantedBy=default.target

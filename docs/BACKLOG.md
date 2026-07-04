@@ -45,12 +45,16 @@ replacing it is coherent. Strangler-fig path (each step ships alone, no big bang
 1. ~~**Server-side grid for ephemeral panes**~~ — **DONE 2026-07-03**
    (`crates/mymuxd/src/grid.rs`: avt-based `PaneGrid`; faithful reseed with
    colors/cursor/alt-screen + styled scrollback history; UTF-8 carry decoding).
-2. Persistent native panes: same engine + restart survival — design fork to
-   settle: a tiny `mymux-ptyd` holder process (our own client/server split)
-   vs systemd FD store (single process, fd + serialized grid across restarts).
+2. ~~Persistent native panes: same engine + restart survival~~ — **DONE
+   2026-07-04** via the `mymux-ptyd` fork of the design (chosen over systemd
+   FD store): `crates/mymux-ptyd` holds PTYs + grids behind a unix-socket
+   protocol; mymuxd bootstraps it, adopts survivors on startup, and routes
+   `PERSIST_BIT` ids to it. Verified: panes survive a SIGKILL'd mymuxd with
+   full grid state.
 3. Native splits/layout (the layout tree is already ours) + a `mymux attach`
    CLI escape hatch (today `tmux -L mymux attach` is the rescue path — keep an
-   equivalent).
+   equivalent). Also: migrate ephemeral panes onto ptyd (ephemeral/persistent
+   becomes a flag), and agent/proc-tree integration for persistent panes.
 4. New windows default to native; tmux engine kept for a transition, then removed.
 Honest counterweight: no acute pain forces this — drivers are strategic (own the
 stack; per-window sizes; multi-client semantics; kill the control-mode boundary
