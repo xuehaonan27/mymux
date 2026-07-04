@@ -371,15 +371,12 @@ new ResizeObserver(() => {
 // ---- toolbar -----------------------------------------------------------------
 
 document.getElementById('btn-newwin')?.addEventListener('click', () =>
-  active()?.sendJson({ t: 'new_window' }),
+  active()?.sendJson({ t: 'new_persistent' }),
 );
 document.getElementById('btn-splith')?.addEventListener('click', () => active()?.splitActive('h'));
 document.getElementById('btn-splitv')?.addEventListener('click', () => active()?.splitActive('v'));
 document.getElementById('btn-eph')?.addEventListener('click', () =>
   active()?.sendJson({ t: 'new_ephemeral' }),
-);
-document.getElementById('btn-psh')?.addEventListener('click', () =>
-  active()?.sendJson({ t: 'new_persistent' }),
 );
 
 // ---- overlays ------------------------------------------------------------------
@@ -446,7 +443,10 @@ function handleLeaderKey(e: KeyboardEvent) {
   const w = active();
   if (!w) return;
   const lower = k.toLowerCase();
-  if (lower === 'c') return w.sendJson({ t: 'new_window' });
+  // Native persistent windows are the default; tmux windows stay reachable
+  // behind ⌘K w for as long as the tmux engine is kept around.
+  if (lower === 'c') return w.sendJson({ t: 'new_persistent' });
+  if (lower === 'w') return w.sendJson({ t: 'new_window' });
   if (lower === 'x') return w.closeActive();
   if (lower === 'a') return jumpToAttention();
   if (lower === 't') return toggleProc();
@@ -549,7 +549,7 @@ document.addEventListener(
         if (id) switchTo(id);
       } else if (lower === 't' && !e.shiftKey && !e.altKey) {
         stop();
-        active()?.sendJson({ t: 'new_window' });
+        active()?.sendJson({ t: 'new_persistent' });
       } else if (lower === 'w' && !e.shiftKey && !e.altKey) {
         stop();
         active()?.closeActive();

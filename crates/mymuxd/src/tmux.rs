@@ -924,8 +924,21 @@ impl Hub {
         }
     }
 
-    /// The active tmux pane's cwd, to root a new ephemeral shell nearby.
+    /// The focused pane's cwd, to root a new shell tab nearby. Works for both
+    /// engines: a native view reads `/proc/<shell pid>/cwd`, a tmux view asks
+    /// tmux.
     async fn active_pane_cwd(&self) -> Option<PathBuf> {
+        let view = *self.active_view.lock().unwrap();
+        if let ActiveView::Native(id) = view {
+            let pane = self
+                .natives
+                .lock()
+                .unwrap()
+                .active_pane_of(id)
+                .unwrap_or(id);
+            let pid = self.persist.pid_of(pane)?;
+            return std::fs::read_link(format!("/proc/{pid}/cwd")).ok();
+        }
         let pane = self.model.lock().unwrap().active_pane?;
         let out = Command::new("tmux")
             .args([

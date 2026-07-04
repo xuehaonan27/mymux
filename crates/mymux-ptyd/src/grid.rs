@@ -8,8 +8,9 @@
 
 use avt::{Color, Line, Pen, Vt};
 
-/// Kept history beyond the visible screen; included in reseeds.
-const SCROLLBACK: usize = 1000;
+/// Kept history beyond the visible screen; included in reseeds. Matches
+/// tmux's default history-limit.
+const SCROLLBACK: usize = 2000;
 
 pub struct PaneGrid {
     vt: Vt,

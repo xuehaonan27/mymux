@@ -255,16 +255,18 @@ terminal grid. The one thing that separates it from `∞` is fate: ptyd kills it
 the moment its mymuxd goes away (by design — "ephemeral" is just a flag now).
 Close it like any pane.
 
-## Persistent shells (⌘K ⇧S)
+## Persistent shells — the default window (⌘T / +win)
 
-Press **⌘K ⇧S** (or the `+psh` button) for a native shell that **survives
-mymuxd restarts**: its PTY and terminal grid are held by **mymux-ptyd**, a tiny
+**New windows are persistent native shells now.** Press **⌘T** (the `+win`
+button, or ⌘K c / ⌘K ⇧S) for a native shell that **survives mymuxd
+restarts**: its PTY and terminal grid are held by **mymux-ptyd**, a tiny
 companion daemon that changes rarely (installed and started by
 `scripts/install-systemd.sh`; mymuxd can also bootstrap it on demand). Deploy or
 crash mymuxd all you like — on the next start it re-adopts these tabs, full
 screen state included. Tabs are marked `∞` (violet). The contract mirrors tmux's
 server: panes die only if **ptyd itself** stops, so the installer never restarts
-a live ptyd — do that yourself when idle.
+a live ptyd — do that yourself when idle. tmux windows remain available behind
+**⌘K w** — the tmux engine is kept, not retired; native is simply the default.
 
 **Escape hatch**: from any plain SSH shell, `mymux-attach` lists persistent
 panes and `mymux-attach <id>` attaches — faithful snapshot first, then live
