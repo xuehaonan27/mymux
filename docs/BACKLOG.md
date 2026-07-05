@@ -21,9 +21,14 @@ Copilot) are NEVER touched** — enforced by a unit test in mymux-pkg.
   (rust-analyzer, pyright incl. through a stripped-PATH daemon via the nvm
   fallback), managed resolution beats a stripped PATH, install endpoint
   round-trip, LSP e2e regression green.
-- P2: viewer registry (`kind: "viewer"`) — the binary-file placeholder's
-  promise: image preview, hex dump, markdown; built-ins first, registered
-  through the same contract.
+- ~~P2: viewer registry~~ — **DONE 2026-07-03** (image + hex built-ins): UI
+  `viewers.ts` registry whose interface mirrors the future `kind:"viewer"`
+  package shape; daemon `GET /fs/raw` (MIME by extension, `limit` for
+  prefixes, `X-File-Size`, 50 MiB cap, safe_path). Binary/too-large files now
+  render (images inline with dimensions + transparency checkerboard; anything
+  else hex-dumps its first 4 KiB); the placeholder only remains for real
+  errors (404 …). Markdown PREVIEW deliberately deferred: needs a sanitizer
+  chain to be XSS-safe in the Tauri webview, low value while md is editable.
 - P2.5 (optional): TextMate grammars/themes from Open VSX for CodeMirror
   highlighting of languages we don't bundle (vscode-textmate/shiki route).
 - P3 (only if ever needed): third-party loading (JS/WASM). Revisit after P2;

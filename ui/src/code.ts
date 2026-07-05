@@ -8,6 +8,7 @@ import { python } from '@codemirror/lang-python';
 import { json } from '@codemirror/lang-json';
 import { markdown } from '@codemirror/lang-markdown';
 import { lspExtensionFor, lspInstall, lspInstallable, notifySaved } from './lsp';
+import { makeCtx, viewerFor } from './viewers';
 
 // Resolved per call so the panel follows the active workspace's daemon.
 let apiBase = () => 'http://127.0.0.1:8088';
@@ -145,6 +146,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       <div class="code-lsphint" id="code-lsphint" style="display: none"></div>
       <div class="code-editor" id="code-editor"></div>
       <div class="code-diff" id="code-diff"></div>
+      <div class="code-viewer" id="code-viewer"></div>
       <div class="code-ph" id="code-ph"></div>
     </div>`;
   document.body.appendChild(panel);
@@ -156,6 +158,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   const lspHintEl = panel.querySelector('#code-lsphint') as HTMLElement;
   const editorParent = panel.querySelector('#code-editor') as HTMLElement;
   const diffEl = panel.querySelector('#code-diff') as HTMLElement;
+  const viewerEl = panel.querySelector('#code-viewer') as HTMLElement;
   const phEl = panel.querySelector('#code-ph') as HTMLElement;
   diffEl.style.display = 'none';
 
@@ -289,7 +292,25 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     else editor = new EditorView({ state, parent: editorParent });
     editorParent.style.display = '';
     diffEl.style.display = 'none';
+    viewerEl.style.display = 'none';
     phEl.style.display = '';
+  }
+
+  // A registered viewer takes over files the text editor can't show (binary,
+  // too large): images render, everything else gets a hex dump.
+  function showViewer(path: string) {
+    const s = current;
+    if (!s) return;
+    const v = viewerFor(path);
+    if (!v) return; // (hex claims everything, but stay defensive)
+    pathEl.textContent = `${path} — ${v.name}`;
+    pathEl.style.color = '';
+    viewerEl.replaceChildren();
+    void v.render(makeCtx(apiBase(), s.pane, path), viewerEl);
+    editorParent.style.display = 'none';
+    diffEl.style.display = 'none';
+    phEl.style.display = '';
+    viewerEl.style.display = 'flex';
   }
 
   // VSCode-style stand-in for files the editor can't show — replaces the editor
@@ -298,13 +319,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     pathEl.textContent = `${path} — can't display`;
     pathEl.style.color = '';
     const reason =
-      status === 415
-        ? 'It looks binary (not valid UTF-8 text).'
-        : status === 400
-          ? 'It’s too large for the editor (2 MiB limit) or not a regular file.'
-          : status === 404
-            ? 'It no longer exists.'
-            : 'It could not be read.';
+      status === 404 ? 'It no longer exists.' : 'It could not be read.';
     const line = (cls: string, text: string) => {
       const d = document.createElement('div');
       d.className = cls;
@@ -314,10 +329,10 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     phEl.replaceChildren(
       line('ph-title', 'This file is not displayed in the editor.'),
       line('ph-reason', reason),
-      line('ph-hint', 'A viewer plugin could open files like this — mymux doesn’t have a plugin system yet.'),
     );
     editorParent.style.display = 'none';
     diffEl.style.display = 'none';
+    viewerEl.style.display = 'none';
     phEl.style.display = 'flex';
   }
 
@@ -409,7 +424,10 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     } catch (e) {
       if (current !== s) return;
       s.buffers.delete(path); // a stale clean buffer of an unreadable file
-      showPlaceholder(path, (e as { status?: number }).status);
+      const status = (e as { status?: number }).status;
+      // Binary / too-large → a viewer (image, hex); real errors → placeholder.
+      if (status === 415 || status === 400) showViewer(path);
+      else showPlaceholder(path, status);
       renderBufs();
       return;
     }
@@ -462,6 +480,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     }
     editorParent.style.display = 'none';
     diffEl.style.display = '';
+    viewerEl.style.display = 'none';
     phEl.style.display = '';
   }
 

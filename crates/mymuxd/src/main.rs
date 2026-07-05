@@ -75,6 +75,7 @@ async fn main() {
         .route("/agent", get(agent::agent_handler))
         .route("/fs/list", get(fs::list))
         .route("/fs/read", get(fs::read))
+        .route("/fs/raw", get(fs::raw))
         .route("/fs/write", post(fs::write))
         .route("/git/status", get(git::status))
         .route("/git/diff", get(git::diff))

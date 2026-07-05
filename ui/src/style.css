@@ -823,6 +823,41 @@ body {
   cursor: default;
 }
 
+/* Viewer pane (images, hex — plugin-system P2 built-ins). */
+.code-viewer {
+  display: none;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  overflow: auto;
+  padding: 16px;
+  min-height: 0;
+}
+.viewer-img {
+  max-width: 100%;
+  max-height: calc(100% - 30px);
+  object-fit: contain;
+  /* checkerboard so transparency is visible */
+  background:
+    conic-gradient(#1c2128 25%, #11151d 0 50%, #1c2128 0 75%, #11151d 0) 0 0 / 20px 20px;
+  border: 1px solid #1e2430;
+  border-radius: 4px;
+}
+.viewer-meta {
+  color: #5c6773;
+  font: 11px ui-monospace, Menlo, monospace;
+}
+.viewer-hex {
+  align-self: stretch;
+  margin: 0;
+  overflow: auto;
+  font: 12px/1.5 ui-monospace, Menlo, monospace;
+  color: #adbac7;
+  white-space: pre;
+}
+
 /* Transient notice (attention queue "all clear", etc.). */
 .toast {
   position: fixed;

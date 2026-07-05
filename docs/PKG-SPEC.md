@@ -40,7 +40,11 @@ manifest as data, never as shell.
 - `kind` — what the package provides. Defined kinds:
   - `lsp-server`: `langs` (language ids) + `bin` (path relative to the package
     dir, the language-server executable, stdio transport).
-  - (future) `viewer`, `theme`, `grammar`, `agent-adapter` — added here first.
+  - `viewer` (reserved): the UI keeps a viewer registry (`ui/src/viewers.ts`)
+    whose interface mirrors what a viewer package would provide — built-ins
+    (image, hex) ship in the UI today; third-party loading is a later phase
+    and will finalize this kind's manifest shape.
+  - (future) `theme`, `grammar`, `agent-adapter` — added here first.
 - `source` — informational provenance (`github-release` | `openvsx` |
   `go-install` | `npm` | `manual`).
 

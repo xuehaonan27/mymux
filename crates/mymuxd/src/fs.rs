@@ -110,6 +110,65 @@ pub async fn read(Query(q): Query<PathQuery>) -> Result<String, StatusCode> {
 }
 
 #[derive(Deserialize)]
+pub struct RawQuery {
+    #[serde(default)]
+    path: String,
+    pane: Option<u32>,
+    /// Serve at most this many bytes (hex viewers only need a prefix).
+    limit: Option<u64>,
+}
+
+/// Cap for raw serves — generous enough for photos, still bounded.
+const MAX_RAW: u64 = 50 * 1024 * 1024;
+
+fn mime_for(path: &str) -> &'static str {
+    let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("ico") => "image/x-icon",
+        Some("bmp") => "image/bmp",
+        Some("avif") => "image/avif",
+        Some("pdf") => "application/pdf",
+        _ => "application/octet-stream",
+    }
+}
+
+/// `GET /fs/raw?pane=&path=&limit=` — raw bytes with a best-effort MIME type,
+/// for the code panel's viewers (images, hex). `X-File-Size` carries the full
+/// size so a truncated hex view can say "first 4 KiB of N".
+pub async fn raw(
+    Query(q): Query<RawQuery>,
+) -> Result<([(axum::http::HeaderName, String); 2], Vec<u8>), StatusCode> {
+    let root = root_for(q.pane).await;
+    let file = safe_path(&root, &q.path, true).ok_or(StatusCode::FORBIDDEN)?;
+    let md = std::fs::metadata(&file).map_err(|_| StatusCode::NOT_FOUND)?;
+    if md.is_dir() || md.len() > MAX_RAW {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut bytes = std::fs::read(&file).map_err(|_| StatusCode::NOT_FOUND)?;
+    if let Some(limit) = q.limit {
+        bytes.truncate(limit.min(MAX_RAW) as usize);
+    }
+    Ok((
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                mime_for(&q.path).to_string(),
+            ),
+            (
+                axum::http::HeaderName::from_static("x-file-size"),
+                md.len().to_string(),
+            ),
+        ],
+        bytes,
+    ))
+}
+
+#[derive(Deserialize)]
 pub struct WriteReq {
     path: String,
     content: String,
