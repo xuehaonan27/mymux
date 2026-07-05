@@ -35,9 +35,36 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
   panel.className = 'pkgs-panel';
   document.body.appendChild(panel);
   let open = false;
-  let busy = false;
   let query = ''; // sticky across re-renders (a search stays visible after install)
   let seq = 0; // stale-response guard: only the latest load may render
+
+  // Busy-state is PER PACKAGE, not panel-global: one slow npm install must
+  // not dead-button every other card (the old global flag did exactly that,
+  // silently). Errors persist across re-renders until the next attempt.
+  const inflight = new Map<string, { op: 'install' | 'remove'; started: number }>();
+  const lastErr = new Map<string, string>();
+  const busyBtns = new Map<string, HTMLButtonElement>(); // rebuilt each render
+  let ticker: ReturnType<typeof setInterval> | null = null;
+
+  function busyLabel(key: string): string {
+    const v = inflight.get(key);
+    if (!v) return '';
+    const s = Math.round((Date.now() - v.started) / 1000);
+    return `${v.op === 'install' ? 'Installing' : 'Removing'}… ${s}s`;
+  }
+
+  function ensureTicker() {
+    ticker ??= setInterval(() => {
+      for (const key of inflight.keys()) {
+        const btn = busyBtns.get(key);
+        if (btn) btn.textContent = busyLabel(key);
+      }
+      if (!inflight.size && ticker != null) {
+        clearInterval(ticker);
+        ticker = null;
+      }
+    }, 1000);
+  }
 
   async function load() {
     const my = ++seq;
@@ -75,6 +102,7 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
   }
 
   function render(rows: HTMLElement[]) {
+    busyBtns.clear();
     panel.replaceChildren(title(), searchRow(), ...rows);
   }
 
@@ -141,41 +169,58 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
     return h;
   }
 
-  // One Install/Remove button with busy handling; `name` is what the daemon
-  // gets — a curated name or a dynamic spec (openvsx:… / npm:…).
-  function actionBtn(installed: boolean, name: string, onErr: (m: string) => void): HTMLElement {
+  // One Install/Remove button; `key` is what the daemon gets — a curated name
+  // or a dynamic spec (openvsx:… / npm:…). Rendered FROM the inflight map so
+  // a mid-operation re-render (searching, refreshing) keeps the busy state.
+  function actionBtn(installed: boolean, key: string): HTMLElement {
     const btn = document.createElement('button');
     btn.className = 'pkgs-btn' + (installed ? '' : ' primary');
+    busyBtns.set(key, btn);
+    if (inflight.has(key)) {
+      btn.disabled = true;
+      btn.textContent = busyLabel(key);
+      return btn;
+    }
     btn.textContent = installed ? 'Remove' : 'Install';
     btn.addEventListener('click', () => {
-      if (busy) return;
-      busy = true;
+      if (inflight.has(key)) return; // double-click; daemon also guards
+      const op = installed ? 'remove' : 'install';
+      inflight.set(key, { op, started: Date.now() });
+      lastErr.delete(key);
       btn.disabled = true;
-      btn.textContent = installed ? 'Removing…' : 'Installing… (may take a minute)';
-      const ep = installed ? 'remove' : 'install';
-      void fetch(`${opts.getApiBase()}/pkgs/${ep}`, {
+      btn.textContent = busyLabel(key);
+      ensureTicker();
+      // Backstop only — the daemon enforces the real deadline (600s).
+      const ctl = new AbortController();
+      const kill = setTimeout(() => ctl.abort(), 630_000);
+      void fetch(`${opts.getApiBase()}/pkgs/${op}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name: key }),
+        signal: ctl.signal,
       })
         .then((r) => r.json())
         .then((res: { ok: boolean; err?: string }) => {
-          busy = false;
-          if (!res.ok) {
-            btn.disabled = false;
-            btn.textContent = installed ? 'Remove' : 'Install';
-            onErr(`✗ ${res.err ?? 'failed'}`);
-            return;
-          }
-          void load();
+          if (!res.ok) lastErr.set(key, res.err ?? 'failed');
         })
         .catch(() => {
-          busy = false;
-          btn.disabled = false;
-          onErr('✗ request failed');
+          lastErr.set(key, 'request failed (daemon unreachable or timed out)');
+        })
+        .finally(() => {
+          clearTimeout(kill);
+          inflight.delete(key);
+          if (open) void load(); // re-render from fresh state either way
         });
     });
     return btn;
+  }
+
+  function errNote(key: string): HTMLElement[] {
+    const e = lastErr.get(key);
+    if (!e) return [];
+    const n = note(`✗ ${e}`);
+    n.classList.add('pkgs-err');
+    return [n];
   }
 
   function catalogCard(it: CatalogItem): HTMLElement {
@@ -187,7 +232,8 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
     c.append(
       head(it.name, it.installed ? `${it.installed_version} installed` : it.version),
       desc,
-      actionBtn(it.installed, it.name, (m) => (desc.textContent = m)),
+      ...errNote(it.name),
+      actionBtn(it.installed, it.name),
     );
     return c;
   }
@@ -201,8 +247,9 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
     c.append(
       head(h.name, h.installed ? 'installed' : h.version, h.source),
       desc,
+      ...errNote(h.spec),
       // Removal by spec works because the daemon maps a spec to its dir name.
-      actionBtn(h.installed, h.spec, (m) => (desc.textContent = m)),
+      actionBtn(h.installed, h.spec),
     );
     if (h.source === 'npm' && !h.installed) {
       c.append(

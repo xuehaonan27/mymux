@@ -229,9 +229,14 @@ fn proxy_setting() -> Option<String> {
 
 /// A curl invocation with the proxy applied. Passing --proxy explicitly (vs
 /// letting curl read the env itself) keeps behavior identical no matter how
-/// the value arrived (MYMUX_PROXY has no meaning to curl).
+/// the value arrived (MYMUX_PROXY has no meaning to curl). The connect
+/// timeout fails blackholed egress in seconds instead of waiting out the
+/// full transfer budget — 15s because with a proxy it also covers the
+/// CONNECT handshake (proxy dials upstream before answering 200); slow
+/// TRANSFERS stay allowed via per-call --max-time.
 fn curl_cmd() -> std::process::Command {
     let mut c = std::process::Command::new("curl");
+    c.args(["--connect-timeout", "15"]);
     if let Some(p) = proxy_setting() {
         c.arg("--proxy").arg(p);
     }
@@ -586,8 +591,14 @@ fn urlenc(s: &str) -> String {
 
 /// Fetch a URL (system curl) and parse the body as JSON.
 fn http_json(url: &str) -> Result<serde_json::Value, String> {
+    http_json_t(url, 30)
+}
+
+/// Same with an explicit transfer budget — interactive callers (search) use
+/// a short one so a slow registry can't stall the whole panel.
+fn http_json_t(url: &str, max_secs: u32) -> Result<serde_json::Value, String> {
     let out = curl_cmd()
-        .args(["-fsSL", "--max-time", "30"])
+        .args(["-fsSL", "--max-time", &max_secs.to_string()])
         .arg(url)
         .output()
         .map_err(|_| "`curl` is not installed".to_string())?;
@@ -790,10 +801,13 @@ fn cmd_search(args: &[String]) -> i32 {
     // otherwise look like "nothing found") — collected as warnings, search
     // degrades to whatever sources answered.
     let mut warnings: Vec<String> = Vec::new();
-    match http_json(&format!(
-        "https://open-vsx.org/api/-/search?query={}&size=10",
-        urlenc(&query)
-    )) {
+    match http_json_t(
+        &format!(
+            "https://open-vsx.org/api/-/search?query={}&size=10",
+            urlenc(&query)
+        ),
+        12,
+    ) {
         Ok(v) => {
             for e in v["extensions"].as_array().unwrap_or(&vec![]) {
                 let (Some(ns), Some(name)) = (e["namespace"].as_str(), e["name"].as_str()) else {
@@ -811,10 +825,13 @@ fn cmd_search(args: &[String]) -> i32 {
         }
         Err(e) => warnings.push(format!("open-vsx.org: {e}")),
     }
-    match http_json(&format!(
-        "https://registry.npmjs.org/-/v1/search?text={}&size=10",
-        urlenc(&query)
-    )) {
+    match http_json_t(
+        &format!(
+            "https://registry.npmjs.org/-/v1/search?text={}&size=10",
+            urlenc(&query)
+        ),
+        12,
+    ) {
         Ok(v) => {
             for o in v["objects"].as_array().unwrap_or(&vec![]) {
                 let p = &o["package"];

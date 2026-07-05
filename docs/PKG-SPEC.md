@@ -136,7 +136,11 @@ use. `search` degrades per-source and reports unreachable registries in a
   curated names and dynamic specs (charset-validated, `..` rejected). The
   UI's packages panel (⌘K g) fronts these: curated catalog by default, a
   search box for the registries, install/remove per card. The daemon embeds
-  no recipes or acquisition logic.
+  no recipes or acquisition logic. Relayed CLI runs have hard deadlines
+  (install 600s, remove 60s, search 45s, catalog 15s — timed-out children
+  are killed), and install/remove are serialized PER PACKAGE NAME (a
+  concurrent duplicate is rejected with an explanation; different packages
+  run in parallel).
 - mymuxd `POST /lsp/install {lang}` (legacy): runs `mymux-pkg install --lang
   <lang>`; superseded by the packages panel but kept for scripts.
 - Philosophy: mymux never nags about missing packages — installs happen at

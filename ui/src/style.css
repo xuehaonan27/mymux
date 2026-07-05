@@ -321,6 +321,9 @@ body {
 .pkgs-card-head .pkgs-ver {
   margin-left: auto;
 }
+.pkgs-note.pkgs-err {
+  color: #f85149;
+}
 .help-panel {
   display: none;
   position: fixed;

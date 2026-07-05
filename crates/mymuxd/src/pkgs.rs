@@ -2,7 +2,10 @@
 //! recipes or acquisition logic (see docs/PKG-SPEC.md): every request is
 //! relayed to the decoupled `mymux-pkg` CLI (sibling binary, else PATH).
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -30,6 +33,27 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "-_.@:/".contains(c))
 }
 
+/// Names with an install/remove in flight. Two installs of the SAME package
+/// would race on its staging directory; different packages are fine in
+/// parallel. Guard drops keep the set honest across timeouts and panics.
+static INFLIGHT: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+struct InflightGuard(String);
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        INFLIGHT.lock().unwrap().remove(&self.0);
+    }
+}
+
+fn claim(name: &str) -> Option<InflightGuard> {
+    let mut s = INFLIGHT.lock().unwrap();
+    if !s.insert(name.to_string()) {
+        return None;
+    }
+    Some(InflightGuard(name.to_string()))
+}
+
 /// `GET /pkgs/search?q=` — relay `mymux-pkg search` (curated + Open VSX +
 /// npm). The network calls run HERE, on the daemon host — the client side
 /// may have no route to the registries.
@@ -41,21 +65,31 @@ pub async fn search(
     if query.trim().is_empty() || query.len() > 100 {
         return Json(empty);
     }
-    let out = Command::new(pkg_cli())
-        .arg("search")
-        .arg(&query)
-        .output()
-        .await;
-    let v = out
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| serde_json::from_slice(&o.stdout).ok())
-        .unwrap_or_else(|| {
-            serde_json::json!({
-                "hits": [],
-                "warnings": ["mymux-pkg search failed on the daemon host"],
-            })
-        });
+    let out = tokio::time::timeout(
+        Duration::from_secs(45),
+        Command::new(pkg_cli())
+            .arg("search")
+            .arg(&query)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    let v = match out {
+        Err(_) => serde_json::json!({
+            "hits": [],
+            "warnings": ["search timed out on the daemon host — slow network or a proxy problem? (see ~/.config/mymux/env)"],
+        }),
+        Ok(r) => r
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| serde_json::from_slice(&o.stdout).ok())
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "hits": [],
+                    "warnings": ["mymux-pkg search failed on the daemon host"],
+                })
+            }),
+    };
     Json(v)
 }
 
@@ -66,9 +100,17 @@ pub struct SearchQuery {
 
 /// `GET /pkgs/catalog` — the CLI's recipe directory (JSON array, relayed).
 pub async fn catalog() -> Json<serde_json::Value> {
-    let out = Command::new(pkg_cli()).arg("catalog").output().await;
+    let out = tokio::time::timeout(
+        Duration::from_secs(15),
+        Command::new(pkg_cli())
+            .arg("catalog")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
     let v = out
         .ok()
+        .and_then(Result::ok)
         .filter(|o| o.status.success())
         .and_then(|o| serde_json::from_slice(&o.stdout).ok())
         .unwrap_or_else(|| serde_json::json!([]));
@@ -87,13 +129,38 @@ pub struct PkgResp {
     err: Option<String>,
 }
 
-async fn run(args: &[&str]) -> PkgResp {
-    match Command::new(pkg_cli()).args(args).output().await {
-        Ok(o) if o.status.success() => PkgResp {
+fn fail(err: impl Into<String>) -> Json<PkgResp> {
+    Json(PkgResp {
+        ok: false,
+        err: Some(err.into()),
+    })
+}
+
+/// Run the CLI with a hard deadline. kill_on_drop reaps the child when the
+/// timeout fires — a wedged download must not leave a zombie install running
+/// (and holding the in-flight claim's staging dir) forever.
+async fn run(args: &[&str], limit: Duration) -> PkgResp {
+    let out = tokio::time::timeout(
+        limit,
+        Command::new(pkg_cli())
+            .args(args)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    match out {
+        Err(_) => PkgResp {
+            ok: false,
+            err: Some(format!(
+                "timed out after {}s — slow network or a proxy problem? (see ~/.config/mymux/env)",
+                limit.as_secs()
+            )),
+        },
+        Ok(Ok(o)) if o.status.success() => PkgResp {
             ok: true,
             err: None,
         },
-        Ok(o) => {
+        Ok(Ok(o)) => {
             let tail: Vec<String> = String::from_utf8_lossy(&o.stderr)
                 .lines()
                 .rev()
@@ -110,31 +177,31 @@ async fn run(args: &[&str]) -> PkgResp {
                 }),
             }
         }
-        Err(e) => PkgResp {
+        Ok(Err(e)) => PkgResp {
             ok: false,
             err: Some(format!("mymux-pkg is not installed: {e}")),
         },
     }
 }
 
-/// `POST /pkgs/install {name}` — install a package by recipe name.
+/// `POST /pkgs/install {name}` — install a package by recipe name or spec.
 pub async fn install(Json(req): Json<PkgReq>) -> Json<PkgResp> {
     if !valid_name(&req.name) {
-        return Json(PkgResp {
-            ok: false,
-            err: Some("bad package name".into()),
-        });
+        return fail("bad package name");
     }
-    Json(run(&["install", &req.name]).await)
+    let Some(_guard) = claim(&req.name) else {
+        return fail(format!("{} is already being installed", req.name));
+    };
+    Json(run(&["install", &req.name], Duration::from_secs(600)).await)
 }
 
 /// `POST /pkgs/remove {name}` — remove an installed package.
 pub async fn remove(Json(req): Json<PkgReq>) -> Json<PkgResp> {
     if !valid_name(&req.name) {
-        return Json(PkgResp {
-            ok: false,
-            err: Some("bad package name".into()),
-        });
+        return fail("bad package name");
     }
-    Json(run(&["remove", &req.name]).await)
+    let Some(_guard) = claim(&req.name) else {
+        return fail(format!("{} has an operation in flight", req.name));
+    };
+    Json(run(&["remove", &req.name], Duration::from_secs(60)).await)
 }
