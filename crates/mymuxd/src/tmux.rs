@@ -103,8 +103,9 @@ pub struct Hub {
     booted: std::sync::atomic::AtomicBool,
     /// Tab display order: window ids (tmux and native share the u32 space)
     /// in FIRST-SEEN order, so new windows of either engine append on the
-    /// right instead of interleaving by engine.
-    tab_order: Mutex<Vec<u32>>,
+    /// right instead of interleaving by engine. User reorders move entries;
+    /// persisted in the ptyd blob.
+    pub(crate) tab_order: Mutex<Vec<u32>>,
 }
 
 impl Hub {
@@ -138,10 +139,26 @@ impl Hub {
     }
 
     /// Push the native layout blob to ptyd (fire-and-forget) so a restarted
-    /// mymuxd adopts window grouping and splits along with the panes.
+    /// mymuxd adopts window grouping, splits AND the user's tab order.
     pub(crate) fn save_layout_blob(&self) {
-        let blob = self.natives.lock().unwrap().to_blob();
+        let order = self.tab_order.lock().unwrap().clone();
+        let blob = self.natives.lock().unwrap().to_blob(&order);
         self.persist.set_meta(blob);
+    }
+
+    /// Move a window (any engine) to a new position in the tab order.
+    pub async fn reorder_window(&self, id: u32, to: usize) {
+        {
+            let mut order = self.tab_order.lock().unwrap();
+            let Some(from) = order.iter().position(|x| *x == id) else {
+                return;
+            };
+            let item = order.remove(from);
+            let idx = to.min(order.len());
+            order.insert(idx, item);
+        }
+        self.save_layout_blob();
+        self.emit(ServerEvent::State(self.state_json()));
     }
 
     /// Whether the active tmux socket already has a live server (pre-existing

@@ -75,6 +75,7 @@ async fn main() {
         .route("/ws", get(ws::ws_handler))
         .route("/agent", get(agent::agent_handler))
         .route("/fs/list", get(fs::list))
+        .route("/fs/root", get(fs::root))
         .route("/fs/read", get(fs::read))
         .route("/fs/raw", get(fs::raw))
         .route("/fs/write", post(fs::write))

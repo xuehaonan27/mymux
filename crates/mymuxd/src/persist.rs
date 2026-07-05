@@ -174,7 +174,11 @@ impl Persist {
                             .map(|p| (p.id, p.name.clone(), p.cols, p.rows))
                             .collect();
                         nw.reconcile(&alive);
-                        client.set_meta(nw.to_blob());
+                        // The user's tab arrangement rides in the same blob;
+                        // state_json prunes dead ids and appends new ones.
+                        let order = NativeWindows::blob_order(&blob);
+                        *hub.tab_order.lock().unwrap() = order.clone();
+                        client.set_meta(nw.to_blob(&order));
                     }
                     *self.client.write().unwrap() = Some(client.clone());
                     tokio::spawn(pump(hub.clone(), events));

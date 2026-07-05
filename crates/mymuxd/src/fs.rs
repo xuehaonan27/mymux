@@ -88,6 +88,14 @@ pub struct PathQuery {
     pane: Option<u32>,
 }
 
+/// `GET /fs/root?pane=` — the absolute directory this pane's /fs and /lsp
+/// requests are rooted at (the code panel needs it to map LSP `file://` URIs
+/// back to panel-relative paths for cross-file goto).
+pub async fn root(Query(q): Query<PathQuery>) -> Json<serde_json::Value> {
+    let root = root_for(q.pane).await;
+    Json(serde_json::json!({ "root": root.display().to_string() }))
+}
+
 /// `GET /fs/list?pane=<id>&path=<rel>` — directory entries (dirs first).
 pub async fn list(Query(q): Query<PathQuery>) -> Result<Json<Vec<Entry>>, StatusCode> {
     let root = root_for(q.pane).await;

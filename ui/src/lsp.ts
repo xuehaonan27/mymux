@@ -3,10 +3,17 @@
 // transport and daemon speak raw standard LSP and survive any swap; only
 // editor bindings are library-specific).
 
-import { Extension } from '@codemirror/state';
+import { Extension, Text } from '@codemirror/state';
 import { EditorView, ViewPlugin, ViewUpdate } from '@codemirror/view';
 import { setDiagnostics, Diagnostic } from '@codemirror/lint';
-import { LSPClient, LSPPlugin, languageServerExtensions, Transport } from '@codemirror/lsp-client';
+import {
+  LSPClient,
+  LSPPlugin,
+  languageServerExtensions,
+  Transport,
+  Workspace,
+  WorkspaceFile,
+} from '@codemirror/lsp-client';
 
 interface LspInfo {
   available: boolean;
@@ -18,6 +25,193 @@ interface LspInfo {
 
 // One client (= one WS = one language server) per (daemon, workspace root).
 const conns = new Map<string, LSPClient>();
+
+// ---- cross-file goto (C2) ---------------------------------------------------
+// The library asks Workspace.displayFile(uri) when a jump targets another
+// file. Our workspace delegates to the code panel's multi-buffer openFile via
+// this injected opener (absolute path in, the editor view out — or null when
+// the target can't be shown, e.g. outside the panel's root).
+let fileOpener: ((absPath: string) => Promise<EditorView | null>) | null = null;
+export function setLspFileOpener(fn: (absPath: string) => Promise<EditorView | null>) {
+  fileOpener = fn;
+}
+
+/** The library's DefaultWorkspace isn't exported; this is its (small)
+ * behavior plus a displayFile that routes through the code panel. */
+class MymuxWorkspaceFile implements WorkspaceFile {
+  constructor(
+    public uri: string,
+    public languageId: string,
+    public version: number,
+    public doc: Text,
+    public view: EditorView,
+  ) {}
+  getView() {
+    return this.view;
+  }
+}
+
+class MymuxWorkspace extends Workspace {
+  files: MymuxWorkspaceFile[] = [];
+  private versions = new Map<string, number>();
+
+  private nextVersion(uri: string): number {
+    const v = (this.versions.get(uri) ?? -1) + 1;
+    this.versions.set(uri, v);
+    return v;
+  }
+
+  syncFiles() {
+    const result = [];
+    for (const file of this.files) {
+      const plugin = LSPPlugin.get(file.view);
+      if (!plugin) continue;
+      const changes = plugin.unsyncedChanges;
+      if (!changes.empty) {
+        result.push({ changes, file, prevDoc: file.doc });
+        file.doc = file.view.state.doc;
+        file.version = this.nextVersion(file.uri);
+        plugin.clear();
+      }
+    }
+    return result;
+  }
+
+  openFile(uri: string, languageId: string, view: EditorView) {
+    if (this.getFile(uri)) return; // one view per file in our panel
+    const f = new MymuxWorkspaceFile(uri, languageId, this.nextVersion(uri), view.state.doc, view);
+    this.files.push(f);
+    this.client.didOpen(f);
+  }
+
+  closeFile(uri: string) {
+    const f = this.getFile(uri);
+    if (f) {
+      this.files = this.files.filter((x) => x !== f);
+      this.client.didClose(uri);
+    }
+  }
+
+  async displayFile(uri: string): Promise<EditorView | null> {
+    const open = this.getFile(uri)?.getView();
+    if (open) return open;
+    if (!uri.startsWith('file://') || !fileOpener) return null;
+    return fileOpener(decodeURI(uri.slice('file://'.length)));
+  }
+}
+
+// ---- code actions (C2) ------------------------------------------------------
+// The library ships no code-action support. We advertise literal+resolve
+// capabilities (without them rust-analyzer only returns command-style actions
+// whose workspace/applyEdit callback the lib can't receive) and drive the
+// request/resolve/apply cycle ourselves.
+
+const codeActionCaps = {
+  clientCapabilities: {
+    textDocument: {
+      codeAction: {
+        codeActionLiteralSupport: {
+          codeActionKind: { valueSet: ['quickfix', 'refactor', 'source'] },
+        },
+        resolveSupport: { properties: ['edit'] },
+      },
+    },
+  },
+};
+
+interface LspTextEdit {
+  range: { start: { line: number; character: number }; end: { line: number; character: number } };
+  newText: string;
+}
+interface LspCodeAction {
+  title: string;
+  kind?: string;
+  edit?: {
+    changes?: Record<string, LspTextEdit[]>;
+    documentChanges?: Array<{ textDocument?: { uri: string }; edits?: LspTextEdit[] }>;
+  };
+  command?: unknown;
+  data?: unknown;
+}
+
+export interface CodeActionItem {
+  title: string;
+  kind: string;
+  /** Applies the action; resolves to an error message or null on success. */
+  apply(): Promise<string | null>;
+}
+
+function editsByUri(a: LspCodeAction): Map<string, LspTextEdit[]> {
+  const m = new Map<string, LspTextEdit[]>();
+  for (const [uri, edits] of Object.entries(a.edit?.changes ?? {})) m.set(uri, edits);
+  for (const dc of a.edit?.documentChanges ?? []) {
+    if (dc.textDocument?.uri && dc.edits) {
+      m.set(dc.textDocument.uri, [...(m.get(dc.textDocument.uri) ?? []), ...dc.edits]);
+    }
+  }
+  return m;
+}
+
+/** Quick fixes / refactors at the current selection (⌘. in the code panel). */
+export async function requestCodeActions(view: EditorView): Promise<CodeActionItem[]> {
+  const plugin = LSPPlugin.get(view);
+  if (!plugin) return [];
+  await plugin.client.initializing;
+  plugin.client.sync();
+  const sel = view.state.selection.main;
+  let actions: LspCodeAction[] | null;
+  try {
+    actions = await plugin.client.request<unknown, LspCodeAction[] | null>(
+      'textDocument/codeAction',
+      {
+        textDocument: { uri: plugin.uri },
+        range: { start: plugin.toPosition(sel.from), end: plugin.toPosition(sel.to) },
+        context: { diagnostics: [] },
+      },
+    );
+  } catch {
+    return [];
+  }
+  return (actions ?? [])
+    .filter((a) => a && a.title)
+    .map((a) => ({
+      title: a.title,
+      kind: a.kind ?? '',
+      apply: () => applyCodeAction(view, a),
+    }));
+}
+
+async function applyCodeAction(view: EditorView, action: LspCodeAction): Promise<string | null> {
+  const plugin = LSPPlugin.get(view);
+  if (!plugin) return 'no language client';
+  let a = action;
+  if (!a.edit && a.data != null) {
+    // Lazy action: resolve to get the edit (a client→server request, which
+    // works — unlike server→client applyEdit, which the lib rejects).
+    try {
+      a = await plugin.client.request<unknown, LspCodeAction>('codeAction/resolve', a);
+    } catch (e) {
+      return `resolve failed: ${e}`;
+    }
+  }
+  const edits = editsByUri(a);
+  if (edits.size === 0) {
+    return a.command ? 'this action needs server-side execution — not supported yet' : 'no edit';
+  }
+  const foreign = [...edits.keys()].filter((u) => u !== plugin.uri);
+  if (foreign.length) {
+    return 'this action touches other files — not supported yet';
+  }
+  const own = edits.get(plugin.uri) ?? [];
+  view.dispatch({
+    changes: own.map((e) => ({
+      from: plugin.fromPosition(e.range.start),
+      to: plugin.fromPosition(e.range.end),
+      insert: e.newText,
+    })),
+  });
+  return null;
+}
 
 const langOf = (path: string): string | null => {
   if (path.endsWith('.rs')) return 'rust';
@@ -242,7 +436,8 @@ export async function lspExtensionFor(
     if (!client) {
       client = new LSPClient({
         rootUri: `file://${info.root}`,
-        extensions: languageServerExtensions(),
+        workspace: (c) => new MymuxWorkspace(c),
+        extensions: [...languageServerExtensions(), codeActionCaps],
         // rust-analyzer can block requests while indexing a big workspace; the
         // 3s default would spuriously fail the first pulls.
         timeout: 30000,

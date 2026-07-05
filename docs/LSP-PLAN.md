@@ -121,6 +121,21 @@ still zero extensions, and lose our CodeMirror investment. No.
   and offers `POST /lsp/install`. Open VSX is a legal, implemented channel
   (unused while upstream releases suffice); the VS Marketplace and MS
   proprietary extensions are banned (unit-test enforced).
+- **C2 SHIPPED (2026-07-05): cross-file goto + code actions.** Goto: a custom
+  `MymuxWorkspace` (the library's unexported DefaultWorkspace re-implemented,
+  ~40 lines) overrides `displayFile(uri)` → the code panel's multi-buffer
+  `openFile` via an injected opener (`setLspFileOpener`); URIs map back
+  through the new `GET /fs/root` (cached per session); targets outside the
+  panel's root flash a hint and stay put (read-only dependency-source viewing
+  is future work). F12/F2 (library keymaps) now work across files. Code
+  actions: the library ships none — the seam advertises
+  `codeActionLiteralSupport` + `resolveSupport` (without them rust-analyzer
+  only returns command-style actions whose `workspace/applyEdit` the lib
+  can't receive), drives `textDocument/codeAction` → `codeAction/resolve` →
+  client-side edit application (⌘. menu in the panel; multi-file edits and
+  command-only actions are declined with a message — absorption list items).
+  Verified against real rust-analyzer: cross-file definition main.rs→lib.rs;
+  "Extract into variable" et al. offered and resolved to edits.
 - `@codemirror/view` pinned to 6.42.1 (the 6.43.x line shipped a DOM-update
   corruption regression family that broke rendering after fold/unfold cycles);
   revisit the pin when 6.43.x stabilizes.

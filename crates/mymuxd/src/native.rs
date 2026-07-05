@@ -475,9 +475,12 @@ impl NativeWindows {
 
     // ---- blob (de)serialization -------------------------------------------
 
-    pub fn to_blob(&self) -> String {
+    /// `order` is the Hub's global tab order (tmux + native ids) — persisted
+    /// so a user's arrangement survives mymuxd restarts alongside the trees.
+    pub fn to_blob(&self, order: &[u32]) -> String {
         let root = BlobRoot {
             v: 1,
+            order: order.to_vec(),
             windows: self
                 .wins
                 .values()
@@ -523,6 +526,14 @@ impl NativeWindows {
         }
         out
     }
+
+    /// The persisted tab order from a blob (empty on garbage — callers merge
+    /// leniently anyway).
+    pub fn blob_order(s: &str) -> Vec<u32> {
+        serde_json::from_str::<BlobRoot>(s)
+            .map(|r| r.order)
+            .unwrap_or_default()
+    }
 }
 
 /// Swap the pane ids of two leaves (rectangles stay put — the shells move).
@@ -546,6 +557,8 @@ fn swap_leaves(cell: &mut LayoutCell, a: u32, b: u32) {
 #[derive(Serialize, Deserialize)]
 struct BlobRoot {
     v: u32,
+    #[serde(default)]
+    order: Vec<u32>,
     windows: Vec<BlobWin>,
 }
 
@@ -729,7 +742,7 @@ mod tests {
         nw.split(P1, true, P2);
         nw.split(P2, false, P3);
         nw.set_active(P3);
-        let back = NativeWindows::from_blob(&nw.to_blob());
+        let back = NativeWindows::from_blob(&nw.to_blob(&[]));
         assert_eq!(back.tabs(), nw.tabs());
         assert_eq!(back.active_pane_of(P1), Some(P3));
         assert_eq!(rects(&back, P1), rects(&nw, P1));
@@ -773,7 +786,7 @@ mod tests {
         assert_eq!(nw.zoomed_of(P1), Some(P2));
         assert_eq!(nw.visible_panes_of(P1), vec![P2]);
         // Survives the blob roundtrip.
-        let back = NativeWindows::from_blob(&nw.to_blob());
+        let back = NativeWindows::from_blob(&nw.to_blob(&[]));
         assert_eq!(back.zoomed_of(P1), Some(P2));
         // clear_zoom returns the tree sizes to restore.
         let restore = nw.clear_zoom(P1).unwrap();

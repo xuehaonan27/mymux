@@ -241,6 +241,7 @@ helpEl.className = 'help-panel';
     <tr><td>⌘⇧1–9</td><td></td><td>switch host</td></tr>
     <tr><td>⌘⌥arrows</td><td>⌘K arrows</td><td>move focus between panes</td></tr>
     <tr><td colspan="2">double-click tab</td><td>rename (✓ or click away = save, ✕ = cancel)</td></tr>
+    <tr><td colspan="2">drag tab</td><td>reorder windows (persists across restarts)</td></tr>
   </table>
 </div>`;
 }
@@ -350,11 +351,16 @@ function endWorkspace(w: Workspace, disconnectTunnel: boolean) {
 
 // ---- shared bar rendering ----------------------------------------------------
 
+// Drag state for tab reordering: while a drag is live, renderTabs must not
+// rebuild the bar (that would destroy the dragged element mid-flight).
+let draggingTab: number | null = null;
+
 function renderTabs(w: Workspace | null) {
   // A rename is in progress: don't rebuild the bar under the input (state
   // updates arrive constantly — e.g. the dblclick's own select_window echo).
   // finish() re-renders with the then-current windowList.
   if (tabsEl.querySelector('input.tab-rename')) return;
+  if (draggingTab != null) return;
   tabsEl.replaceChildren();
   if (!w) return;
   const low = (id: number) => id % 0x40000000;
@@ -385,7 +391,34 @@ function renderTabs(w: Workspace | null) {
       e.preventDefault();
       beginRename(tab, w, win);
     });
-    tab.title = 'double-click to rename · click away or ✓ to save · ✕ to cancel';
+    // Drag to reorder (any engine — the daemon owns one global tab order).
+    tab.draggable = true;
+    tab.addEventListener('dragstart', (e) => {
+      draggingTab = win.id;
+      e.dataTransfer?.setData('text/plain', String(win.id));
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+    });
+    tab.addEventListener('dragend', () => {
+      draggingTab = null;
+      tabsEl
+        .querySelectorAll('.tab.drop-target')
+        .forEach((t) => t.classList.remove('drop-target'));
+      renderTabs(active()); // catch up on any state that arrived mid-drag
+    });
+    tab.addEventListener('dragover', (e) => {
+      if (draggingTab == null || draggingTab === win.id) return;
+      e.preventDefault(); // allow dropping here
+      tab.classList.add('drop-target');
+    });
+    tab.addEventListener('dragleave', () => tab.classList.remove('drop-target'));
+    tab.addEventListener('drop', (e) => {
+      e.preventDefault();
+      tab.classList.remove('drop-target');
+      if (draggingTab == null || draggingTab === win.id) return;
+      const to = w.windowList.findIndex((x) => x.id === win.id);
+      if (to >= 0) w.sendJson({ t: 'reorder_window', id: draggingTab, to });
+    });
+    tab.title = 'double-click to rename · drag to reorder';
     tabsEl.appendChild(tab);
   }
 }

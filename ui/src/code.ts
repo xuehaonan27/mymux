@@ -7,7 +7,7 @@ import { javascript } from '@codemirror/lang-javascript';
 import { python } from '@codemirror/lang-python';
 import { json } from '@codemirror/lang-json';
 import { markdown } from '@codemirror/lang-markdown';
-import { lspExtensionFor, lspInstall, lspInstallable, notifySaved } from './lsp';
+import { lspExtensionFor, lspInstall, lspInstallable, notifySaved, setLspFileOpener, requestCodeActions } from './lsp';
 import { makeCtx, viewerFor } from './viewers';
 
 // Resolved per call so the panel follows the active workspace's daemon.
@@ -117,6 +117,9 @@ interface Session {
   pane: number | null;
   path: string | null; // buffer currently in the editor, or null
   buffers: Map<string, Buffer>;
+  /** Absolute root the panel's relative paths resolve against (for mapping
+   * LSP file:// URIs back — cross-file goto). Fetched lazily. */
+  fsRoot?: string;
 }
 
 export interface CodePanelOpts {
@@ -141,7 +144,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       <div class="code-tree" id="code-tree"></div>
     </div>
     <div class="code-main">
-      <div class="code-hd"><span id="code-path">no file open</span><span id="code-hint">⌘P open · ⌘S save · esc / ⌘E close</span></div>
+      <div class="code-hd"><span id="code-path">no file open</span><span id="code-hint">⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close</span></div>
       <div class="code-bufs" id="code-bufs"></div>
       <div class="code-lsphint" id="code-lsphint" style="display: none"></div>
       <div class="code-editor" id="code-editor"></div>
@@ -279,7 +282,10 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
         editorTheme,
         langFor(path),
         ...(lsp ? [lsp] : []),
-        keymap.of([{ key: 'Mod-s', preventDefault: true, run: () => (void save(), true) }]),
+        keymap.of([
+          { key: 'Mod-s', preventDefault: true, run: () => (void save(), true) },
+          { key: 'Mod-.', preventDefault: true, run: () => (void openCodeActions(), true) },
+        ]),
         EditorView.updateListener.of((u) => {
           if (u.docChanged) renderHeader();
         }),
@@ -562,6 +568,79 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     void loadTree();
     void loadChanges();
     editor?.focus();
+    // Cache the absolute root for LSP-URI → panel-path mapping (goto).
+    const s = current;
+    if (!s.fsRoot) {
+      const paneQ = s.pane != null ? `?pane=${s.pane}` : '';
+      void fetch(`${apiBase()}/fs/root${paneQ}`)
+        .then((r) => r.json())
+        .then((j: { root?: string }) => {
+          if (j.root) s.fsRoot = j.root;
+        })
+        .catch(() => {});
+    }
+  }
+
+  // Cross-file goto: the LSP seam hands us an absolute path; open it when it
+  // sits under this session's root, return the (shared) editor view.
+  setLspFileOpener(async (abs) => {
+    const s = current;
+    if (!s?.fsRoot) return null;
+    const root = s.fsRoot.endsWith('/') ? s.fsRoot : `${s.fsRoot}/`;
+    if (!abs.startsWith(root)) {
+      flashHint('definition is outside this panel’s root');
+      return null;
+    }
+    const rel = abs.slice(root.length);
+    await openFile(rel);
+    return current === s && s.path === rel ? editor : null;
+  });
+
+  // ---- code actions (⌘. in the editor) --------------------------------------
+  const caEl = document.createElement('div');
+  caEl.className = 'ca-menu';
+  caEl.style.display = 'none';
+  panel.appendChild(caEl);
+  let caVisible = false;
+
+  function closeCodeActions() {
+    caVisible = false;
+    caEl.style.display = 'none';
+    editor?.focus();
+  }
+
+  async function openCodeActions() {
+    if (!editor || !current?.path) return;
+    const items = await requestCodeActions(editor);
+    caEl.replaceChildren();
+    if (!items.length) {
+      flashHint('no code actions here');
+      return;
+    }
+    for (const it of items) {
+      const row = document.createElement('div');
+      row.className = 'ca-row';
+      row.textContent = it.title + (it.kind ? `  (${it.kind})` : '');
+      row.addEventListener('click', () => {
+        closeCodeActions();
+        void it.apply().then((err) => {
+          if (err) flashHint(err);
+        });
+      });
+      caEl.appendChild(row);
+    }
+    caVisible = true;
+    caEl.style.display = '';
+  }
+
+  // Transient notice in the header's hint slot.
+  const hintSpan = panel.querySelector('#code-hint') as HTMLElement;
+  const hintDefault = hintSpan.textContent ?? '';
+  let hintTimer: number | undefined;
+  function flashHint(msg: string) {
+    hintSpan.textContent = msg;
+    window.clearTimeout(hintTimer);
+    hintTimer = window.setTimeout(() => (hintSpan.textContent = hintDefault), 2500);
   }
 
   // ---- quick open (⌘P): fuzzy over the repo's files (git ls-files) ---------
@@ -662,6 +741,10 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       if (open) void quickOpen();
     },
     escape: () => {
+      if (caVisible) {
+        closeCodeActions();
+        return true;
+      }
       if (qoVisible) {
         closeQuickOpen();
         return true;

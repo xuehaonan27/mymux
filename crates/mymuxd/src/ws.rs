@@ -75,6 +75,10 @@ enum ClientMsg {
     DemoteWindow {
         id: u32,
     },
+    ReorderWindow {
+        id: u32,
+        to: usize,
+    },
 }
 
 /// Prepend the pane id as a 4-byte LE header to a payload.
@@ -181,6 +185,9 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
                             ClientMsg::BreakPane { pane } => hub.break_pane(pane).await,
                             ClientMsg::PromoteWindow { id } => hub.promote_window(id).await,
                             ClientMsg::DemoteWindow { id } => hub.demote_window(id).await,
+                            ClientMsg::ReorderWindow { id, to } => {
+                                hub.reorder_window(id, to).await
+                            }
                         }
                     }
                 }

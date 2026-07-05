@@ -171,6 +171,40 @@ body {
 .cwd-input:focus {
   border-color: #2f81f7;
 }
+.tab.drop-target {
+  border-left: 2px solid #2f81f7;
+}
+
+/* Code-action menu (⌘. in the editor). */
+.ca-menu {
+  position: absolute;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 25;
+  min-width: 320px;
+  max-width: 60%;
+  max-height: 50%;
+  overflow: auto;
+  background: #0d1017;
+  border: 1px solid #2f81f7;
+  border-radius: 6px;
+  padding: 4px;
+  font-size: 12px;
+}
+.ca-row {
+  padding: 5px 10px;
+  border-radius: 4px;
+  color: #c5cdd9;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ca-row:hover {
+  background: #16202e;
+  color: #e6edf3;
+}
 .help-panel {
   display: none;
   position: fixed;
