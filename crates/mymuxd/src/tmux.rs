@@ -152,6 +152,35 @@ impl Hub {
             .unwrap_or(false)
     }
 
+    /// True when the surviving tmux server holds exactly one never-used
+    /// window: a single pane whose shell has no children and no foreground
+    /// job. That is the bare session an OLDER mymuxd auto-created at connect
+    /// — our own artifact, safe to clean up. Anything with real content
+    /// (more windows, a running job, even a child process) fails this check
+    /// and gets adopted instead.
+    async fn tmux_session_pristine() -> bool {
+        let out = Command::new("tmux")
+            .args(["-L", socket(), "list-panes", "-a", "-F", "#{pane_pid}"])
+            .output()
+            .await;
+        let Ok(o) = out else { return false };
+        if !o.status.success() {
+            return false;
+        }
+        let text = String::from_utf8_lossy(&o.stdout);
+        let pids: Vec<&str> = text.lines().collect();
+        let [only] = pids.as_slice() else {
+            return false; // more than one pane/window = real content
+        };
+        let Ok(pid) = only.trim().parse::<u32>() else {
+            return false;
+        };
+        let children = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(true); // can't tell → assume used → adopt
+        !children && foreground_cmd(pid).is_none()
+    }
+
     /// First-connection bootstrap: NATIVE is the default experience. A
     /// running tmux server is adopted (its windows may hold agents), but tmux
     /// is never STARTED here — that happens on demand via `new_window`
@@ -159,8 +188,20 @@ impl Hub {
     /// window. `MYMUX_DEFAULT_VIEW=none` disables the auto-shell (tests).
     pub async fn ensure_default_view(self: &Arc<Self>) {
         if !self.state.lock().unwrap().running && Self::tmux_server_alive().await {
-            self.ensure_started();
-            return;
+            if Self::tmux_session_pristine().await {
+                // A leftover bare session from an older mymuxd (which always
+                // auto-started tmux): clean up our own artifact — scoped to
+                // OUR socket — and boot native instead of adopting an empty
+                // tab forever.
+                eprintln!("mymuxd: cleaning up a pristine legacy tmux session");
+                let _ = Command::new("tmux")
+                    .args(["-L", socket(), "kill-server"])
+                    .status()
+                    .await;
+            } else {
+                self.ensure_started();
+                return;
+            }
         }
         if std::env::var_os("MYMUX_DEFAULT_VIEW").is_some_and(|v| v == "none") {
             return;
