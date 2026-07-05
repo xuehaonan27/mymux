@@ -142,6 +142,55 @@ function showConfirmClose(w: Workspace, pane: number, cmd: string) {
   confirmEl.classList.add('show');
 }
 
+// New-window-in-directory prompt (⌘K ⇧C): spawn a shell elsewhere WITHOUT
+// cd-ing the current pane (its agent keeps running). Keys follow house rules
+// (Enter/Esc swallowed); creation is explicit via ✓-style buttons, and blur
+// CANCELS here — unlike rename's blur-saves, accidentally creating a window
+// is worse than retyping a path.
+const cwdEl = document.createElement('div');
+cwdEl.className = 'confirm-bar';
+document.body.appendChild(cwdEl);
+function openCwdPrompt() {
+  const w = active();
+  if (!w) return;
+  cwdEl.replaceChildren();
+  const label = document.createElement('span');
+  label.textContent = 'New ∞ window in:';
+  const input = document.createElement('input');
+  input.className = 'cwd-input';
+  input.placeholder = '~/some/dir — empty or invalid = current pane’s dir';
+  input.spellcheck = false;
+  let done = false;
+  const finish = (create: boolean) => {
+    if (done) return;
+    done = true;
+    const dir = input.value.trim();
+    cwdEl.classList.remove('show');
+    if (create) w.sendJson({ t: 'new_persistent', cwd: dir || undefined });
+    w.refocusActive();
+  };
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter' || e.key === 'Escape') e.preventDefault(); // swallowed
+  });
+  input.addEventListener('blur', () => finish(false));
+  const mk = (text: string, cls: string, create: boolean) => {
+    const b = document.createElement('button');
+    b.textContent = text;
+    b.className = cls;
+    // mousedown+preventDefault: don't blur the input before we decide.
+    b.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      finish(create);
+    });
+    return b;
+  };
+  cwdEl.append(label, input, mk('Create', '', true), mk('Cancel', '', false));
+  cwdEl.classList.add('show');
+  input.focus();
+}
+
 // Keymap help (⌘K ?). Click anywhere to dismiss — no Esc, keys stay inert.
 const helpEl = document.createElement('div');
 helpEl.className = 'help-panel';
@@ -150,6 +199,7 @@ helpEl.innerHTML = `<div class="help-card">
   <table>
     <tr><th colspan="2">Windows</th></tr>
     <tr><td>⌘T / +win / ⌘K c</td><td>new window (∞ persistent — survives restarts)</td></tr>
+    <tr><td>⌘K ⇧C</td><td>new ∞ window in a chosen directory</td></tr>
     <tr><td>⌘K s</td><td>new throwaway shell (⌁ — dies with the daemon)</td></tr>
     <tr><td>⌘K w</td><td>new tmux window</td></tr>
     <tr><td>⌘K k</td><td>keep this shell: promote ⌁ → ∞</td></tr>
@@ -519,7 +569,10 @@ function handleLeaderKey(e: KeyboardEvent) {
   const lower = k.toLowerCase();
   // Native persistent windows are the default; tmux windows stay reachable
   // behind ⌘K w for as long as the tmux engine is kept around.
-  if (lower === 'c') return w.sendJson({ t: 'new_persistent' });
+  if (lower === 'c') {
+    if (e.shiftKey) return openCwdPrompt();
+    return w.sendJson({ t: 'new_persistent' });
+  }
   if (lower === 'w') return w.sendJson({ t: 'new_window' });
   if (lower === 'x') return w.closeActive();
   if (lower === 'a') return jumpToAttention();

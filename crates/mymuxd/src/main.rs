@@ -24,6 +24,7 @@ use tower_http::cors::{Any, CorsLayer};
 #[tokio::main]
 async fn main() {
     let hub = tmux::Hub::new();
+    fs::init_hub(hub.clone()); // /fs, /git, /lsp roots resolve native panes via the Hub
     tokio::spawn(tmux::heuristic_sweep(hub.clone()));
     // Adopt persistent panes that survived a previous mymuxd, if ptyd is up.
     {

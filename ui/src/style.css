@@ -158,6 +158,19 @@ body {
 .confirm-bar button:hover {
   background: #30363d;
 }
+.cwd-input {
+  width: 320px;
+  padding: 3px 8px;
+  background: #0d1017;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: #e6edf3;
+  font: 12px ui-monospace, Menlo, monospace;
+  outline: none;
+}
+.cwd-input:focus {
+  border-color: #2f81f7;
+}
 .help-panel {
   display: none;
   position: fixed;

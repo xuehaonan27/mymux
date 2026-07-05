@@ -36,7 +36,10 @@ enum ClientMsg {
         pane: u32,
         dir: String,
     },
-    NewWindow,
+    NewWindow {
+        #[serde(default)]
+        cwd: Option<String>,
+    },
     SelectWindow {
         id: u32,
     },
@@ -45,8 +48,14 @@ enum ClientMsg {
         #[serde(default)]
         force: bool,
     },
-    NewEphemeral,
-    NewPersistent,
+    NewEphemeral {
+        #[serde(default)]
+        cwd: Option<String>,
+    },
+    NewPersistent {
+        #[serde(default)]
+        cwd: Option<String>,
+    },
     RenameWindow {
         id: u32,
         name: String,
@@ -154,13 +163,13 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
                             ClientMsg::Focus { pane } => hub.focus(pane).await,
                             ClientMsg::SelectPane { dir } => hub.select_pane_dir(&dir).await,
                             ClientMsg::Split { pane, dir } => hub.split(pane, dir == "h").await,
-                            ClientMsg::NewWindow => hub.new_window().await,
+                            ClientMsg::NewWindow { cwd } => hub.new_window(cwd).await,
                             ClientMsg::SelectWindow { id } => hub.select_window(id).await,
                             ClientMsg::ClosePane { pane, force } => {
                                 hub.close_pane(pane, force).await
                             }
-                            ClientMsg::NewEphemeral => hub.new_ephemeral().await,
-                            ClientMsg::NewPersistent => hub.new_persistent().await,
+                            ClientMsg::NewEphemeral { cwd } => hub.new_ephemeral(cwd).await,
+                            ClientMsg::NewPersistent { cwd } => hub.new_persistent(cwd).await,
                             ClientMsg::RenameWindow { id, name } => {
                                 hub.rename_window(id, name).await
                             }

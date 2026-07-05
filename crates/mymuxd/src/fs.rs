@@ -41,12 +41,23 @@ async fn pane_cwd(pane: u32) -> Option<PathBuf> {
     (!p.is_empty()).then(|| PathBuf::from(p))
 }
 
+/// Set once at startup so `root_for` can resolve NATIVE panes' cwds (their
+/// shell pids live in the Hub's ptyd mirror; tmux panes are asked via tmux).
+static HUB: std::sync::OnceLock<std::sync::Arc<crate::tmux::Hub>> = std::sync::OnceLock::new();
+pub(crate) fn init_hub(hub: std::sync::Arc<crate::tmux::Hub>) {
+    let _ = HUB.set(hub);
+}
+
 /// The root a request is relative to: the focused pane's cwd, else the default.
 pub(crate) async fn root_for(pane: Option<u32>) -> PathBuf {
-    match pane {
-        Some(p) => pane_cwd(p).await.unwrap_or_else(default_root),
-        None => default_root(),
+    let Some(p) = pane else {
+        return default_root();
+    };
+    // A pane in the ptyd mirror is native: its shell's cwd comes from /proc.
+    if let Some(pid) = HUB.get().and_then(|h| h.persist.pid_of(p)) {
+        return std::fs::read_link(format!("/proc/{pid}/cwd")).unwrap_or_else(|_| default_root());
     }
+    pane_cwd(p).await.unwrap_or_else(default_root)
 }
 
 /// Resolve a client path within `root`, rejecting anything that escapes it.

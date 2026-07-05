@@ -462,10 +462,19 @@ impl Hub {
         }
     }
 
-    pub async fn new_window(&self) {
-        // Open in the active pane's directory, not the tmux server's start dir.
-        self.send_cmd("new-window -c \"#{pane_current_path}\"".to_string())
-            .await;
+    pub async fn new_window(&self, cwd: Option<String>) {
+        // Open in the requested directory, else the active pane's (never the
+        // tmux server's start dir).
+        match cwd.as_deref().and_then(canon_dir) {
+            Some(dir) => {
+                let quoted = dir.replace('\'', "'\\''");
+                self.send_cmd(format!("new-window -c '{quoted}'")).await;
+            }
+            None => {
+                self.send_cmd("new-window -c \"#{pane_current_path}\"".to_string())
+                    .await;
+            }
+        }
     }
 
     /// Rename a window/tab of any kind: tmux window, ephemeral or persistent.
@@ -1064,11 +1073,17 @@ impl Hub {
     /// Spawn a new native shell tab and switch to it. Both kinds live in
     /// mymux-ptyd; `ephemeral` panes are killed by ptyd when our connection
     /// drops (they die with mymuxd, as ⌁ always has), persistent ones survive.
-    async fn new_native(self: &Arc<Self>, ephemeral: bool) {
-        let cwd = self
-            .active_pane_cwd()
-            .await
-            .map(|p| p.display().to_string());
+    async fn new_native(self: &Arc<Self>, ephemeral: bool, cwd_override: Option<String>) {
+        // An explicit directory wins (spawn elsewhere WITHOUT touching the
+        // current pane — its agent keeps running); default = the focused
+        // pane's cwd. Invalid/missing overrides fall back gracefully.
+        let cwd = match cwd_override.as_deref().and_then(canon_dir) {
+            Some(dir) => Some(dir),
+            None => self
+                .active_pane_cwd()
+                .await
+                .map(|p| p.display().to_string()),
+        };
         let (cols, rows) = *self.last_size.lock().unwrap();
         match self
             .persist
@@ -1089,13 +1104,13 @@ impl Hub {
     }
 
     /// Spawn a new ephemeral (raw, dies-with-mymuxd) shell tab.
-    pub async fn new_ephemeral(self: &Arc<Self>) {
-        self.new_native(true).await;
+    pub async fn new_ephemeral(self: &Arc<Self>, cwd: Option<String>) {
+        self.new_native(true, cwd).await;
     }
 
     /// Spawn a new persistent shell tab (survives mymuxd restarts).
-    pub async fn new_persistent(self: &Arc<Self>) {
-        self.new_native(false).await;
+    pub async fn new_persistent(self: &Arc<Self>, cwd: Option<String>) {
+        self.new_native(false, cwd).await;
     }
 
     /// Called when a native pane's process ended (a ptyd exit event): drop it
@@ -1235,6 +1250,26 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty()
         && hay.len() >= needle.len()
         && hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Validate a user-supplied spawn directory: trim, expand a leading `~`, and
+/// require it to exist as a directory. `None` = fall back to the default.
+fn canon_dir(input: &str) -> Option<String> {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let expanded = if let Some(rest) = raw.strip_prefix("~/") {
+        format!("{}/{rest}", std::env::var("HOME").ok()?)
+    } else if raw == "~" {
+        std::env::var("HOME").ok()?
+    } else {
+        raw.to_string()
+    };
+    std::fs::metadata(&expanded)
+        .ok()?
+        .is_dir()
+        .then_some(expanded)
 }
 
 /// The shell's current foreground job (`None` at an idle prompt): the tty's
