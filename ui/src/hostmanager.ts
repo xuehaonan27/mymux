@@ -68,6 +68,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   // their workspaces live their own lives.
   let attempt: { host: Host; passphrase: string; port: number | null } | null = null;
   let statusEl: HTMLElement | null = null;
+  let connectBtn: HTMLElement | null = null;
   // Hosts open at the end of the last session, not yet reconnected: at boot
   // we guide through them one passphrase at a time ("restore the session").
   // Backing store is maintained by the shell (mymux.openHosts).
@@ -150,11 +151,30 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     }
   }
 
+  /// Hide the overlay AND release keyboard focus: a display:none'd input can
+  /// keep focus in some webviews, and the workspace's focus logic deliberately
+  /// never steals from an input — blur explicitly so the terminal can take it.
+  function hidePanel() {
+    panel.classList.remove('show');
+    const ae = document.activeElement;
+    if (ae instanceof HTMLElement) ae.blur();
+  }
+
+  /// Abort the connect attempt this panel is driving (kills the background
+  /// tunnel task, which would otherwise keep retrying forever).
+  async function cancelAttempt() {
+    const a = attempt;
+    attempt = null;
+    if (a) await invoke('disconnect', { host_id: a.host.id }).catch(() => {});
+  }
+
   function hostCard(h: Host, conn?: ConnInfo): HTMLElement {
+    const live = conn?.status === 'connected';
     const card = el('div', 'host-card');
     const main = el('div', 'host-card-main');
     const labelRow = el('div', 'host-card-label');
-    if (conn) labelRow.appendChild(el('span', 'host-live', '●'));
+    if (live) labelRow.appendChild(el('span', 'host-live', '●'));
+    else if (conn) labelRow.appendChild(el('span', 'host-trying', '●'));
     labelRow.appendChild(document.createTextNode(h.label || h.hostname));
     if (!conn && restoreQueue.includes(h.id)) {
       const re = el('span', 'host-reopen', '↻');
@@ -162,13 +182,21 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
       labelRow.appendChild(re);
     }
     main.appendChild(labelRow);
-    main.appendChild(el('div', 'host-card-sub', `${h.user}@${h.hostname}:${h.port}`));
+    main.appendChild(
+      el(
+        'div',
+        'host-card-sub',
+        live || !conn
+          ? `${h.user}@${h.hostname}:${h.port}`
+          : `${h.user}@${h.hostname}:${h.port} — connecting…`,
+      ),
+    );
     card.appendChild(main);
 
-    if (conn) {
-      // Already connected: open its workspace, or tear the tunnel down.
+    if (live && conn) {
+      // Connected: open its workspace, or tear the tunnel down.
       main.onclick = () => {
-        panel.classList.remove('show');
+        hidePanel();
         hooks.onConnected({ id: h.id, label: h.label || h.hostname, port: conn.port });
       };
       const open = el('button', 'host-btn small', 'Open');
@@ -182,6 +210,16 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
         void showList();
       };
       card.append(open, dis);
+    } else if (conn) {
+      // A background tunnel is still trying (connecting/reconnecting): the
+      // only sensible action is to stop it.
+      const stop = el('button', 'host-btn small', 'Cancel');
+      stop.onclick = async (e) => {
+        e.stopPropagation();
+        await invoke('disconnect', { host_id: h.id }).catch(() => {});
+        void showList();
+      };
+      card.append(stop);
     } else {
       main.onclick = () => showConnect(h);
       const edit = el('button', 'host-icon', '✎');
@@ -209,6 +247,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     const back = el('button', 'host-back', '← hosts');
     back.onclick = () => {
       restoreQueue = []; // user bailed out of the restore guide
+      void cancelAttempt(); // …and of the in-flight attempt, if any
       showList();
     };
     root.append(
@@ -219,11 +258,24 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     const pass = el('input', 'host-input') as HTMLInputElement;
     pass.type = 'password';
     pass.placeholder = 'Key passphrase';
-    const go = () => connect(h, pass.value, false);
+    const btn = el('button', 'host-btn primary', 'Connect');
+    connectBtn = btn;
+    const go = () => {
+      if (attempt) {
+        // Second click = cancel: kill the tunnel task (it would otherwise
+        // retry forever against an unreachable host).
+        void cancelAttempt().then(() => {
+          btn.textContent = 'Connect';
+          setStatus('info', 'Cancelled.');
+        });
+        return;
+      }
+      btn.textContent = 'Cancel';
+      connect(h, pass.value, false);
+    };
     pass.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') go();
     });
-    const btn = el('button', 'host-btn primary', 'Connect');
     btn.onclick = go;
     statusEl = el('div', 'host-status');
     root.append(pass, btn, statusEl);
@@ -277,7 +329,8 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   async function connect(h: Host, passphrase: string, trust: boolean) {
     if (!statusEl) return;
     attempt = { host: h, passphrase, port: null };
-    setStatus('info', 'Connecting…');
+    if (connectBtn) connectBtn.textContent = 'Cancel'; // every start path, incl. trust-retry
+    setStatus('info', 'Connecting… (Cancel to stop)');
     try {
       attempt.port = await invoke<number>('connect', {
         host_id: h.id,
@@ -286,6 +339,8 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
       });
     } catch (e) {
       setStatus('error', String(e));
+      attempt = null;
+      if (connectBtn) connectBtn.textContent = 'Connect';
     }
   }
 
@@ -325,27 +380,40 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
             panel.classList.add('show');
             showConnect(h);
           } else {
-            panel.classList.remove('show');
+            hidePanel();
           }
         })();
       } else {
-        panel.classList.remove('show');
+        hidePanel();
       }
       return;
     }
     if (!statusEl) return;
     if (s === 'connecting') setStatus('info', 'Connecting…');
     else if (s === 'reconnecting') setStatus('info', 'Reconnecting…');
-    else if (s === 'auth_failed')
+    else if (s === 'auth_failed') {
       setStatus('error', 'Authentication failed — wrong passphrase, or the key isn’t authorized.');
-    else if (s === 'host_key_mismatch')
+      settleAttempt();
+    } else if (s === 'host_key_mismatch') {
       setStatus(
         'error',
         '⚠ Host key CHANGED — refusing (possible attack). If expected, fix ~/.ssh/known_hosts.',
       );
-    else if (typeof s === 'object' && 'host_key_unknown' in s)
+      settleAttempt();
+    } else if (typeof s === 'object' && 'host_key_unknown' in s) {
       trustPrompt(s.host_key_unknown.fingerprint);
-    else if (typeof s === 'object' && 'error' in s) setStatus('error', s.error);
+      settleAttempt();
+    } else if (typeof s === 'object' && 'error' in s) {
+      setStatus('error', s.error);
+      settleAttempt();
+    }
+  }
+
+  /// A terminal (non-retrying) status arrived: this attempt is over — the
+  /// Connect button becomes usable again for the next try.
+  function settleAttempt() {
+    attempt = null;
+    if (connectBtn) connectBtn.textContent = 'Connect';
   }
 
   void listen<StatusEvent>('mymux:status', (ev) => onStatus(ev.payload));

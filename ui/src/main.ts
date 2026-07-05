@@ -320,6 +320,9 @@ function switchTo(id: string) {
   renderAgents();
   updateMeta();
   setStatus(w.state());
+  // Keyboard follows the switch (a chip click would otherwise leave focus on
+  // the chip button; a fresh host's panes focus on their first state).
+  w.refocusActive();
 }
 
 // Hosts open right now, persisted so the next launch can offer to restore

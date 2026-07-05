@@ -768,6 +768,11 @@ body {
   margin-right: 6px;
   font-size: 10px;
 }
+.host-trying {
+  color: #d6a04c;
+  margin-right: 6px;
+  font-size: 10px;
+}
 .host-reopen {
   color: #2f81f7;
   margin-left: 6px;
