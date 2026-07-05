@@ -68,8 +68,22 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   // their workspaces live their own lives.
   let attempt: { host: Host; passphrase: string; port: number | null } | null = null;
   let statusEl: HTMLElement | null = null;
-  // On first open, jump straight to last time's host (one keystroke to be back in).
-  let bootedToLast = false;
+  // Hosts open at the end of the last session, not yet reconnected: at boot
+  // we guide through them one passphrase at a time ("restore the session").
+  // Backing store is maintained by the shell (mymux.openHosts).
+  let restoreQueue: string[] = [];
+  let booted = false;
+
+  const openHostIds = (): string[] => {
+    try {
+      const v = JSON.parse(localStorage.getItem('mymux.openHosts') ?? 'null');
+      if (Array.isArray(v)) return v.filter((x): x is string => typeof x === 'string');
+    } catch {
+      /* fall through */
+    }
+    const last = localStorage.getItem('mymux.lastHost'); // legacy, pre-multi
+    return last ? [last] : [];
+  };
 
   const el = (tag: string, cls?: string, text?: string): HTMLElement => {
     const e = document.createElement(tag);
@@ -126,11 +140,13 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     root.appendChild(pref);
     panel.replaceChildren(root);
 
-    if (!bootedToLast) {
-      bootedToLast = true;
-      const last = localStorage.getItem('mymux.lastHost');
-      const h = last ? store.hosts.find((x) => x.id === last) : undefined;
-      if (h && !conns.has(h.id)) showConnect(h);
+    if (!booted) {
+      booted = true;
+      restoreQueue = openHostIds().filter(
+        (id) => !conns.has(id) && store.hosts.some((x) => x.id === id),
+      );
+      const h = store.hosts.find((x) => x.id === restoreQueue[0]);
+      if (h) showConnect(h);
     }
   }
 
@@ -140,6 +156,11 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     const labelRow = el('div', 'host-card-label');
     if (conn) labelRow.appendChild(el('span', 'host-live', '●'));
     labelRow.appendChild(document.createTextNode(h.label || h.hostname));
+    if (!conn && restoreQueue.includes(h.id)) {
+      const re = el('span', 'host-reopen', '↻');
+      re.title = 'open last session — reconnect';
+      labelRow.appendChild(re);
+    }
     main.appendChild(labelRow);
     main.appendChild(el('div', 'host-card-sub', `${h.user}@${h.hostname}:${h.port}`));
     card.appendChild(main);
@@ -186,7 +207,10 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   function showConnect(h: Host) {
     const root = el('div', 'host-inner');
     const back = el('button', 'host-back', '← hosts');
-    back.onclick = () => showList();
+    back.onclick = () => {
+      restoreQueue = []; // user bailed out of the restore guide
+      showList();
+    };
     root.append(
       back,
       el('div', 'host-title', h.label || h.hostname),
@@ -283,12 +307,30 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     if (s === 'connected') {
       const a = attempt;
       attempt = null;
-      panel.classList.remove('show');
       hooks.onConnected({
         id: a.host.id,
         label: a.host.label || a.host.hostname,
         port: a.port ?? 8088,
       });
+      restoreQueue = restoreQueue.filter((id) => id !== a.host.id);
+      if (restoreQueue.length) {
+        // Chain the restore: guide straight into the next host's passphrase.
+        void (async () => {
+          const [store, conns] = await Promise.all([loadHosts(), loadConns()]);
+          restoreQueue = restoreQueue.filter(
+            (id) => !conns.has(id) && store.hosts.some((x) => x.id === id),
+          );
+          const h = store.hosts.find((x) => x.id === restoreQueue[0]);
+          if (h) {
+            panel.classList.add('show');
+            showConnect(h);
+          } else {
+            panel.classList.remove('show');
+          }
+        })();
+      } else {
+        panel.classList.remove('show');
+      }
       return;
     }
     if (!statusEl) return;

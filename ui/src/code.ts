@@ -7,7 +7,7 @@ import { javascript } from '@codemirror/lang-javascript';
 import { python } from '@codemirror/lang-python';
 import { json } from '@codemirror/lang-json';
 import { markdown } from '@codemirror/lang-markdown';
-import { lspExtensionFor } from './lsp';
+import { lspExtensionFor, notifySaved } from './lsp';
 
 // Resolved per call so the panel follows the active workspace's daemon.
 let apiBase = () => 'http://127.0.0.1:8088';
@@ -102,11 +102,20 @@ export interface CodePanel {
 // One code view per pane. The tree, the changes list and the editor are all
 // rooted at the same pane cwd, so they live together in a Session rather than
 // as separate loose variables that have to be reset in lockstep by hand.
+//
+// Every opened file gets its own Buffer (doc + undo history + selection) that
+// is NEVER discarded by opening another file — so there is no "discard your
+// edits?" prompt anywhere (window.confirm is broken in the Tauri webview, and
+// the prompt was bad UX anyway). Dirty buffers only die via their chip's ✕.
+interface Buffer {
+  savedDoc: string; // last saved contents (dirty = editor doc differs)
+  state: EditorState; // doc + history + selection
+  dirty: boolean; // cached for background buffers; live one uses isDirty()
+}
 interface Session {
   pane: number | null;
-  path: string | null; // file open in the editor, or null
-  savedDoc: string; // last saved contents (dirty = editor doc differs)
-  state: EditorState | null; // editor doc + history, preserved across pane switches
+  path: string | null; // buffer currently in the editor, or null
+  buffers: Map<string, Buffer>;
 }
 
 export interface CodePanelOpts {
@@ -132,6 +141,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     </div>
     <div class="code-main">
       <div class="code-hd"><span id="code-path">no file open</span><span id="code-hint">⌘P open · ⌘S save · esc / ⌘E close</span></div>
+      <div class="code-bufs" id="code-bufs"></div>
       <div class="code-editor" id="code-editor"></div>
       <div class="code-diff" id="code-diff"></div>
       <div class="code-ph" id="code-ph"></div>
@@ -141,6 +151,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   const treeEl = panel.querySelector('#code-tree') as HTMLElement;
   const changesEl = panel.querySelector('#code-changes') as HTMLElement;
   const pathEl = panel.querySelector('#code-path') as HTMLElement;
+  const bufsEl = panel.querySelector('#code-bufs') as HTMLElement;
   const editorParent = panel.querySelector('#code-editor') as HTMLElement;
   const diffEl = panel.querySelector('#code-diff') as HTMLElement;
   const phEl = panel.querySelector('#code-ph') as HTMLElement;
@@ -156,31 +167,95 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     const k = keyOf(p);
     let s = sessions.get(k);
     if (!s) {
-      s = { pane: p, path: null, savedDoc: '', state: null };
+      s = { pane: p, path: null, buffers: new Map() };
       sessions.set(k, s);
     }
     return s;
   }
 
+  const curBuf = () => (current?.path ? current.buffers.get(current.path) : undefined);
+
   // Derived, never stored — the single source of "unsaved?" truth.
-  const isDirty = () =>
-    !!(current?.path && editor && editor.state.doc.toString() !== current.savedDoc);
+  const isDirty = () => {
+    const b = curBuf();
+    return !!(b && editor && editor.state.doc.toString() !== b.savedDoc);
+  };
+
+  // Snapshot the visible editor back into its buffer (edits + undo history).
+  function stash() {
+    const b = curBuf();
+    if (b && editor) {
+      b.state = editor.state;
+      b.dirty = editor.state.doc.toString() !== b.savedDoc;
+    }
+  }
 
   function renderHeader() {
     if (!current?.path) {
       pathEl.textContent = 'no file open';
       pathEl.style.color = '';
+      renderBufs();
       return;
     }
     const d = isDirty();
     pathEl.textContent = (d ? '● ' : '') + current.path;
     pathEl.style.color = d ? '#d6a04c' : '';
+    renderBufs();
   }
 
-  // Opening a different file is the only place edits are actually discarded;
-  // closing the panel and switching panes both preserve the session.
-  const confirmDiscard = () =>
-    !isDirty() || window.confirm(`Discard unsaved changes to ${current!.path}?`);
+  // Open-buffer chips: click to switch, ✕ to close. A dirty buffer's ✕ needs
+  // a second click within 1.6s (mouse-only confirm, per house rules).
+  function renderBufs() {
+    const s = current;
+    if (!s || s.buffers.size === 0) {
+      bufsEl.style.display = 'none';
+      return;
+    }
+    bufsEl.style.display = 'flex';
+    bufsEl.replaceChildren();
+    for (const [path, buf] of s.buffers) {
+      const active = path === s.path;
+      const dirty = active ? isDirty() : buf.dirty;
+      const chip = document.createElement('span');
+      chip.className = 'bufchip' + (active ? ' active' : '') + (dirty ? ' dirty' : '');
+      chip.textContent = (dirty ? '● ' : '') + path.slice(path.lastIndexOf('/') + 1);
+      chip.title = path;
+      chip.addEventListener('click', () => void openFile(path));
+      const x = document.createElement('span');
+      x.className = 'bufx';
+      x.textContent = '✕';
+      x.title = dirty ? 'unsaved — click twice to discard' : 'close';
+      x.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeBuffer(path, chip);
+      });
+      chip.appendChild(x);
+      bufsEl.appendChild(chip);
+    }
+  }
+
+  function closeBuffer(path: string, chip: HTMLElement) {
+    const s = current;
+    if (!s) return;
+    const buf = s.buffers.get(path);
+    const dirty = path === s.path ? isDirty() : !!buf?.dirty;
+    if (dirty && !chip.classList.contains('confirm')) {
+      chip.classList.add('confirm');
+      setTimeout(() => chip.classList.remove('confirm'), 1600);
+      return;
+    }
+    s.buffers.delete(path);
+    if (s.path === path) {
+      s.path = null;
+      const rest = [...s.buffers.keys()];
+      if (rest.length) {
+        void openFile(rest[rest.length - 1]);
+        return;
+      }
+      mount(emptyState());
+    }
+    renderHeader();
+  }
 
   // Placeholder shown when a pane has no file open — read-only so it can't be
   // mistaken for an editable buffer.
@@ -247,12 +322,20 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   async function save() {
     if (!editor || !current?.path) return;
     const s = current;
+    const b = curBuf();
+    if (!b) return;
     const doc = editor.state.doc.toString();
     const ok = await fsWrite(s.pane, s.path!, doc);
     if (ok) {
-      s.savedDoc = doc;
+      b.savedDoc = doc;
+      b.dirty = false;
+      b.state = editor.state;
+      // The disk now matches the buffer: let the language server know
+      // (rust-analyzer runs cargo check off didSave → compiler-tier errors).
+      notifySaved(editor);
       const p = s.path;
       pathEl.textContent = `${p}   ✓ saved`;
+      renderBufs();
       setTimeout(() => {
         if (current === s && current.path === p) renderHeader();
       }, 1200);
@@ -264,25 +347,44 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   async function openFile(path: string) {
     if (!current) return;
     const s = current;
+    const existing = s.buffers.get(path);
+    // A dirty buffer restores as-is — edits and undo history intact, no disk
+    // read (the user's changes outrank whatever is on disk right now).
+    if (existing && (existing.dirty || (s.path === path && isDirty()))) {
+      if (s.path === path) return; // already showing it
+      stash();
+      s.path = path;
+      mount(existing.state);
+      renderHeader();
+      editor!.focus();
+      return;
+    }
+    // Clean (or new) buffers read the disk so agent-made edits show up.
     let content: string;
     try {
       content = await fsRead(s.pane, path);
     } catch (e) {
       if (current !== s) return;
+      s.buffers.delete(path); // a stale clean buffer of an unreadable file
       showPlaceholder(path, (e as { status?: number }).status);
+      renderBufs();
       return;
     }
     if (current !== s) return; // switched panes mid-read
-    // Only now can opening actually discard edits — an unreadable file never
-    // should have prompted (nor clobbered the buffer).
-    if (!confirmDiscard()) return;
-    // Language smarts when available (rust for now); absent/failed → plain editor.
-    const lsp = await lspExtensionFor(apiBase(), s.pane, path);
-    if (current !== s) return;
-    s.path = path;
-    s.savedDoc = content;
-    s.state = fileState(path, content, lsp);
-    mount(s.state);
+    stash();
+    if (existing && content === existing.savedDoc) {
+      // Disk unchanged: restore the old state (keeps undo history).
+      s.path = path;
+      mount(existing.state);
+    } else {
+      // Language smarts when available (rust for now); absent/failed → plain editor.
+      const lsp = await lspExtensionFor(apiBase(), s.pane, path);
+      if (current !== s) return;
+      s.path = path;
+      const state = fileState(path, content, lsp);
+      s.buffers.set(path, { savedDoc: content, state, dirty: false });
+      mount(state);
+    }
     renderHeader();
     editor!.focus();
   }
@@ -390,9 +492,9 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   // restore (or create) the incoming one. This is the only place "which pane"
   // changes, so there is nothing to reset by hand elsewhere.
   function showSession(p: number | null) {
-    if (current && editor) current.state = editor.state; // snapshot outgoing edits
+    stash(); // snapshot outgoing edits into their buffer
     current = sessionFor(p);
-    mount(current.state ?? emptyState());
+    mount(curBuf()?.state ?? emptyState());
     renderHeader();
     void loadTree();
     void loadChanges();

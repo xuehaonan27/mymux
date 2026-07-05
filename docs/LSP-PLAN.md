@@ -86,12 +86,25 @@ still zero extensions, and lose our CodeMirror investment. No.
   syntactically fine) pulls 0 items even after 200s. Fix belongs to the
   adaptation batch: send didSave on ⌘S + scheduled post-save re-pulls; proper
   refresh handling needs forking the lib — or the self-built client.
+- **Tier 2 WIRED (2026-07-03), and the channel model turned out simpler than
+  feared.** Verified end-to-end against real rust-analyzer through our bridge:
+  flycheck results arrive as plain `publishDiagnostics` PUSHES (not through the
+  pull results), and the library's built-in `serverDiagnostics()` handler —
+  included in `languageServerExtensions()` all along — renders them. The ONLY
+  missing link was the trigger: without `didSave`, rust-analyzer runs flycheck
+  exactly once when the workspace opens, so errors edited in afterwards never
+  appear (this precisely explains the original "asdf never shows" report). Fix
+  = `notifySaved()` in the seam: ⌘S write → `textDocument/didSave` (standard
+  protocol, survives any client swap) + a ~15s post-save re-pull burst as a
+  native-tier refresh fallback (refresh requests remain unreceivable). Measured:
+  E0425 pushed 2s after save on a small crate.
 - **Absorption principle (user, 2026-07-03): every seam compensation is design
   input for the self-built client, to be absorbed — not ported.** The list so
   far: the pull-diagnostics plugin (lib advertises pull, implements none), the
   30s timeout override, `find_server`'s PATH heuristic (→ C3 managed installs),
-  didSave/flycheck wiring (pending), server→client request handling (refresh —
-  impossible through the lib today). A self-built LSP client owns all of these
+  the post-save re-pull burst (a self-built client would honor
+  `workspace/diagnostic/refresh` instead), server→client request handling
+  (impossible through the lib today). A self-built LSP client owns all of these
   natively instead of patching around someone else's defaults.
 - The client library **advertises** LSP 3.17 pull diagnostics
   (`textDocument.diagnostic` in its default capabilities) **but implements no

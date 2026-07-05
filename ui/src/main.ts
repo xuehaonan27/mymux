@@ -234,9 +234,16 @@ function switchTo(id: string) {
   setStatus(w.state());
 }
 
+// Hosts open right now, persisted so the next launch can offer to restore
+// the whole set (the host manager guides through their passphrases).
+function saveOpenHosts() {
+  localStorage.setItem('mymux.openHosts', JSON.stringify([...workspaces.keys()]));
+}
+
 // A workspace is over (its session ended, or the user disconnected the host).
 function endWorkspace(w: Workspace, disconnectTunnel: boolean) {
   workspaces.delete(w.id);
+  saveOpenHosts();
   attentionQueue = attentionQueue.filter((e) => e.hostId !== w.id);
   w.destroy();
   if (disconnectTunnel && isTauri) {
@@ -396,6 +403,8 @@ function renderHosts() {
     chip.appendChild(document.createTextNode(w.label));
     chip.addEventListener('click', () => switchTo(w.id));
     hostsEl.appendChild(chip);
+    // Many hosts overflow into a horizontal scroll — keep the active one visible.
+    if (w === activeWs) chip.scrollIntoView({ inline: 'nearest', block: 'nearest' });
   }
 }
 
@@ -663,9 +672,9 @@ document.addEventListener(
 if (isTauri) {
   hostManager = initHostManager({
     onConnected(host) {
-      localStorage.setItem('mymux.lastHost', host.id);
       ensureWorkspace(host.id, host.label, host.port);
       switchTo(host.id);
+      saveOpenHosts();
     },
     onDisconnected(hostId) {
       const w = workspaces.get(hostId);

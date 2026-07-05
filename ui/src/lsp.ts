@@ -49,10 +49,19 @@ function wsTransport(url: string, onDown: () => void): Transport {
 const langOf = (path: string) => (path.endsWith('.rs') ? 'rust' : null);
 
 // The library ADVERTISES LSP 3.17 pull diagnostics (`textDocument.diagnostic`
-// in its default capabilities) but implements no puller — so servers like
-// rust-analyzer stop pushing `publishDiagnostics` and nothing ever renders.
-// This plugin closes the gap: pull on open, debounced on edits, with a gentle
-// warm-up retry while the server is still indexing.
+// in its default capabilities) but implements no puller — so rust-analyzer's
+// NATIVE tier (syntax etc.) stops being pushed and needs this plugin to pull:
+// on open, debounced on edits, with a warm-up retry while indexing.
+//
+// The COMPILER tier (cargo check) is separate: it runs on didSave and its
+// results arrive as `publishDiagnostics` pushes, which the library's built-in
+// serverDiagnostics() handler renders — verified end-to-end. `saved()` below
+// is the trigger that was missing (without didSave, flycheck only ever ran
+// once at open, so errors edited in later never appeared). The post-save
+// re-pull is a small fallback for native-tier refreshes after a save (the
+// server's `workspace/diagnostic/refresh` request would tell us when, but the
+// lib rejects all server→client requests — seam compensation, absorbed into
+// the self-built client's design).
 interface PullResult {
   kind: 'full' | 'unchanged';
   items?: Array<{
@@ -62,38 +71,56 @@ interface PullResult {
   }>;
 }
 
-function pullDiagnostics(): Extension {
-  return ViewPlugin.fromClass(
-    class {
-      private timer: number | undefined;
-      private gen = 0;
-      private warmupLeft = 20; // ~60s of 3s retries while indexing / empty
+const pullPlugin = ViewPlugin.fromClass(
+  class {
+    private timer: number | undefined;
+    private gen = 0;
+    private warmupLeft = 20; // ~60s of 3s retries while indexing / empty
+    private postSaveLeft = 0;
 
-      constructor(private readonly view: EditorView) {
-        this.schedule(300);
+    constructor(private readonly view: EditorView) {
+      this.schedule(300);
+    }
+
+    update(u: ViewUpdate) {
+      if (u.docChanged) this.schedule(500);
+    }
+
+    /** The file was saved: tell the server (standard `textDocument/didSave`,
+     * which triggers rust-analyzer's cargo check), then re-pull while the
+     * check runs so compiler-tier errors appear without further typing. */
+    saved() {
+      const plugin = LSPPlugin.get(this.view);
+      if (!plugin) return;
+      try {
+        plugin.client.notification('textDocument/didSave', {
+          textDocument: { uri: plugin.uri },
+        });
+      } catch {
+        return;
       }
+      this.postSaveLeft = 6; // ~15s of re-pulls, plenty for cargo check
+      this.schedule(1500);
+    }
 
-      update(u: ViewUpdate) {
-        if (u.docChanged) this.schedule(500);
-      }
+    private schedule(ms: number) {
+      window.clearTimeout(this.timer);
+      this.timer = window.setTimeout(() => void this.pull(), ms);
+    }
 
-      private schedule(ms: number) {
-        window.clearTimeout(this.timer);
-        this.timer = window.setTimeout(() => void this.pull(), ms);
-      }
-
-      private async pull() {
-        const plugin = LSPPlugin.get(this.view);
-        if (!plugin) return;
-        const gen = ++this.gen;
-        try {
-          await plugin.client.initializing;
-          plugin.client.sync();
-          const res = await plugin.client.request<{ textDocument: { uri: string } }, PullResult>(
-            'textDocument/diagnostic',
-            { textDocument: { uri: plugin.uri } },
-          );
-          if (gen !== this.gen || res.kind === 'unchanged') return;
+    private async pull() {
+      const plugin = LSPPlugin.get(this.view);
+      if (!plugin) return;
+      const gen = ++this.gen;
+      try {
+        await plugin.client.initializing;
+        plugin.client.sync();
+        const res = await plugin.client.request<{ textDocument: { uri: string } }, PullResult>(
+          'textDocument/diagnostic',
+          { textDocument: { uri: plugin.uri } },
+        );
+        if (gen !== this.gen) return;
+        if (res.kind !== 'unchanged') {
           const items = res.items ?? [];
           const sev = (n?: number): Diagnostic['severity'] =>
             n === 1 ? 'error' : n === 2 ? 'warning' : n === 4 ? 'hint' : 'info';
@@ -104,28 +131,43 @@ function pullDiagnostics(): Extension {
             message: d.message,
           }));
           this.view.dispatch(setDiagnostics(this.view.state, diags));
-          if (items.length === 0 && this.warmupLeft > 0) {
-            // Possibly still indexing — an empty answer now isn't final.
-            this.warmupLeft -= 1;
-            this.schedule(3000);
-          } else {
-            this.warmupLeft = 0;
-          }
-        } catch {
-          if (gen !== this.gen) return;
-          if (this.warmupLeft > 0) {
-            this.warmupLeft -= 1;
-            this.schedule(3000);
-          }
+          if (items.length > 0) this.warmupLeft = 0;
+        }
+        if (this.postSaveLeft > 0) {
+          this.postSaveLeft -= 1;
+          this.schedule(2500);
+        } else if (this.warmupLeft > 0) {
+          // Possibly still indexing — an empty answer now isn't final.
+          this.warmupLeft -= 1;
+          this.schedule(3000);
+        }
+      } catch {
+        if (gen !== this.gen) return;
+        if (this.postSaveLeft > 0) {
+          this.postSaveLeft -= 1;
+          this.schedule(2500);
+        } else if (this.warmupLeft > 0) {
+          this.warmupLeft -= 1;
+          this.schedule(3000);
         }
       }
+    }
 
-      destroy() {
-        this.gen += 1;
-        window.clearTimeout(this.timer);
-      }
-    },
-  );
+    destroy() {
+      this.gen += 1;
+      window.clearTimeout(this.timer);
+    }
+  },
+);
+
+function pullDiagnostics(): Extension {
+  return pullPlugin;
+}
+
+/** Hook for the editor's save path: forwards `didSave` to the language server
+ * and kicks the post-save diagnostic re-pull. No-op without LSP. */
+export function notifySaved(view: EditorView) {
+  view.plugin(pullPlugin)?.saved();
 }
 
 /**

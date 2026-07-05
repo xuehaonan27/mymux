@@ -31,17 +31,40 @@ async fn main() {
         tokio::spawn(async move { hub.persist.warmup(&hub).await });
     }
 
-    // The code panel fetches /fs and /git cross-origin. Restrict to the known UI
-    // origins (not `*`) so a random website can't read your files via localhost.
-    let allowed_origins: Vec<HeaderValue> = [
+    // Browser-origin hardening. CORS only stops cross-origin PAGES from
+    // reading responses — it does not stop the requests themselves, and
+    // WebSockets have no CORS at all: any web page could otherwise open
+    // ws://127.0.0.1:8088/ws and type into your terminals. So: requests that
+    // carry an Origin header (i.e. come from a browser) must match the known
+    // UI origins; requests without one (local tools, tests) pass — a same-uid
+    // local process is outside this threat model anyway.
+    const UI_ORIGINS: [&str; 4] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "tauri://localhost",
         "http://tauri.localhost",
-    ]
-    .iter()
-    .filter_map(|o| o.parse().ok())
-    .collect();
+    ];
+    async fn origin_guard(
+        req: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        if let Some(origin) = req.headers().get(axum::http::header::ORIGIN) {
+            let ok = origin
+                .to_str()
+                .map(|o| UI_ORIGINS.contains(&o))
+                .unwrap_or(false);
+            if !ok {
+                return axum::http::StatusCode::FORBIDDEN.into_response();
+            }
+        }
+        next.run(req).await
+    }
+
+    // The code panel fetches /fs and /git cross-origin. Restrict to the known UI
+    // origins (not `*`) so a random website can't read your files via localhost.
+    let allowed_origins: Vec<HeaderValue> =
+        UI_ORIGINS.iter().filter_map(|o| o.parse().ok()).collect();
     let cors = CorsLayer::new()
         .allow_origin(allowed_origins)
         .allow_methods(Any)
@@ -61,6 +84,7 @@ async fn main() {
         .route("/proc/tree", get(proc::tree))
         .route("/proc/kill", post(proc::kill))
         .with_state(hub)
+        .layer(axum::middleware::from_fn(origin_guard))
         .layer(cors);
 
     // Bind address is overridable via MYMUX_ADDR so a test/second instance can

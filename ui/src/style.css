@@ -688,6 +688,13 @@ body {
   padding: 5px 12px;
   background: #0d1119;
   border-bottom: 1px solid #1e2430;
+  /* Many hosts: scroll horizontally instead of wrapping/overflowing. */
+  overflow-x: auto;
+  scrollbar-width: thin;
+  white-space: nowrap;
+}
+.hostchip {
+  flex-shrink: 0;
 }
 .hostchip {
   display: inline-flex;
@@ -713,6 +720,11 @@ body {
   color: #3fb950;
   margin-right: 6px;
   font-size: 10px;
+}
+.host-reopen {
+  color: #2f81f7;
+  margin-left: 6px;
+  font-size: 11px;
 }
 .host-btn.small {
   padding: 4px 10px;
@@ -742,6 +754,49 @@ body {
   color: #5c6773;
   font-size: 12px;
   max-width: 48ch;
+}
+
+/* Open-buffer chips under the code header (shown when any buffer exists). */
+.code-bufs {
+  display: none;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 4px 12px;
+  border-bottom: 1px solid #1e2430;
+  font: 11px ui-monospace, Menlo, monospace;
+}
+.bufchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 7px;
+  border: 1px solid #232a38;
+  border-radius: 4px;
+  background: #11151d;
+  color: #9aa5b1;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.bufchip:hover {
+  color: #c5cdd9;
+}
+.bufchip.active {
+  border-color: #2f81f7;
+  color: #e6edf3;
+}
+.bufchip.dirty {
+  color: #d6a04c;
+}
+.bufchip.confirm {
+  border-color: #f85149;
+  color: #f85149;
+}
+.bufx {
+  color: #5c6773;
+  padding: 0 1px;
+}
+.bufx:hover {
+  color: #f85149;
 }
 
 /* Transient notice (attention queue "all clear", etc.). */

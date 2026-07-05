@@ -6,22 +6,34 @@ Deferred refinements — captured so we don't lose them. Not blocking.
 Deferred until the mainline (native engine, …) is mostly done; several items are
 really arguments for the self-built editor/LSP client (see LSP-PLAN's absorption
 principle):
-- Compiler-tier diagnostics: send `textDocument/didSave` on ⌘S + scheduled
-  post-save re-pulls (cargo check takes seconds); real `workspace/diagnostic/
-  refresh` handling needs a lib fork or the self-built client.
-- **Dirty-file lock**: with unsaved changes you can't open another file —
-  suspected root cause: `window.confirm()` is a no-op/falsy in the Tauri v2
-  webview, so the discard prompt can never be accepted. Verify; fix = async
-  in-panel confirm, or better: per-file buffers (multi-buffer lite).
-- Multi-file buffers + tabs in the code panel (editor architecture).
+- ~~Compiler-tier diagnostics~~ — **DONE 2026-07-03**: the ONLY missing link
+  was the `textDocument/didSave` trigger (standard LSP, sent by
+  `notifySaved()` after a successful ⌘S write). Channel model, verified
+  end-to-end against real rust-analyzer: NATIVE tier = pull (our
+  `pullDiagnostics()` seam plugin); COMPILER tier (cargo check) = runs on
+  didSave, results arrive as `publishDiagnostics` PUSHES which the library's
+  built-in `serverDiagnostics()` handler already renders. Without didSave,
+  flycheck ran exactly once at open — which is why edited-in errors never
+  appeared. A small post-save re-pull burst covers native-tier refreshes
+  (the server's `workspace/diagnostic/refresh` is still unreceivable —
+  absorbed into the self-built client's design).
+- ~~**Dirty-file lock**~~ + ~~multi-file buffers + tabs~~ — **DONE 2026-07-03**
+  by sidestepping the prompt entirely: every opened file keeps its own Buffer
+  (doc + undo history + selection) in the per-pane session; opening another
+  file stashes the current one instead of discarding, dirty buffers restore
+  as-is, clean ones re-read the disk (agent edits show up; unchanged content
+  keeps its undo history). Buffer chips under the header switch/close files
+  (dirty ✕ = two-click confirm, mouse-only per house rules). `window.confirm`
+  is gone from the codebase — never verified in Tauri because nothing asks
+  anymore.
 - General editor ergonomics pass (user: "有点难用" — collect concrete complaints).
 
 ## Code panel (M4)
 - **Editor ergonomics pass** — the user finds the editor "有点难用" (2026-07-03,
   deferred by their call); collect concrete complaints and address as a batch.
-- Lazy-load CodeMirror (dynamic `import()` on first ⌘E) to shrink the initial bundle.
+- ~~Lazy-load CodeMirror~~ — DONE (QoL batch 2026-07-03; main bundle 365 KB).
 - Side-by-side (split) diff view, in addition to the unified one.
-- File-tree search / fuzzy open (⌘P).
+- ~~File-tree search / fuzzy open (⌘P)~~ — DONE (QoL batch 2026-07-03).
 - Navigate above the pane root; a root switcher (pane cwd / repo root / custom).
 - Configurable default root: pane cwd vs project/working dir (once agents expose their working dir).
 - Clean up the untracked-file diff header (currently shows an absolute path).
@@ -113,10 +125,16 @@ Native ∞ windows are the default; keep closing the gap to a great daily driver
   with output events; hooks already cover claude/codex).
 
 ## Multi-host — SHIPPED 2026-07-03; remaining polish
-- ~~Remember open hosts~~ → the manager now boots into last time's host
-  (passphrase prompt pre-opened); remembering the full multi-host set is still open.
+- ~~Remember open hosts~~ — **DONE 2026-07-03** (full-set restore):
+  `mymux.openHosts` tracks every connected host (updated on connect and on
+  workspace end); at boot the host manager guides through the whole set one
+  passphrase at a time (chained showConnect after each `connected`), cards
+  show a ↻ badge, "← hosts" bails out of the guide. Legacy `mymux.lastHost`
+  is read as a fallback.
 - ~~Per-host reconnect banners~~ → done (in-workspace banner when its WS drops).
-- Chip overflow behavior for many hosts (scroll / compact mode).
+- ~~Chip overflow behavior~~ — **DONE 2026-07-03**: the host bar scrolls
+  horizontally (thin scrollbar, chips don't shrink) and the active chip is
+  kept in view on switch.
 
 ## Attach to an existing tmux session — decided against (2026-07-03)
 mymuxd only drives its own socket + session (`tmux -L mymux … -s mymux`). Cleanly
@@ -136,5 +154,14 @@ tmux stays standalone.
 - Open: a proper persisted settings store + a real settings surface.
 
 ## Misc
-- Tighten the daemon's HTTP surface (per-session token in addition to the CORS allowlist).
+- ~~Tighten the daemon's HTTP surface~~ — **DONE 2026-07-03** via an Origin
+  guard, which fits the actual threat model better than a token: the daemon
+  binds 127.0.0.1 and same-uid local processes are out of scope (they could
+  attach ptyd directly), so the real hole was BROWSER pages — CORS never
+  stopped requests (only response reads), and WebSockets have no CORS at
+  all, letting any web page open /ws and type into terminals. Now every
+  request carrying an Origin header must match the UI allowlist (403
+  otherwise); no Origin = local tool = pass. Verified: evil-origin HTTP 403 +
+  WS rejected, allowlisted/absent Origin pass. A full per-session token adds
+  nothing within this model — dropped deliberately.
 - M2.2: unify the `cargo tauri dev` vs `npm install` working directories.
