@@ -99,6 +99,8 @@ pub struct Hub {
     /// Last whole-window size (cols, rows) the UI reported — the sizer for
     /// ephemeral panes, which tmux does not lay out.
     last_size: Mutex<(u16, u16)>,
+    /// One-shot guard for the first-connection default-shell bootstrap.
+    booted: std::sync::atomic::AtomicBool,
 }
 
 impl Hub {
@@ -118,6 +120,7 @@ impl Hub {
             natives: Mutex::new(NativeWindows::default()),
             active_view: Mutex::new(ActiveView::Tmux),
             last_size: Mutex::new((80, 24)),
+            booted: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -134,6 +137,50 @@ impl Hub {
     pub(crate) fn save_layout_blob(&self) {
         let blob = self.natives.lock().unwrap().to_blob();
         self.persist.set_meta(blob);
+    }
+
+    /// Whether the active tmux socket already has a live server (pre-existing
+    /// windows, possibly with agents — those must be adopted, never orphaned).
+    async fn tmux_server_alive() -> bool {
+        Command::new("tmux")
+            .args(["-L", socket(), "has-session"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// First-connection bootstrap: NATIVE is the default experience. A
+    /// running tmux server is adopted (its windows may hold agents), but tmux
+    /// is never STARTED here — that happens on demand via `new_window`
+    /// (⌘K w). With nothing to show, open a persistent shell as the first
+    /// window. `MYMUX_DEFAULT_VIEW=none` disables the auto-shell (tests).
+    pub async fn ensure_default_view(self: &Arc<Self>) {
+        if !self.state.lock().unwrap().running && Self::tmux_server_alive().await {
+            self.ensure_started();
+            return;
+        }
+        if std::env::var_os("MYMUX_DEFAULT_VIEW").is_some_and(|v| v == "none") {
+            return;
+        }
+        // Adopt ptyd survivors before deciding "empty" (idempotent; the
+        // startup warmup may still be in flight on the very first connect).
+        self.persist.warmup(self).await;
+        let have_native = !self.natives.lock().unwrap().tabs().is_empty();
+        if have_native || self.state.lock().unwrap().running {
+            return;
+        }
+        if self.booted.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return; // another connection is bootstrapping right now
+        }
+        self.new_persistent(None).await;
+        if self.natives.lock().unwrap().tabs().is_empty() {
+            // Spawn failed (ptyd unreachable?) — let a later connect retry.
+            self.booted
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     /// Spawn the `tmux -C` control client if it isn't running. Called on every
@@ -198,12 +245,28 @@ impl Hub {
                 state.running = false;
                 state.cmd_tx = None;
             }
-            // The tmux session is over (e.g. the last pane exited). Deliberately
-            // no respawn: ending the session means "done with this host" — the
-            // UIs are told and return to their host picker (or reconnect, in the
-            // browser). The next WebSocket connection starts a fresh session via
-            // ensure_started.
-            hub.emit(ServerEvent::State(r#"{"t":"session_end"}"#.to_string()));
+            // The tmux session is over (e.g. the last pane exited). No respawn.
+            // With native windows still alive, tmux ending is just one engine
+            // bowing out: switch the view there and carry on. Only when
+            // NOTHING remains does the session end for real (UIs return to
+            // their host picker / reconnect).
+            let first_native = hub.natives.lock().unwrap().tabs().first().map(|t| t.0);
+            match first_native {
+                Some(id) => {
+                    {
+                        let mut view = hub.active_view.lock().unwrap();
+                        if matches!(*view, ActiveView::Tmux) {
+                            *view = ActiveView::Native(id);
+                        }
+                    }
+                    *hub.model.lock().unwrap() = Model::new(); // tmux windows are gone
+                    hub.emit(ServerEvent::State(hub.state_json()));
+                    hub.reseed_visible().await;
+                }
+                None => {
+                    hub.emit(ServerEvent::State(r#"{"t":"session_end"}"#.to_string()));
+                }
+            }
         });
     }
 
@@ -462,7 +525,10 @@ impl Hub {
         }
     }
 
-    pub async fn new_window(&self, cwd: Option<String>) {
+    pub async fn new_window(self: &Arc<Self>, cwd: Option<String>) {
+        // tmux is opt-in now: the first ⌘K w boots the control client (and
+        // with it the server) on demand — commands queue until it's up.
+        self.ensure_started();
         // Open in the requested directory, else the active pane's (never the
         // tmux server's start dir).
         match cwd.as_deref().and_then(canon_dir) {
@@ -1035,25 +1101,27 @@ impl Hub {
             ])
             .output()
             .await;
-        let Ok(o) = out else { return Vec::new() };
-        if !o.status.success() {
-            return Vec::new();
-        }
-        let text = String::from_utf8_lossy(&o.stdout);
         let mut rows = Vec::new();
-        for line in text.lines() {
-            // "@0 %1 12345 window name" — window_name may contain spaces (last field).
-            let mut it = line.splitn(4, ' ');
-            let (Some(w), Some(p), Some(pid)) = (it.next(), it.next(), it.next()) else {
-                continue;
-            };
-            let name = it.next().unwrap_or("").to_string();
-            let (Some(wid), Some(pane), Ok(pid)) =
-                (WindowId::parse(w), PaneId::parse(p), pid.parse::<u32>())
-            else {
-                continue;
-            };
-            rows.push((wid.0, pane.0, pid, name, false));
+        // tmux may simply not be running (native is the default now) — its
+        // absence must not hide the native panes below.
+        if let Ok(o) = out {
+            if o.status.success() {
+                let text = String::from_utf8_lossy(&o.stdout);
+                for line in text.lines() {
+                    // "@0 %1 12345 window name" — window_name may contain spaces (last field).
+                    let mut it = line.splitn(4, ' ');
+                    let (Some(w), Some(p), Some(pid)) = (it.next(), it.next(), it.next()) else {
+                        continue;
+                    };
+                    let name = it.next().unwrap_or("").to_string();
+                    let (Some(wid), Some(pane), Ok(pid)) =
+                        (WindowId::parse(w), PaneId::parse(p), pid.parse::<u32>())
+                    else {
+                        continue;
+                    };
+                    rows.push((wid.0, pane.0, pid, name, false));
+                }
+            }
         }
         // Native (ptyd-held) shells, grouped under their layout windows.
         {

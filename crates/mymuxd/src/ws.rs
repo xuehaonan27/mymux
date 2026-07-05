@@ -88,7 +88,7 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(hub): State<Arc<Hub>>) -> Re
 
 async fn handle(socket: WebSocket, hub: Arc<Hub>) {
     let mut rx = hub.subscribe();
-    hub.ensure_started();
+    hub.ensure_default_view().await;
 
     let (mut sender, mut receiver) = socket.split();
 

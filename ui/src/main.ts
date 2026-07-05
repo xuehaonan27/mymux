@@ -198,10 +198,10 @@ helpEl.innerHTML = `<div class="help-card">
   <h2>mymux keys</h2>
   <table>
     <tr><th colspan="2">Windows</th></tr>
-    <tr><td>⌘T / +win / ⌘K c</td><td>new window (∞ persistent — survives restarts)</td></tr>
+    <tr><td>⌘T / +win / ⌘K c/s</td><td>new window (∞ persistent — the default; the app opens with one)</td></tr>
     <tr><td>⌘K ⇧C</td><td>new ∞ window in a chosen directory</td></tr>
-    <tr><td>⌘K s</td><td>new throwaway shell (⌁ — dies with the daemon)</td></tr>
-    <tr><td>⌘K w</td><td>new tmux window</td></tr>
+    <tr><td>⌘K ⇧S</td><td>new throwaway shell (⌁ — dies with the daemon)</td></tr>
+    <tr><td>⌘K w</td><td>new tmux window (starts tmux on demand)</td></tr>
     <tr><td>⌘K k</td><td>keep this shell: promote ⌁ → ∞</td></tr>
     <tr><td>⌘1–9, ⌘K n/p</td><td>switch window</td></tr>
     <tr><td>double-click tab</td><td>rename (✓ or click away = save, ✕ = cancel)</td></tr>
@@ -499,9 +499,6 @@ document.getElementById('btn-newwin')?.addEventListener('click', () =>
 );
 document.getElementById('btn-splith')?.addEventListener('click', () => active()?.splitActive('h'));
 document.getElementById('btn-splitv')?.addEventListener('click', () => active()?.splitActive('v'));
-document.getElementById('btn-eph')?.addEventListener('click', () =>
-  active()?.sendJson({ t: 'new_ephemeral' }),
-);
 
 // ---- overlays ------------------------------------------------------------------
 
@@ -577,7 +574,8 @@ function handleLeaderKey(e: KeyboardEvent) {
   if (lower === 'x') return w.closeActive();
   if (lower === 'a') return jumpToAttention();
   if (lower === 't') return toggleProc();
-  if (lower === 's') return w.sendJson({ t: e.shiftKey ? 'new_persistent' : 'new_ephemeral' });
+  // s = another persistent window (the default kind); ⇧S = the throwaway ⌁.
+  if (lower === 's') return w.sendJson({ t: e.shiftKey ? 'new_ephemeral' : 'new_persistent' });
   if (lower === 'd') return w.splitActive(e.shiftKey ? 'v' : 'h');
   if (k === '|' || k === '\\') return w.splitActive('h');
   if (k === '-') return w.splitActive('v');
