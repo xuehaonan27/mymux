@@ -595,6 +595,8 @@ impl Hub {
             for (pane, seed) in self.snapshot_visible().await {
                 self.emit(ServerEvent::Output { pane, data: seed });
             }
+            // Landing on this window means its finished work has been seen.
+            self.clear_done_on_focus();
             return;
         }
         // Leaving any ephemeral view; if tmux is already on this window it emits
@@ -728,6 +730,12 @@ impl Hub {
     /// A native pane is gone (killed or exited on its own): collapse its
     /// window's layout, resize the survivors, fix the view, repaint.
     async fn native_pane_removed(&self, pane: u32) {
+        // Drop any agent badge/heuristic state the dead pane left behind.
+        {
+            let mut agents = self.agents.lock().unwrap();
+            agents.entries.remove(&pane);
+            agents.heur.remove(&pane);
+        }
         // If the window was zoomed, panes are about to reappear — reseed then.
         let was_zoomed = {
             let nw = self.natives.lock().unwrap();
@@ -875,8 +883,11 @@ impl Hub {
         };
         let model = self.model.lock().unwrap();
         let agents = self.agents.lock().unwrap();
-        let view: BTreeMap<u32, AgentState> =
-            agents.entries.iter().map(|(&p, e)| (p, e.state)).collect();
+        let view: BTreeMap<u32, crate::state::AgentView> = agents
+            .entries
+            .iter()
+            .map(|(&p, e)| (p, (e.state, e.needy_since_ms)))
+            .collect();
         let mut order = self.tab_order.lock().unwrap();
         build_state_json(&model, &view, &tabs, active.as_ref(), &mut order)
     }
@@ -887,13 +898,10 @@ impl Hub {
             let mut agents = self.agents.lock().unwrap();
             match state {
                 Some(s) => {
-                    agents.entries.insert(
-                        pane,
-                        AgentEntry {
-                            state: s,
-                            source: Source::Hook,
-                        },
-                    );
+                    let prev = agents.entries.get(&pane).copied();
+                    agents
+                        .entries
+                        .insert(pane, AgentEntry::new(s, Source::Hook, prev.as_ref()));
                 }
                 None => {
                     agents.entries.remove(&pane);
@@ -904,7 +912,7 @@ impl Hub {
     }
 
     /// Fold a pane's output into the heuristic signals (alt-screen, activity, bell).
-    fn note_output(&self, pane: u32, data: &[u8]) {
+    pub(crate) fn note_output(&self, pane: u32, data: &[u8]) {
         let now = Instant::now();
         let alt_on = contains(data, b"\x1b[?1049h");
         let alt_off = contains(data, b"\x1b[?1049l");
@@ -929,8 +937,15 @@ impl Hub {
             }
             // Fresh output means the pane is active again, so a stale "done" badge
             // (e.g. from Codex's turn-complete notify) is wrong — clear it and let
-            // the hook / heuristic re-establish the live state.
-            cleared_done = agents.entries.get(&pane).map(|e| e.state) == Some(AgentState::Done);
+            // the hook / heuristic re-establish the live state. GRACE: agents
+            // flush trailing output right after their turn-complete hook fires;
+            // clearing on that would drop the badge before anyone saw it.
+            const DONE_GRACE: Duration = Duration::from_millis(1500);
+            cleared_done = agents
+                .entries
+                .get(&pane)
+                .map(|e| e.state == AgentState::Done && e.set_at.elapsed() > DONE_GRACE)
+                .unwrap_or(false);
             if cleared_done {
                 agents.entries.remove(&pane);
             }
@@ -982,13 +997,10 @@ impl Hub {
                 if agents.entries.get(&p).map(|e| e.state) != desired {
                     match desired {
                         Some(s) => {
-                            agents.entries.insert(
-                                p,
-                                AgentEntry {
-                                    state: s,
-                                    source: Source::Heuristic,
-                                },
-                            );
+                            let prev = agents.entries.get(&p).copied();
+                            agents
+                                .entries
+                                .insert(p, AgentEntry::new(s, Source::Heuristic, prev.as_ref()));
                         }
                         None => {
                             agents.entries.remove(&p);
@@ -1004,15 +1016,21 @@ impl Hub {
     }
 
     /// Clear "done" badges for the active window's panes — you've now seen them.
-    fn clear_done_on_focus(&self) {
-        let panes: Vec<u32> = self
-            .model
-            .lock()
-            .unwrap()
-            .active_window_panes()
-            .iter()
-            .map(|p| p.0)
-            .collect();
+    /// Clear "done" badges on the panes the user is now LOOKING at — seeing
+    /// the finished work is the acknowledgement. Covers both engines: the
+    /// active tmux window's panes, or the active native window's visible ones.
+    pub(crate) fn clear_done_on_focus(&self) {
+        let panes: Vec<u32> = match *self.active_view.lock().unwrap() {
+            ActiveView::Native(id) => self.natives.lock().unwrap().visible_panes_of(id),
+            ActiveView::Tmux => self
+                .model
+                .lock()
+                .unwrap()
+                .active_window_panes()
+                .iter()
+                .map(|p| p.0)
+                .collect(),
+        };
         let mut changed = false;
         {
             let mut agents = self.agents.lock().unwrap();

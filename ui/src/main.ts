@@ -72,14 +72,27 @@ function updateQueue(w: Workspace) {
   const needy = new Map(
     w.windowList
       .filter((x) => x.agent === 'waiting' || x.agent === 'done')
-      .map((x) => [x.id, x.agent_pane]),
+      .map((x) => [x.id, x]),
   );
   attentionQueue = attentionQueue.filter((e) => e.hostId !== w.id || needy.has(e.windowId));
-  for (const [winId, pane] of needy) {
+  for (const [winId, win] of needy) {
     const existing = attentionQueue.find((e) => e.hostId === w.id && e.windowId === winId);
-    if (existing) existing.paneId = pane; // keep position, refresh the target pane
-    else attentionQueue.push({ hostId: w.id, windowId: winId, paneId: pane, since: Date.now() });
+    if (existing) {
+      existing.paneId = win.agent_pane; // keep position, refresh the target pane
+      if (win.agent_since != null) existing.since = win.agent_since;
+    } else {
+      attentionQueue.push({
+        hostId: w.id,
+        windowId: winId,
+        paneId: win.agent_pane,
+        // The daemon's timestamp is authoritative: it survives UI reconnects
+        // and orders correctly when one state carries several new entries
+        // (an approval storm) or entries span hosts.
+        since: win.agent_since ?? Date.now(),
+      });
+    }
   }
+  attentionQueue.sort((a, b) => a.since - b.since);
 }
 
 // Jump to the oldest item that isn't the window you're already looking at.

@@ -36,6 +36,10 @@ struct WinMsg {
     /// The pane holding that agent state (attention jumps focus it directly).
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_pane: Option<u32>,
+    /// When the window first became attention-worthy (epoch ms) — the
+    /// attention queue's authoritative ordering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_since: Option<u64>,
     /// True for a mymuxd-native ephemeral (raw shell) tab.
     #[serde(skip_serializing_if = "is_false")]
     ephemeral: bool,
@@ -75,21 +79,25 @@ fn cell_to_msg(c: &LayoutCell) -> LayoutMsg {
     }
 }
 
+/// A pane's badge for aggregation: state + when it first became needy (epoch
+/// ms) — the authoritative attention-queue ordering.
+pub type AgentView = (AgentState, Option<u64>);
+
 /// Aggregate the most attention-worthy agent state among a window's panes, and
 /// which pane holds it — attention jumps focus that pane directly.
 fn window_agent(
     root: &LayoutCell,
-    agents: &BTreeMap<u32, AgentState>,
-) -> Option<(&'static str, u32)> {
-    let mut best: Option<(AgentState, u32)> = None;
+    agents: &BTreeMap<u32, AgentView>,
+) -> Option<(&'static str, u32, Option<u64>)> {
+    let mut best: Option<(AgentState, u32, Option<u64>)> = None;
     root.for_each_pane(&mut |pane, _| {
-        if let Some(&s) = agents.get(&pane.0) {
-            if best.map_or(true, |(b, _)| s.priority() > b.priority()) {
-                best = Some((s, pane.0));
+        if let Some(&(s, since)) = agents.get(&pane.0) {
+            if best.map_or(true, |(b, _, _)| s.priority() > b.priority()) {
+                best = Some((s, pane.0, since));
             }
         }
     });
-    best.map(|(s, p)| (s.as_str(), p))
+    best.map(|(s, p, since)| (s.as_str(), p, since))
 }
 
 /// A native (non-tmux) tab for the state snapshot: ephemeral tabs are always
@@ -115,16 +123,19 @@ pub struct ActiveNative {
 
 /// Aggregate the most attention-worthy agent state among a set of panes, and
 /// which pane holds it — attention jumps focus that pane directly.
-fn panes_agent(panes: &[u32], agents: &BTreeMap<u32, AgentState>) -> Option<(&'static str, u32)> {
-    let mut best: Option<(AgentState, u32)> = None;
+fn panes_agent(
+    panes: &[u32],
+    agents: &BTreeMap<u32, AgentView>,
+) -> Option<(&'static str, u32, Option<u64>)> {
+    let mut best: Option<(AgentState, u32, Option<u64>)> = None;
     for &pane in panes {
-        if let Some(&s) = agents.get(&pane) {
-            if best.map_or(true, |(b, _)| s.priority() > b.priority()) {
-                best = Some((s, pane));
+        if let Some(&(s, since)) = agents.get(&pane) {
+            if best.map_or(true, |(b, _, _)| s.priority() > b.priority()) {
+                best = Some((s, pane, since));
             }
         }
     }
-    best.map(|(s, p)| (s.as_str(), p))
+    best.map(|(s, p, since)| (s.as_str(), p, since))
 }
 
 /// Build the `{"t":"state",...}` snapshot: tmux windows plus any native tabs
@@ -134,7 +145,7 @@ fn panes_agent(panes: &[u32], agents: &BTreeMap<u32, AgentState>) -> Option<(&'s
 /// engine append to it, and the emitted list follows it.
 pub fn build_state_json(
     model: &Model,
-    agents: &BTreeMap<u32, AgentState>,
+    agents: &BTreeMap<u32, AgentView>,
     natives: &[NativeTab],
     active_native: Option<&ActiveNative>,
     tab_order: &mut Vec<u32>,
@@ -162,8 +173,9 @@ pub fn build_state_json(
                 id: id.0,
                 name: wi.name.clone().unwrap_or_default(),
                 active: active_native.is_none() && model.active_window == Some(*id),
-                agent: wa.map(|(s, _)| s),
-                agent_pane: wa.map(|(_, p)| p),
+                agent: wa.map(|(s, _, _)| s),
+                agent_pane: wa.map(|(_, p, _)| p),
+                agent_since: wa.and_then(|(_, _, since)| since),
                 ephemeral: false,
                 persistent: false,
             }
@@ -176,8 +188,9 @@ pub fn build_state_json(
             id: tab.id,
             name: tab.name.clone(),
             active: active_win == Some(tab.id),
-            agent: wa.map(|(s, _)| s),
-            agent_pane: wa.map(|(_, p)| p),
+            agent: wa.map(|(s, _, _)| s),
+            agent_pane: wa.map(|(_, p, _)| p),
+            agent_since: wa.and_then(|(_, _, since)| since),
             ephemeral: tab.ephemeral,
             persistent: !tab.ephemeral,
         });
@@ -250,8 +263,8 @@ mod tests {
         m.active_pane = Some(PaneId(1));
 
         let mut agents = BTreeMap::new();
-        agents.insert(1u32, AgentState::Running);
-        agents.insert(2u32, AgentState::Waiting); // higher priority than running
+        agents.insert(1u32, (AgentState::Running, None));
+        agents.insert(2u32, (AgentState::Waiting, Some(1000))); // higher priority than running
 
         let json = build_state_json(&m, &agents, &[], None, &mut Vec::new());
         assert!(json.contains(r#""agent":"waiting""#), "{json}");
@@ -264,7 +277,7 @@ mod tests {
         let mut agents = BTreeMap::new();
         let p1 = (1u32 << 30) | 1;
         let p2 = (1u32 << 30) | 2;
-        agents.insert(p2, AgentState::Waiting);
+        agents.insert(p2, (AgentState::Waiting, Some(2000)));
         let tab = NativeTab {
             id: p1,
             name: String::new(),

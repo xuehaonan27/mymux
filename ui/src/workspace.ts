@@ -23,6 +23,8 @@ export interface WinInfo {
   agent?: 'running' | 'waiting' | 'done';
   /** The pane holding the agent state — attention jumps focus it directly. */
   agent_pane?: number;
+  /** When the window first became attention-worthy (daemon epoch ms). */
+  agent_since?: number;
   ephemeral?: boolean;
   /** ptyd-held native tab: survives mymuxd restarts. */
   persistent?: boolean;

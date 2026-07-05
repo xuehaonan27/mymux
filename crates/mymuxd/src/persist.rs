@@ -285,6 +285,9 @@ async fn pump(hub: Arc<Hub>, mut events: mpsc::UnboundedReceiver<PtydEvent>) {
     while let Some(ev) = events.recv().await {
         match ev {
             PtydEvent::Output { id, data } => {
+                // Same as the tmux reader: feed the agent heuristics/stale-done
+                // logic so native panes behave identically.
+                hub.note_output(id, &data);
                 hub.emit(ServerEvent::Output { pane: id, data });
             }
             PtydEvent::Exit { id } => {

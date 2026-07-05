@@ -57,6 +57,41 @@ pub enum Source {
 pub struct AgentEntry {
     pub state: AgentState,
     pub source: Source,
+    /// When this state was set — output arriving within a short grace period
+    /// must not clear a fresh `Done` (agents often flush trailing output right
+    /// after their turn-complete hook fires).
+    pub set_at: std::time::Instant,
+    /// When the pane FIRST became attention-worthy (waiting|done), epoch ms —
+    /// the authoritative ordering for the UI's attention queue (survives UI
+    /// reconnects and state coalescing; inherited across needy→needy flips).
+    pub needy_since_ms: Option<u64>,
+}
+
+pub fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+impl AgentEntry {
+    /// Build an entry, inheriting the needy timestamp from `prev` when the
+    /// pane stays attention-worthy across the transition.
+    pub fn new(state: AgentState, source: Source, prev: Option<&AgentEntry>) -> AgentEntry {
+        let needy = matches!(state, AgentState::Waiting | AgentState::Done);
+        let needy_since_ms = if needy {
+            prev.and_then(|p| p.needy_since_ms)
+                .or_else(|| Some(epoch_ms()))
+        } else {
+            None
+        };
+        AgentEntry {
+            state,
+            source,
+            set_at: std::time::Instant::now(),
+            needy_since_ms,
+        }
+    }
 }
 
 #[derive(Deserialize)]
