@@ -33,10 +33,11 @@ struct Pane {
     size: Mutex<(u16, u16)>,
     grid: Arc<Mutex<PaneGrid>>,
     /// Ephemeral panes die when `owner` (the connection that spawned them)
-    /// disconnects; persistent panes die only with this daemon. Mutable:
-    /// a pane can be promoted to persistent in place (⌁→∞).
+    /// disconnects; persistent panes die only with this daemon. Both mutable:
+    /// a pane can be promoted (⌁→∞) or demoted (∞→⌁) in place — a demotion
+    /// re-homes `owner` to the demoting connection.
     ephemeral: std::sync::atomic::AtomicBool,
-    owner: u64,
+    owner: std::sync::atomic::AtomicU64,
 }
 
 impl Drop for Pane {
@@ -155,7 +156,8 @@ async fn handle_conn(stream: UnixStream, store: Arc<Store>) {
         panes
             .iter()
             .filter(|(_, p)| {
-                p.ephemeral.load(std::sync::atomic::Ordering::Relaxed) && p.owner == conn
+                p.ephemeral.load(std::sync::atomic::Ordering::Relaxed)
+                    && p.owner.load(std::sync::atomic::Ordering::Relaxed) == conn
             })
             .map(|(&id, _)| id)
             .collect()
@@ -250,6 +252,11 @@ fn handle_req(req: Req, store: &Arc<Store>, out: &mpsc::UnboundedSender<(u8, Vec
             if let Some(p) = store.panes.lock().unwrap().get(&id) {
                 p.ephemeral
                     .store(ephemeral, std::sync::atomic::Ordering::Relaxed);
+                if ephemeral {
+                    // Demotion re-homes the pane to the demoting connection:
+                    // it now dies when THIS client (mymuxd) goes away.
+                    p.owner.store(conn, std::sync::atomic::Ordering::Relaxed);
+                }
             }
         }
         Req::Kill { id } => {
@@ -371,7 +378,7 @@ fn spawn_pane(
         size: Mutex::new((cols, rows)),
         grid: grid.clone(),
         ephemeral: std::sync::atomic::AtomicBool::new(ephemeral),
-        owner,
+        owner: std::sync::atomic::AtomicU64::new(owner),
     });
     store.panes.lock().unwrap().insert(id, pane);
 

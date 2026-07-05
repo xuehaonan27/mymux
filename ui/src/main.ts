@@ -142,6 +142,33 @@ function showConfirmClose(w: Workspace, pane: number, cmd: string) {
   confirmEl.classList.add('show');
 }
 
+// ∞→⌁ demotion gives up the survives-restarts guarantee: confirm it (mouse
+// only, per house rules) before telling the daemon.
+function showDemoteConfirm(w: Workspace, id: number) {
+  confirmEl.replaceChildren();
+  const label = document.createElement('span');
+  label.textContent = 'Make this window throwaway (⌁)? It will die when mymuxd stops.';
+  const mk = (text: string, cls: string, fn: () => void) => {
+    const b = document.createElement('button');
+    b.textContent = text;
+    b.className = cls;
+    b.addEventListener('click', () => {
+      confirmEl.classList.remove('show');
+      fn();
+    });
+    return b;
+  };
+  confirmEl.append(
+    label,
+    mk('Make ⌁', 'danger', () => {
+      w.sendJson({ t: 'demote_window', id });
+      toast('Demoted to ⌁ — dies with the daemon now.');
+    }),
+    mk('Keep ∞', '', () => {}),
+  );
+  confirmEl.classList.add('show');
+}
+
 // New-window-in-directory prompt (⌘K ⇧C): spawn a shell elsewhere WITHOUT
 // cd-ing the current pane (its agent keeps running). Keys follow house rules
 // (Enter/Esc swallowed); creation is explicit via ✓-style buttons, and blur
@@ -202,7 +229,7 @@ helpEl.innerHTML = `<div class="help-card">
     <tr><td>⌘K ⇧C</td><td>new ∞ window in a chosen directory</td></tr>
     <tr><td>⌘K ⇧S</td><td>new throwaway shell (⌁ — dies with the daemon)</td></tr>
     <tr><td>⌘K w</td><td>new tmux window (starts tmux on demand)</td></tr>
-    <tr><td>⌘K k</td><td>keep this shell: promote ⌁ → ∞</td></tr>
+    <tr><td>⌘K k / ⇧K</td><td>keep (⌁ → ∞) / make throwaway (∞ → ⌁, asks first)</td></tr>
     <tr><td>⌘1–9, ⌘K n/p</td><td>switch window</td></tr>
     <tr><td>double-click tab</td><td>rename (✓ or click away = save, ✕ = cancel)</td></tr>
     <tr><th colspan="2">Panes</th></tr>
@@ -591,10 +618,18 @@ function handleLeaderKey(e: KeyboardEvent) {
   }
   if (lower === 'k') {
     const win = w.windowList.find((x) => x.active);
-    if (win?.ephemeral) {
+    if (!win) return;
+    if (e.shiftKey) {
+      // ∞→⌁ demote loses the survival guarantee — always confirm.
+      if (win.persistent) showDemoteConfirm(w, win.id);
+      else if (win.ephemeral) toast('Already throwaway (⌁).');
+      else toast('tmux windows are managed by tmux.');
+      return;
+    }
+    if (win.ephemeral) {
       w.sendJson({ t: 'promote_window', id: win.id });
       toast('Promoted to ∞ — this shell now survives restarts.');
-    } else if (win) {
+    } else {
       toast(win.persistent ? 'Already persistent.' : 'tmux windows are managed by tmux.');
     }
     return;

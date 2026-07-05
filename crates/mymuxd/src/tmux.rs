@@ -209,8 +209,16 @@ impl Hub {
         // Adopt ptyd survivors before deciding "empty" (idempotent; the
         // startup warmup may still be in flight on the very first connect).
         self.persist.warmup(self).await;
-        let have_native = !self.natives.lock().unwrap().tabs().is_empty();
-        if have_native || self.state.lock().unwrap().running {
+        let first_native = self.natives.lock().unwrap().tabs().first().map(|t| t.0);
+        if first_native.is_some() || self.state.lock().unwrap().running {
+            // Adopted natives with no tmux running: the view must land on
+            // something real, not the empty tmux side.
+            if let Some(id) = first_native {
+                let mut view = self.active_view.lock().unwrap();
+                if matches!(*view, ActiveView::Tmux) && !self.state.lock().unwrap().running {
+                    *view = ActiveView::Native(id);
+                }
+            }
             return;
         }
         if self.booted.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -535,6 +543,20 @@ impl Hub {
         self.emit(ServerEvent::State(self.state_json()));
     }
 
+    /// Demote a persistent window to throwaway (∞→⌁): it will die with this
+    /// mymuxd. The UI confirms before sending this.
+    pub async fn demote_window(&self, id: u32) {
+        if !is_native_id(id) {
+            return;
+        }
+        let panes = self.natives.lock().unwrap().panes_of(id);
+        let targets = if panes.is_empty() { vec![id] } else { panes };
+        for p in targets {
+            self.persist.demote(p);
+        }
+        self.emit(ServerEvent::State(self.state_json()));
+    }
+
     pub async fn select_window(&self, id: u32) {
         if is_native_id(id) {
             let known =
@@ -659,6 +681,23 @@ impl Hub {
         String::from_utf8_lossy(&out.stdout).trim().parse().ok()
     }
 
+    /// The viewed window vanished: fall to another native window, else tmux
+    /// (if it's running), else nothing remains and the session is over (the
+    /// UIs return to their host picker). Emits the follow-up state/seeds.
+    async fn fall_back_view(&self) {
+        let next = self.natives.lock().unwrap().tabs().first().map(|t| t.0);
+        if let Some(id) = next {
+            *self.active_view.lock().unwrap() = ActiveView::Native(id);
+        } else if self.state.lock().unwrap().running {
+            *self.active_view.lock().unwrap() = ActiveView::Tmux;
+        } else {
+            self.emit(ServerEvent::State(r#"{"t":"session_end"}"#.to_string()));
+            return;
+        }
+        self.emit(ServerEvent::State(self.state_json()));
+        self.reseed_visible().await;
+    }
+
     /// A native pane is gone (killed or exited on its own): collapse its
     /// window's layout, resize the survivors, fix the view, repaint.
     async fn native_pane_removed(&self, pane: u32) {
@@ -677,13 +716,12 @@ impl Hub {
                     *self.active_view.lock().unwrap(),
                     ActiveView::Native(x) if x == win
                 );
-                if was_active {
-                    *self.active_view.lock().unwrap() = ActiveView::Tmux;
-                }
                 self.save_layout_blob();
-                self.emit(ServerEvent::State(self.state_json()));
                 if was_active {
-                    self.reseed_visible().await;
+                    // Next native window → tmux (if running) → session end.
+                    self.fall_back_view().await;
+                } else {
+                    self.emit(ServerEvent::State(self.state_json()));
                 }
             }
             Remove::Collapsed { resizes, .. } => {
@@ -1236,16 +1274,13 @@ impl Hub {
         let had = self.persist.clear();
         self.natives.lock().unwrap().clear();
         let was_native = matches!(*self.active_view.lock().unwrap(), ActiveView::Native(_));
-        if was_native {
-            *self.active_view.lock().unwrap() = ActiveView::Tmux;
-        }
         if had || was_native {
             eprintln!("mymuxd: mymux-ptyd connection lost — native panes are gone");
-            self.emit(ServerEvent::State(self.state_json()));
             if was_native {
-                for (pane, seed) in self.snapshot_visible().await {
-                    self.emit(ServerEvent::Output { pane, data: seed });
-                }
+                // tmux if it's running, else nothing is left → session end.
+                self.fall_back_view().await;
+            } else {
+                self.emit(ServerEvent::State(self.state_json()));
             }
         }
     }

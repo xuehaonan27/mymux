@@ -84,6 +84,17 @@ impl Persist {
         }
     }
 
+    /// Flip a pane throwaway in place (∞→⌁): it will die with this mymuxd
+    /// (ptyd re-homes the pane to our connection on demotion).
+    pub fn demote(&self, id: u32) {
+        if let Some(m) = self.mirror.lock().unwrap().get_mut(&id) {
+            m.ephemeral = true;
+        }
+        if let Some(c) = self.current() {
+            c.set_ephemeral(id, true);
+        }
+    }
+
     pub fn remove_mirror(&self, id: u32) -> bool {
         self.mirror.lock().unwrap().remove(&id).is_some()
     }
