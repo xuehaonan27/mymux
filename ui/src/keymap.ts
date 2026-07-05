@@ -28,6 +28,7 @@ export type ActionId =
   | 'code'
   | 'proc'
   | 'attention'
+  | 'plugins'
   | 'help';
 
 /** Everything actions need from the shell, injected once at startup. */
@@ -40,6 +41,7 @@ export interface KeyDeps {
   jumpAttention(): void;
   /** ⌁↔∞ toggle on the active window (demote side confirms). */
   keepToggle(): void;
+  togglePlugins(): void;
 }
 
 /// Where the letter binds directly under ⌘ (the leader always has it):
@@ -133,6 +135,12 @@ export const ACTIONS: Record<ActionId, ActionDef> = {
     desc: 'jump to the agent that needs you',
     run: (d) => d.jumpAttention(),
   },
+  plugins: {
+    key: 'g',
+    direct: 'none', // ⌘G is find-next in many contexts; leader-only is fine
+    desc: 'packages — browse & install language servers etc.',
+    run: (d) => d.togglePlugins(),
+  },
   help: { key: '/', direct: 'app', desc: 'key map (this help)', run: (d) => d.toggleHelp() },
 };
 
@@ -173,6 +181,7 @@ export function helpRows(): Array<[string, string, string]> {
     'code',
     'proc',
     'attention',
+    'plugins',
     'help',
   ];
   return order.map((a) => {

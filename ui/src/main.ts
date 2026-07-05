@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { measureCell } from './metrics';
 import type { CodePanel, CodePanelOpts } from './code';
 import { initProcPanel } from './proc';
+import { initPkgsPanel } from './pkgs';
 import { initHostManager } from './hostmanager';
 import { Workspace, WinInfo, WsState } from './workspace';
 import { ACTIONS, directAction, leaderAction, helpRows, KeyDeps } from './keymap';
@@ -602,17 +603,30 @@ const codePanel = {
 const procPanel = initProcPanel({
   getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
 });
-// Both overlays are full-screen and share a z-band, so they're mutually exclusive.
+const pkgsPanel = initPkgsPanel({
+  getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
+});
+// The overlays are full-screen and share a z-band, so they're mutually exclusive.
+function closeOtherPanels(keep: 'code' | 'proc' | 'pkgs') {
+  if (keep !== 'code' && codePanel.isOpen()) codePanel.toggle();
+  if (keep !== 'proc' && procPanel.isOpen()) procPanel.toggle();
+  if (keep !== 'pkgs' && pkgsPanel.isOpen()) pkgsPanel.toggle();
+}
 function toggleCode() {
-  if (procPanel.isOpen()) procPanel.toggle();
+  closeOtherPanels('code');
   codePanel.toggle();
 }
 function toggleProc() {
-  if (codePanel.isOpen()) codePanel.toggle();
+  closeOtherPanels('proc');
   procPanel.toggle();
+}
+function togglePlugins() {
+  closeOtherPanels('pkgs');
+  pkgsPanel.toggle();
 }
 document.getElementById('btn-code')?.addEventListener('click', toggleCode);
 document.getElementById('btn-proc')?.addEventListener('click', toggleProc);
+document.getElementById('btn-pkgs')?.addEventListener('click', togglePlugins);
 
 // ---- keybindings — dispatch driven by the keymap tables (see keymap.ts) -------
 
@@ -658,6 +672,7 @@ const keyDeps: KeyDeps = {
   toggleCode: () => toggleCode(),
   jumpAttention: () => jumpToAttention(),
   keepToggle,
+  togglePlugins: () => togglePlugins(),
 };
 
 function handleLeaderKey(e: KeyboardEvent) {
@@ -710,6 +725,13 @@ document.addEventListener(
       if (e.key === 'Escape') {
         e.preventDefault();
         procPanel.toggle();
+      }
+      return;
+    }
+    if (pkgsPanel.isOpen()) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        pkgsPanel.toggle();
       }
       return;
     }

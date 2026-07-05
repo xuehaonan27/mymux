@@ -70,6 +70,11 @@ clangd).
 - mymuxd `/lsp/info` + server spawn: resolution order is **managed package →
   user-configured path → PATH heuristic** (the heuristic is now only a
   fallback).
-- mymuxd `POST /lsp/install {lang}`: runs `mymux-pkg install --lang <lang>`
-  (sibling binary next to mymuxd, else PATH) so the UI can offer one-click
-  installs. The daemon embeds no acquisition logic.
+- mymuxd `GET /pkgs/catalog`, `POST /pkgs/install {name}`, `POST /pkgs/remove
+  {name}`: relayed to the CLI (`mymux-pkg catalog` emits the recipe directory
+  as JSON with installed state merged) — the UI's packages panel (⌘K g). The
+  daemon embeds no recipes or acquisition logic.
+- mymuxd `POST /lsp/install {lang}` (legacy): runs `mymux-pkg install --lang
+  <lang>`; superseded by the packages panel but kept for scripts.
+- Philosophy: mymux never nags about missing packages — installs happen at
+  the user's initiative from the panel.

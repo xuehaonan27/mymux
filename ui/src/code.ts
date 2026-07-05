@@ -7,7 +7,7 @@ import { javascript } from '@codemirror/lang-javascript';
 import { python } from '@codemirror/lang-python';
 import { json } from '@codemirror/lang-json';
 import { markdown } from '@codemirror/lang-markdown';
-import { lspExtensionFor, lspInstall, lspInstallable, notifySaved, setLspFileOpener, requestCodeActions } from './lsp';
+import { lspExtensionFor, notifySaved, setLspFileOpener, requestCodeActions } from './lsp';
 import { makeCtx, viewerFor } from './viewers';
 
 // Resolved per call so the panel follows the active workspace's daemon.
@@ -104,15 +104,18 @@ export interface CodePanel {
 // rooted at the same pane cwd, so they live together in a Session rather than
 // as separate loose variables that have to be reset in lockstep by hand.
 //
-// Every opened file gets its own Buffer (doc + undo history + selection) that
-// is NEVER discarded by opening another file — so there is no "discard your
-// edits?" prompt anywhere (window.confirm is broken in the Tauri webview, and
-// the prompt was bad UX anyway). Dirty buffers only die via their chip's ✕.
-interface Buffer {
-  savedDoc: string; // last saved contents (dirty = editor doc differs)
-  state: EditorState; // doc + history + selection
-  dirty: boolean; // cached for background buffers; live one uses isDirty()
-}
+// Every opened file gets its own Buffer that is NEVER discarded by opening
+// another file — so there is no "discard your edits?" prompt anywhere. Text
+// buffers carry doc + undo history; viewer buffers (pdf, images, binaries)
+// just mark the file open so it has a tab like any other.
+type Buffer =
+  | {
+      kind: 'text';
+      savedDoc: string; // last saved contents (dirty = editor doc differs)
+      state: EditorState; // doc + history + selection
+      dirty: boolean; // cached for background buffers; live one uses isDirty()
+    }
+  | { kind: 'viewer' };
 interface Session {
   pane: number | null;
   path: string | null; // buffer currently in the editor, or null
@@ -146,7 +149,6 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     <div class="code-main">
       <div class="code-hd"><span id="code-path">no file open</span><span id="code-hint">⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close</span></div>
       <div class="code-bufs" id="code-bufs"></div>
-      <div class="code-lsphint" id="code-lsphint" style="display: none"></div>
       <div class="code-editor" id="code-editor"></div>
       <div class="code-diff" id="code-diff"></div>
       <div class="code-viewer" id="code-viewer"></div>
@@ -158,7 +160,6 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   const changesEl = panel.querySelector('#code-changes') as HTMLElement;
   const pathEl = panel.querySelector('#code-path') as HTMLElement;
   const bufsEl = panel.querySelector('#code-bufs') as HTMLElement;
-  const lspHintEl = panel.querySelector('#code-lsphint') as HTMLElement;
   const editorParent = panel.querySelector('#code-editor') as HTMLElement;
   const diffEl = panel.querySelector('#code-diff') as HTMLElement;
   const viewerEl = panel.querySelector('#code-viewer') as HTMLElement;
@@ -186,13 +187,18 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   // Derived, never stored — the single source of "unsaved?" truth.
   const isDirty = () => {
     const b = curBuf();
-    return !!(b && editor && editor.state.doc.toString() !== b.savedDoc);
+    return !!(
+      b &&
+      b.kind === 'text' &&
+      editor &&
+      editor.state.doc.toString() !== b.savedDoc
+    );
   };
 
   // Snapshot the visible editor back into its buffer (edits + undo history).
   function stash() {
     const b = curBuf();
-    if (b && editor) {
+    if (b && b.kind === 'text' && editor) {
       b.state = editor.state;
       b.dirty = editor.state.doc.toString() !== b.savedDoc;
     }
@@ -205,9 +211,11 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       renderBufs();
       return;
     }
-    const d = isDirty();
-    pathEl.textContent = (d ? '● ' : '') + current.path;
-    pathEl.style.color = d ? '#d6a04c' : '';
+    if (curBuf()?.kind !== 'viewer') {
+      const d = isDirty();
+      pathEl.textContent = (d ? '● ' : '') + current.path;
+      pathEl.style.color = d ? '#d6a04c' : '';
+    }
     renderBufs();
   }
 
@@ -223,7 +231,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     bufsEl.replaceChildren();
     for (const [path, buf] of s.buffers) {
       const active = path === s.path;
-      const dirty = active ? isDirty() : buf.dirty;
+      const dirty = buf.kind === 'text' && (active ? isDirty() : buf.dirty);
       const chip = document.createElement('span');
       chip.className = 'bufchip' + (active ? ' active' : '') + (dirty ? ' dirty' : '');
       chip.textContent = (dirty ? '● ' : '') + path.slice(path.lastIndexOf('/') + 1);
@@ -246,7 +254,8 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     const s = current;
     if (!s) return;
     const buf = s.buffers.get(path);
-    const dirty = path === s.path ? isDirty() : !!buf?.dirty;
+    const dirty =
+      buf?.kind === 'text' && (path === s.path ? isDirty() : buf.dirty);
     if (dirty && !chip.classList.contains('confirm')) {
       chip.classList.add('confirm');
       setTimeout(() => chip.classList.remove('confirm'), 1600);
@@ -261,6 +270,8 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
         return;
       }
       mount(emptyState());
+      pathEl.textContent = 'no file open';
+      pathEl.style.color = '';
     }
     renderHeader();
   }
@@ -346,7 +357,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     if (!editor || !current?.path) return;
     const s = current;
     const b = curBuf();
-    if (!b) return;
+    if (!b || b.kind !== 'text') return;
     const doc = editor.state.doc.toString();
     const ok = await fsWrite(s.pane, s.path!, doc);
     if (ok) {
@@ -367,51 +378,18 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     }
   }
 
-  // The file's language has a managed server recipe but no server yet: offer
-  // the one-click install (daemon → mymux-pkg). On success, a clean buffer is
-  // reopened so the fresh language extension attaches.
-  async function offerLspInstall(s: Session, path: string) {
-    const hit = await lspInstallable(apiBase(), s.pane, path);
-    if (!hit || current !== s || s.path !== path) return;
-    lspHintEl.replaceChildren();
-    const label = document.createElement('span');
-    label.textContent = `${hit.reason} — `;
-    const btn = document.createElement('button');
-    btn.textContent = `Install (${hit.lang})`;
-    btn.addEventListener('click', () => {
-      btn.disabled = true;
-      btn.textContent = 'Installing… (may take a minute)';
-      void (async () => {
-        const err = await lspInstall(apiBase(), hit.lang);
-        if (err) {
-          btn.disabled = false;
-          btn.textContent = `Install (${hit.lang})`;
-          label.textContent = `install failed: ${err} — `;
-          return;
-        }
-        lspHintEl.style.display = 'none';
-        if (current !== s || s.path !== path) return;
-        const buf = s.buffers.get(path);
-        const clean = buf && buf.state.doc.toString() === buf.savedDoc && !isDirty();
-        if (clean) {
-          s.buffers.delete(path);
-          s.path = null;
-          void openFile(path); // re-read + attach the language extension
-        } else {
-          label.textContent = 'installed — reopen the file to activate it ';
-          lspHintEl.style.display = 'flex';
-        }
-      })();
-    });
-    lspHintEl.append(label, btn);
-    lspHintEl.style.display = 'flex';
-  }
-
   async function openFile(path: string) {
     if (!current) return;
     const s = current;
-    lspHintEl.style.display = 'none';
     const existing = s.buffers.get(path);
+    // Viewer buffers re-render fresh (they hold no local state worth keeping).
+    if (existing?.kind === 'viewer') {
+      stash();
+      s.path = path;
+      showViewer(path);
+      renderHeader();
+      return;
+    }
     // A dirty buffer restores as-is — edits and undo history intact, no disk
     // read (the user's changes outrank whatever is on disk right now).
     if (existing && (existing.dirty || (s.path === path && isDirty()))) {
@@ -429,12 +407,20 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       content = await fsRead(s.pane, path);
     } catch (e) {
       if (current !== s) return;
-      s.buffers.delete(path); // a stale clean buffer of an unreadable file
       const status = (e as { status?: number }).status;
-      // Binary / too-large → a viewer (image, hex); real errors → placeholder.
-      if (status === 415 || status === 400) showViewer(path);
-      else showPlaceholder(path, status);
-      renderBufs();
+      if (status === 415 || status === 400) {
+        // Binary / too large → a viewer (pdf, image, hex) — and a real tab,
+        // same as any text file.
+        stash();
+        s.buffers.set(path, { kind: 'viewer' });
+        s.path = path;
+        showViewer(path);
+        renderHeader();
+      } else {
+        s.buffers.delete(path); // a stale buffer of a now-unreadable file
+        showPlaceholder(path, status);
+        renderBufs();
+      }
       return;
     }
     if (current !== s) return; // switched panes mid-read
@@ -444,14 +430,15 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       s.path = path;
       mount(existing.state);
     } else {
-      // Language smarts when available (rust for now); absent/failed → plain editor.
+      // Language smarts when available; absent/failed → plain editor. (No
+      // auto-nagging about missing servers — the packages panel is where
+      // installs live, at the user's initiative.)
       const lsp = await lspExtensionFor(apiBase(), s.pane, path);
       if (current !== s) return;
       s.path = path;
       const state = fileState(path, content, lsp);
-      s.buffers.set(path, { savedDoc: content, state, dirty: false });
+      s.buffers.set(path, { kind: 'text', savedDoc: content, state, dirty: false });
       mount(state);
-      if (!lsp) void offerLspInstall(s, path);
     }
     renderHeader();
     editor!.focus();
@@ -563,7 +550,9 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   function showSession(p: number | null) {
     stash(); // snapshot outgoing edits into their buffer
     current = sessionFor(p);
-    mount(curBuf()?.state ?? emptyState());
+    const b = curBuf();
+    if (b?.kind === 'viewer' && current.path) showViewer(current.path);
+    else mount(b?.kind === 'text' ? b.state : emptyState());
     renderHeader();
     void loadTree();
     void loadChanges();

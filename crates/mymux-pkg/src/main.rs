@@ -34,6 +34,7 @@ struct Recipe {
     version: &'static str,
     kind: &'static str,
     langs: &'static [&'static str],
+    desc: &'static str,
     channel: Channel,
 }
 
@@ -85,6 +86,7 @@ fn recipes() -> Vec<Recipe> {
             version: "2026-06-29",
             kind: "lsp-server",
             langs: &["rust"],
+            desc: "Rust language server (hover, completion, diagnostics, cargo check on save)",
             channel: Channel::GithubGz {
                 url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-06-29/rust-analyzer-x86_64-unknown-linux-gnu.gz",
                 sha256: "e278cbae972df49cbcead8851aea47478478fc5ef686e2c6a35b44911e3926cf",
@@ -96,6 +98,7 @@ fn recipes() -> Vec<Recipe> {
             version: "22.1.6",
             kind: "lsp-server",
             langs: &["c", "cpp"],
+            desc: "C/C++ language server from the LLVM project",
             channel: Channel::GithubZip {
                 url: "https://github.com/clangd/clangd/releases/download/22.1.6/clangd-linux-22.1.6.zip",
                 sha256: "a9c77443af2e447ed467e84771848d3a6ac1c56f84bcfcde717e66318de77cfa",
@@ -107,6 +110,7 @@ fn recipes() -> Vec<Recipe> {
             version: "latest",
             kind: "lsp-server",
             langs: &["go"],
+            desc: "Go language server (needs the Go toolchain for install)",
             channel: Channel::GoInstall { module: "golang.org/x/tools/gopls", bin: "bin/gopls" },
         },
         Recipe {
@@ -114,6 +118,7 @@ fn recipes() -> Vec<Recipe> {
             version: "1.1.411",
             kind: "lsp-server",
             langs: &["python"],
+            desc: "Python language server — the open pyright, not Pylance (needs Node.js)",
             channel: Channel::Npm {
                 package: "pyright",
                 bin: "node_modules/.bin/pyright-langserver",
@@ -139,6 +144,7 @@ fn main() {
     let code = match args.first().map(String::as_str) {
         Some("install") => cmd_install(&args[1..]),
         Some("list") | Some("ls") => cmd_list(),
+        Some("catalog") => cmd_catalog(),
         Some("remove") | Some("rm") => cmd_remove(&args[1..]),
         _ => {
             eprintln!(
@@ -242,6 +248,52 @@ fn cmd_install(args: &[String]) -> i32 {
         r.name,
         r.version,
         dest.join(&bin).display()
+    );
+    0
+}
+
+/// `catalog` — the recipe directory as JSON: what CAN be installed, with the
+/// installed state merged in. This is the UI's "marketplace" feed; consumers
+/// (the daemon) just relay it, keeping recipes in this CLI only.
+fn cmd_catalog() -> i32 {
+    #[derive(Serialize)]
+    struct Item {
+        name: &'static str,
+        version: &'static str,
+        kind: &'static str,
+        langs: Vec<&'static str>,
+        desc: &'static str,
+        installed: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        installed_version: Option<String>,
+    }
+    let installed: std::collections::BTreeMap<String, String> = pkg_dir()
+        .and_then(|base| std::fs::read_dir(base).ok())
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| {
+                    let s = std::fs::read_to_string(e.path().join("pkg.json")).ok()?;
+                    let m = serde_json::from_str::<PkgManifest>(&s).ok()?;
+                    Some((m.name, m.version))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let items: Vec<Item> = recipes()
+        .iter()
+        .map(|r| Item {
+            name: r.name,
+            version: r.version,
+            kind: r.kind,
+            langs: r.langs.to_vec(),
+            desc: r.desc,
+            installed: installed.contains_key(r.name),
+            installed_version: installed.get(r.name).cloned(),
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::to_string(&items).expect("catalog serializes")
     );
     0
 }

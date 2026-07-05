@@ -67,6 +67,21 @@ registerViewer({
   },
 });
 
+registerViewer({
+  name: 'pdf',
+  matches: (p) => /\.pdf$/i.test(p),
+  render(ctx, mount) {
+    // WKWebView (Tauri on macOS) renders PDFs natively in an <embed>;
+    // engines that can't will show the plugin-less gray box — the hex
+    // fallback stays a click away by reopening.
+    const embed = document.createElement('embed');
+    embed.className = 'viewer-pdf';
+    embed.src = ctx.rawUrl();
+    embed.type = 'application/pdf';
+    mount.append(embed);
+  },
+});
+
 const HEX_BYTES = 4096;
 
 registerViewer({

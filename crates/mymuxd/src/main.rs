@@ -10,6 +10,7 @@ mod git;
 mod lsp;
 mod native;
 mod persist;
+mod pkgs;
 mod proc;
 mod state;
 mod tmux;
@@ -85,6 +86,9 @@ async fn main() {
         .route("/lsp", get(lsp::ws_handler))
         .route("/lsp/info", get(lsp::info))
         .route("/lsp/install", post(lsp::install))
+        .route("/pkgs/catalog", get(pkgs::catalog))
+        .route("/pkgs/install", post(pkgs::install))
+        .route("/pkgs/remove", post(pkgs::remove))
         .route("/proc/tree", get(proc::tree))
         .route("/proc/kill", post(proc::kill))
         .with_state(hub)
