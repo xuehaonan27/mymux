@@ -2,6 +2,39 @@
 
 Deferred refinements — captured so we don't lose them. Not blocking.
 
+## Plugin system (contract-first; decoupled per the user, 2026-07-03)
+Strategy decided with the user: no general-purpose plugin platform up front
+(single-user product — no author ecosystem to serve, and "lightweight" is the
+identity); instead, REAL extension points behind a public on-disk contract
+(docs/PKG-SPEC.md), producer and consumers fully decoupled (zero shared code).
+Ecosystem boundary (user-ratified): **Open VSX usable in full; the VS
+Marketplace and Microsoft's proprietary extensions (Pylance, C/C++, Remote,
+Copilot) are NEVER touched** — enforced by a unit test in mymux-pkg.
+- ~~P1: managed language servers~~ — **DONE 2026-07-03**: `mymux-pkg` CLI
+  (install/list/remove; channels: pinned GitHub releases + sha256 from the
+  release digests, `go install` (Go sumdb), npm (registry integrity), and an
+  Open VSX channel implementation held in reserve; recipes: rust-analyzer
+  2026-06-29, clangd 22.1.6, gopls, pyright 1.1.411). mymuxd resolves
+  managed → PATH-heuristic-fallback, `POST /lsp/install` runs the CLI
+  (sibling binary), the code panel offers one-click installs, and go/python/
+  c/cpp roots + server commands are wired. Verified: real installs
+  (rust-analyzer, pyright incl. through a stripped-PATH daemon via the nvm
+  fallback), managed resolution beats a stripped PATH, install endpoint
+  round-trip, LSP e2e regression green.
+- P2: viewer registry (`kind: "viewer"`) — the binary-file placeholder's
+  promise: image preview, hex dump, markdown; built-ins first, registered
+  through the same contract.
+- P2.5 (optional): TextMate grammars/themes from Open VSX for CodeMirror
+  highlighting of languages we don't bundle (vscode-textmate/shiki route).
+- P3 (only if ever needed): third-party loading (JS/WASM). Revisit after P2;
+  an `agent-adapter` kind is the uniquely-mymux extension point if an
+  ecosystem ever happens.
+- **License choice for the repo is still open** (currently workspace says MIT
+  in Cargo.toml but no LICENSE file / conscious decision). If open-sourcing /
+  commercializing, decide BEFORE external contributors arrive (MIT/Apache +
+  hosted, BSL/FSL, AGPL dual — user to pick).
+
+
 ## LSP + editor adaptation batch (parked 2026-07-03 — mainline first, user's call)
 Deferred until the mainline (native engine, …) is mostly done; several items are
 really arguments for the self-built editor/LSP client (see LSP-PLAN's absorption

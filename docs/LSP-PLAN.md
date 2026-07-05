@@ -113,6 +113,14 @@ still zero extensions, and lose our CodeMirror investment. No.
   `pullDiagnostics()` in `ui/src/lsp.ts` pulls `textDocument/diagnostic` on
   open + debounced on edits, with a bounded warm-up retry while the server
   indexes; client `timeout` raised to 30s (first pulls can block on indexing).
+- **C3 SHIPPED (2026-07-03) as plugin-system P1** — see docs/PKG-SPEC.md. The
+  resolution order is live: **managed package (mymux-pkg) → user PATH
+  heuristic (fallback only)**. Servers: rust-analyzer, clangd (pinned GitHub
+  releases + sha256), gopls (go install), pyright (npm). Acquisition lives in
+  the decoupled `mymux-pkg` CLI; the daemon only scans the on-disk contract
+  and offers `POST /lsp/install`. Open VSX is a legal, implemented channel
+  (unused while upstream releases suffice); the VS Marketplace and MS
+  proprietary extensions are banned (unit-test enforced).
 - `@codemirror/view` pinned to 6.42.1 (the 6.43.x line shipped a DOM-update
   corruption regression family that broke rendering after fold/unfold cycles);
   revisit the pin when 6.43.x stabilizes.

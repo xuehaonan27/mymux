@@ -31,12 +31,79 @@ fn default_lang() -> String {
     "rust".to_string()
 }
 
-/// Languages the proxy can launch (C1: rust only; C3 adds more + VSIX install).
+/// Languages the proxy can launch. Servers come from managed packages first
+/// (the mymux-pkg contract), with a PATH heuristic as fallback.
 fn server_cmd(lang: &str) -> Option<(&'static str, &'static [&'static str])> {
     match lang {
         "rust" => Some(("rust-analyzer", &[])),
+        "go" => Some(("gopls", &[])),
+        "python" => Some(("pyright-langserver", &["--stdio"])),
+        "c" | "cpp" => Some(("clangd", &[])),
         _ => None,
     }
+}
+
+/// The package contract directory (docs/PKG-SPEC.md). Mirrored from
+/// mymux-pkg on purpose — the two sides share the CONVENTION, not code.
+fn pkgs_dir() -> Option<PathBuf> {
+    if let Some(d) = std::env::var_os("MYMUX_PKG_DIR") {
+        return Some(PathBuf::from(d));
+    }
+    if let Some(d) = std::env::var_os("XDG_DATA_HOME") {
+        return Some(PathBuf::from(d).join("mymux/pkgs"));
+    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/mymux/pkgs"))
+}
+
+/// A managed package's server binary for `lang`, if one is installed.
+/// Invalid or unknown packages are skipped (contract: consumers are lenient).
+fn managed_server(lang: &str) -> Option<PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct Pkg {
+        v: u32,
+        kind: String,
+        #[serde(default)]
+        langs: Vec<String>,
+        bin: String,
+    }
+    for e in std::fs::read_dir(pkgs_dir()?).ok()?.flatten() {
+        let dir = e.path();
+        let Ok(s) = std::fs::read_to_string(dir.join("pkg.json")) else {
+            continue;
+        };
+        let Ok(p) = serde_json::from_str::<Pkg>(&s) else {
+            continue;
+        };
+        if p.v != 1 || p.kind != "lsp-server" || !p.langs.iter().any(|l| l == lang) {
+            continue;
+        }
+        let bin = dir.join(p.bin);
+        if bin.is_file() {
+            return Some(bin);
+        }
+    }
+    None
+}
+
+/// Resolve the server binary for a language: managed package → PATH heuristic
+/// (with a `--version` probe — a rustup shim can exist without the component;
+/// managed installs were verified at install time and skip the probe, which
+/// some servers, e.g. pyright-langserver, wouldn't survive anyway).
+async fn resolve_server(lang: &str) -> Option<PathBuf> {
+    let (cmd, _) = server_cmd(lang)?;
+    if let Some(bin) = managed_server(lang) {
+        return Some(bin);
+    }
+    let bin = find_server(cmd)?;
+    let runs = Command::new(&bin)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false);
+    runs.then_some(bin)
 }
 
 /// Locate a server binary. Under systemd --user the daemon's PATH is minimal
@@ -59,6 +126,18 @@ fn find_server(cmd: &str) -> Option<PathBuf> {
     })
 }
 
+/// The nearest ancestor of `cwd` (inclusive) containing one of `markers`.
+fn nearest(cwd: &Path, markers: &[&str]) -> Option<PathBuf> {
+    let mut dir: Option<&Path> = Some(cwd);
+    while let Some(d) = dir {
+        if markers.iter().any(|m| d.join(m).exists()) {
+            return Some(d.to_path_buf());
+        }
+        dir = d.parent();
+    }
+    None
+}
+
 /// The workspace root for a language, walking up from the pane's cwd. For rust
 /// that's the OUTERMOST ancestor with a Cargo.toml (the cargo workspace root).
 async fn lsp_root(pane: Option<u32>, lang: &str) -> Option<PathBuf> {
@@ -75,6 +154,11 @@ async fn lsp_root(pane: Option<u32>, lang: &str) -> Option<PathBuf> {
             }
             found
         }
+        "go" => nearest(&cwd, &["go.mod"]),
+        "python" => {
+            Some(nearest(&cwd, &["pyproject.toml", "setup.py", "requirements.txt"]).unwrap_or(cwd))
+        }
+        "c" | "cpp" => Some(nearest(&cwd, &["compile_commands.json"]).unwrap_or(cwd)),
         _ => Some(cwd),
     }
 }
@@ -84,6 +168,10 @@ pub struct LspInfo {
     available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    /// True when the language is supported and `mymux-pkg` has a recipe —
+    /// the UI can offer a one-click install.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    installable: bool,
     /// Language-server workspace root (rootUri = `file://{root}`).
     #[serde(skip_serializing_if = "Option::is_none")]
     root: Option<String>,
@@ -92,10 +180,11 @@ pub struct LspInfo {
     fs_root: Option<String>,
 }
 
-fn unavailable(reason: String, fs_root: Option<String>) -> Json<LspInfo> {
+fn unavailable(reason: String, fs_root: Option<String>, installable: bool) -> Json<LspInfo> {
     Json(LspInfo {
         available: false,
         reason: Some(reason),
+        installable,
         root: None,
         fs_root,
     })
@@ -104,33 +193,87 @@ fn unavailable(reason: String, fs_root: Option<String>) -> Json<LspInfo> {
 /// `GET /lsp/info?pane=&lang=` — can we serve LSP for this pane, and where from?
 pub async fn info(Query(q): Query<LspQuery>) -> Json<LspInfo> {
     let Some((cmd, _)) = server_cmd(&q.lang) else {
-        return unavailable(format!("unsupported language: {}", q.lang), None);
+        return unavailable(format!("unsupported language: {}", q.lang), None, false);
     };
     let fs_root = root_for(q.pane).await.display().to_string();
-    // The binary must actually RUN — a rustup shim can be on PATH while the
-    // component is missing, so probe `--version` on the resolved path.
-    let Some(bin) = find_server(cmd) else {
-        return unavailable(format!("{cmd} is not installed"), Some(fs_root));
-    };
-    let runs = Command::new(&bin)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !runs {
-        return unavailable(format!("{cmd} is not installed"), Some(fs_root));
+    if resolve_server(&q.lang).await.is_none() {
+        return unavailable(format!("{cmd} is not installed"), Some(fs_root), true);
     }
     match lsp_root(q.pane, &q.lang).await {
         Some(root) => Json(LspInfo {
             available: true,
             reason: None,
+            installable: false,
             root: Some(root.display().to_string()),
             fs_root: Some(fs_root),
         }),
-        None => unavailable("no project root found here".to_string(), Some(fs_root)),
+        None => unavailable(
+            "no project root found here".to_string(),
+            Some(fs_root),
+            false,
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct InstallReq {
+    lang: String,
+}
+
+#[derive(Serialize)]
+pub struct InstallResp {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    err: Option<String>,
+}
+
+/// `POST /lsp/install {lang}` — run `mymux-pkg install --lang <lang>` (sibling
+/// binary next to mymuxd, else PATH). The daemon embeds no acquisition logic;
+/// it is just one caller of the decoupled package CLI.
+pub async fn install(axum::Json(req): axum::Json<InstallReq>) -> Json<InstallResp> {
+    if server_cmd(&req.lang).is_none() {
+        return Json(InstallResp {
+            ok: false,
+            err: Some(format!("unsupported language: {}", req.lang)),
+        });
+    }
+    let bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("mymux-pkg")))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from("mymux-pkg"));
+    let out = Command::new(bin)
+        .args(["install", "--lang", &req.lang])
+        .output()
+        .await;
+    match out {
+        Ok(o) if o.status.success() => Json(InstallResp {
+            ok: true,
+            err: None,
+        }),
+        Ok(o) => {
+            let tail: String = String::from_utf8_lossy(&o.stderr)
+                .lines()
+                .rev()
+                .take(3)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join(" · ");
+            Json(InstallResp {
+                ok: false,
+                err: Some(if tail.is_empty() {
+                    "install failed".into()
+                } else {
+                    tail
+                }),
+            })
+        }
+        Err(e) => Json(InstallResp {
+            ok: false,
+            err: Some(format!("mymux-pkg is not installed: {e}")),
+        }),
     }
 }
 
@@ -143,7 +286,9 @@ async fn handle(socket: WebSocket, q: LspQuery) {
     let Some((cmd, args)) = server_cmd(&q.lang) else {
         return;
     };
-    let Some(bin) = find_server(cmd) else { return };
+    let Some(bin) = resolve_server(&q.lang).await else {
+        return;
+    };
     let Some(root) = lsp_root(q.pane, &q.lang).await else {
         return;
     };

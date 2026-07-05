@@ -798,6 +798,30 @@ body {
 .bufx:hover {
   color: #f85149;
 }
+.code-lsphint {
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-bottom: 1px solid #1e2430;
+  font-size: 12px;
+  color: #d6a04c;
+}
+.code-lsphint button {
+  padding: 2px 10px;
+  border-radius: 4px;
+  border: 1px solid #2f81f7;
+  background: transparent;
+  color: #2f81f7;
+  cursor: pointer;
+  font: inherit;
+}
+.code-lsphint button:hover:not(:disabled) {
+  background: #16202e;
+}
+.code-lsphint button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
 
 /* Transient notice (attention queue "all clear", etc.). */
 .toast {

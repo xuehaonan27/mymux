@@ -81,6 +81,7 @@ async fn main() {
         .route("/git/files", get(git::files))
         .route("/lsp", get(lsp::ws_handler))
         .route("/lsp/info", get(lsp::info))
+        .route("/lsp/install", post(lsp::install))
         .route("/proc/tree", get(proc::tree))
         .route("/proc/kill", post(proc::kill))
         .with_state(hub)

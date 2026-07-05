@@ -18,12 +18,13 @@ if ! systemctl --user show-environment >/dev/null 2>&1; then
 fi
 
 echo "mymux: building the release daemons…"
-( cd "$DIR" && cargo build --release -p mymuxd -p mymux-ptyd )
+( cd "$DIR" && cargo build --release -p mymuxd -p mymux-ptyd -p mymux-pkg )
 
 mkdir -p "$(dirname "$BIN_DST")" "$(dirname "$UNIT_DST")"
 install -m 0755 "$BIN_SRC" "$BIN_DST"
 install -m 0755 "$DIR/target/release/mymux-ptyd" "$HOME/.local/bin/mymux-ptyd"
 install -m 0755 "$DIR/target/release/mymux-attach" "$HOME/.local/bin/mymux-attach"
+install -m 0755 "$DIR/target/release/mymux-pkg" "$HOME/.local/bin/mymux-pkg"
 cp "$DIR/systemd/mymuxd.service" "$UNIT_DST"
 cp "$DIR/systemd/mymux-ptyd.service" "$HOME/.config/systemd/user/mymux-ptyd.service"
 

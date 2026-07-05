@@ -7,7 +7,7 @@ import { javascript } from '@codemirror/lang-javascript';
 import { python } from '@codemirror/lang-python';
 import { json } from '@codemirror/lang-json';
 import { markdown } from '@codemirror/lang-markdown';
-import { lspExtensionFor, notifySaved } from './lsp';
+import { lspExtensionFor, lspInstall, lspInstallable, notifySaved } from './lsp';
 
 // Resolved per call so the panel follows the active workspace's daemon.
 let apiBase = () => 'http://127.0.0.1:8088';
@@ -142,6 +142,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     <div class="code-main">
       <div class="code-hd"><span id="code-path">no file open</span><span id="code-hint">⌘P open · ⌘S save · esc / ⌘E close</span></div>
       <div class="code-bufs" id="code-bufs"></div>
+      <div class="code-lsphint" id="code-lsphint" style="display: none"></div>
       <div class="code-editor" id="code-editor"></div>
       <div class="code-diff" id="code-diff"></div>
       <div class="code-ph" id="code-ph"></div>
@@ -152,6 +153,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   const changesEl = panel.querySelector('#code-changes') as HTMLElement;
   const pathEl = panel.querySelector('#code-path') as HTMLElement;
   const bufsEl = panel.querySelector('#code-bufs') as HTMLElement;
+  const lspHintEl = panel.querySelector('#code-lsphint') as HTMLElement;
   const editorParent = panel.querySelector('#code-editor') as HTMLElement;
   const diffEl = panel.querySelector('#code-diff') as HTMLElement;
   const phEl = panel.querySelector('#code-ph') as HTMLElement;
@@ -344,9 +346,50 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     }
   }
 
+  // The file's language has a managed server recipe but no server yet: offer
+  // the one-click install (daemon → mymux-pkg). On success, a clean buffer is
+  // reopened so the fresh language extension attaches.
+  async function offerLspInstall(s: Session, path: string) {
+    const hit = await lspInstallable(apiBase(), s.pane, path);
+    if (!hit || current !== s || s.path !== path) return;
+    lspHintEl.replaceChildren();
+    const label = document.createElement('span');
+    label.textContent = `${hit.reason} — `;
+    const btn = document.createElement('button');
+    btn.textContent = `Install (${hit.lang})`;
+    btn.addEventListener('click', () => {
+      btn.disabled = true;
+      btn.textContent = 'Installing… (may take a minute)';
+      void (async () => {
+        const err = await lspInstall(apiBase(), hit.lang);
+        if (err) {
+          btn.disabled = false;
+          btn.textContent = `Install (${hit.lang})`;
+          label.textContent = `install failed: ${err} — `;
+          return;
+        }
+        lspHintEl.style.display = 'none';
+        if (current !== s || s.path !== path) return;
+        const buf = s.buffers.get(path);
+        const clean = buf && buf.state.doc.toString() === buf.savedDoc && !isDirty();
+        if (clean) {
+          s.buffers.delete(path);
+          s.path = null;
+          void openFile(path); // re-read + attach the language extension
+        } else {
+          label.textContent = 'installed — reopen the file to activate it ';
+          lspHintEl.style.display = 'flex';
+        }
+      })();
+    });
+    lspHintEl.append(label, btn);
+    lspHintEl.style.display = 'flex';
+  }
+
   async function openFile(path: string) {
     if (!current) return;
     const s = current;
+    lspHintEl.style.display = 'none';
     const existing = s.buffers.get(path);
     // A dirty buffer restores as-is — edits and undo history intact, no disk
     // read (the user's changes outrank whatever is on disk right now).
@@ -384,6 +427,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       const state = fileState(path, content, lsp);
       s.buffers.set(path, { savedDoc: content, state, dirty: false });
       mount(state);
+      if (!lsp) void offerLspInstall(s, path);
     }
     renderHeader();
     editor!.focus();

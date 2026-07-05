@@ -11,12 +11,62 @@ import { LSPClient, LSPPlugin, languageServerExtensions, Transport } from '@code
 interface LspInfo {
   available: boolean;
   reason?: string;
+  installable?: boolean;
   root?: string;
   fs_root?: string;
 }
 
 // One client (= one WS = one language server) per (daemon, workspace root).
 const conns = new Map<string, LSPClient>();
+
+const langOf = (path: string): string | null => {
+  if (path.endsWith('.rs')) return 'rust';
+  if (path.endsWith('.go')) return 'go';
+  if (path.endsWith('.py')) return 'python';
+  if (/\.(c|h)$/.test(path)) return 'c';
+  if (/\.(cc|cpp|cxx|hpp|hh)$/.test(path)) return 'cpp';
+  return null;
+};
+
+/**
+ * If this file's language server is missing but a managed install exists
+ * (mymux-pkg recipe), return what the UI needs for a one-click install offer.
+ */
+export async function lspInstallable(
+  apiBase: string,
+  pane: number | null,
+  relPath: string,
+): Promise<{ lang: string; reason: string } | null> {
+  const lang = langOf(relPath);
+  if (!lang) return null;
+  try {
+    const paneQ = pane != null ? `pane=${pane}&` : '';
+    const r = await fetch(`${apiBase}/lsp/info?${paneQ}lang=${lang}`);
+    if (!r.ok) return null;
+    const info: LspInfo = await r.json();
+    if (!info.available && info.installable) {
+      return { lang, reason: info.reason ?? 'language server not installed' };
+    }
+  } catch {
+    /* no hint */
+  }
+  return null;
+}
+
+/** Ask the daemon to install the language server (runs mymux-pkg). */
+export async function lspInstall(apiBase: string, lang: string): Promise<string | null> {
+  try {
+    const r = await fetch(`${apiBase}/lsp/install`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ lang }),
+    });
+    const res = (await r.json()) as { ok: boolean; err?: string };
+    return res.ok ? null : (res.err ?? 'install failed');
+  } catch (e) {
+    return String(e);
+  }
+}
 
 function wsTransport(url: string, onDown: () => void): Transport {
   const handlers = new Set<(value: string) => void>();
@@ -45,8 +95,6 @@ function wsTransport(url: string, onDown: () => void): Transport {
     },
   };
 }
-
-const langOf = (path: string) => (path.endsWith('.rs') ? 'rust' : null);
 
 // The library ADVERTISES LSP 3.17 pull diagnostics (`textDocument.diagnostic`
 // in its default capabilities) but implements no puller — so rust-analyzer's

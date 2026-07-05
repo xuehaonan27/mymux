@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/mux-core", "crates/mymuxd", "crates/mymux-connect", "crates/mymux-ptyd"]
+members = [
+    "crates/mux-core",
+    "crates/mymuxd",
+    "crates/mymux-connect",
+    "crates/mymux-ptyd",
+    "crates/mymux-pkg",
+]
 
 [workspace.package]
 version = "0.1.0"
