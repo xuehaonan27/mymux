@@ -130,11 +130,14 @@ fn panes_agent(panes: &[u32], agents: &BTreeMap<u32, AgentState>) -> Option<(&'s
 /// Build the `{"t":"state",...}` snapshot: tmux windows plus any native tabs
 /// (ephemeral or persistent, told apart by their id's high bits). When a
 /// native view is active, `active_native` carries its real layout tree.
+/// `tab_order` is the persistent first-seen ordering — new windows of either
+/// engine append to it, and the emitted list follows it.
 pub fn build_state_json(
     model: &Model,
     agents: &BTreeMap<u32, AgentState>,
     natives: &[NativeTab],
     active_native: Option<&ActiveNative>,
+    tab_order: &mut Vec<u32>,
 ) -> String {
     let layout = if let Some(a) = active_native {
         Some(cell_to_msg(&a.layout))
@@ -179,6 +182,22 @@ pub fn build_state_json(
             persistent: !tab.ephemeral,
         });
     }
+
+    // Display order = first-seen order across both engines (new tabs land on
+    // the right); drop ids that no longer exist.
+    let live: std::collections::BTreeSet<u32> = windows.iter().map(|w| w.id).collect();
+    tab_order.retain(|id| live.contains(id));
+    for w in &windows {
+        if !tab_order.contains(&w.id) {
+            tab_order.push(w.id);
+        }
+    }
+    windows.sort_by_key(|w| {
+        tab_order
+            .iter()
+            .position(|x| *x == w.id)
+            .unwrap_or(usize::MAX)
+    });
 
     let (active_window, active_pane) = match active_native {
         Some(a) => (Some(a.window), Some(a.pane)),
@@ -234,7 +253,7 @@ mod tests {
         agents.insert(1u32, AgentState::Running);
         agents.insert(2u32, AgentState::Waiting); // higher priority than running
 
-        let json = build_state_json(&m, &agents, &[], None);
+        let json = build_state_json(&m, &agents, &[], None, &mut Vec::new());
         assert!(json.contains(r#""agent":"waiting""#), "{json}");
         assert!(json.contains(r#""agent_pane":2"#), "{json}");
     }
@@ -279,7 +298,7 @@ mod tests {
                 ]),
             },
         };
-        let json = build_state_json(&m, &agents, &[tab], Some(&active));
+        let json = build_state_json(&m, &agents, &[tab], Some(&active), &mut Vec::new());
         assert!(json.contains(r#""agent":"waiting""#), "{json}");
         assert!(json.contains(&format!(r#""agent_pane":{p2}"#)), "{json}");
         assert!(json.contains(&format!(r#""active_pane":{p2}"#)), "{json}");

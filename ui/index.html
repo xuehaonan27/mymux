@@ -12,18 +12,18 @@
         <span class="dot" id="status"></span>
         <span class="title">mymux</span>
         <div id="tabs"></div>
-        <button id="btn-newwin" class="barbtn" title="New window — persistent, survives restarts (⌘T; tmux window: ⌘K w)">+win</button>
+        <button id="btn-newwin" class="barbtn" title="New window — persistent, survives restarts (⌘T in the app, ⌘K t anywhere)">+win</button>
         <button id="btn-splith" class="barbtn" title="Split right">▌▐</button>
         <button id="btn-splitv" class="barbtn" title="Split down">▀▄</button>
         <button id="btn-code" class="barbtn" title="Code / diff (⌘E)">code</button>
-        <button id="btn-proc" class="barbtn" title="Processes (⌘K t)">ps</button>
+        <button id="btn-proc" class="barbtn" title="Processes (⌘I in the app, ⌘K i anywhere)">ps</button>
         <button id="btn-host" class="barbtn" title="Switch host" style="display: none">host</button>
         <span id="agents"></span>
         <span id="meta"></span>
       </header>
       <div id="term"></div>
       <div id="hint" class="hint">
-        <b>⌘K</b> &nbsp;c new-win · x close · d/⇧d split · ←↑↓→ / hjkl move · 1–9 window · n/p next/prev · s shell · a attend · t procs · esc
+        <b>⌘K</b> &nbsp;t psh · n sh · u tmux · o psh-in-dir · w close · d/r split · m zoom · k keep · b break · ,/. swap · [ ] 1–9 win · e code · i procs · j attend · / help
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>

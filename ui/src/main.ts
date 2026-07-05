@@ -6,6 +6,7 @@ import type { CodePanel, CodePanelOpts } from './code';
 import { initProcPanel } from './proc';
 import { initHostManager } from './hostmanager';
 import { Workspace, WinInfo, WsState } from './workspace';
+import { ACTIONS, directAction, leaderAction, helpRows, KeyDeps } from './keymap';
 
 // The shell: a registry of per-host Workspaces (each owns its WS + panes; see
 // workspace.ts), the shared bar (host chips / window tabs / agent counts), the
@@ -218,35 +219,31 @@ function openCwdPrompt() {
   input.focus();
 }
 
-// Keymap help (⌘K ?). Click anywhere to dismiss — no Esc, keys stay inert.
+// Keymap help (⌘/ or ⌘K /). Generated from the keymap tables so it can never
+// drift from the actual bindings. Click anywhere to dismiss — no Esc.
 const helpEl = document.createElement('div');
 helpEl.className = 'help-panel';
-helpEl.innerHTML = `<div class="help-card">
-  <h2>mymux keys</h2>
+{
+  const esc = (s: string) =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const rows = helpRows()
+    .map(
+      ([desc, app, leader]) =>
+        `<tr><td>${esc(app)}</td><td>${esc(leader)}</td><td>${esc(desc)}</td></tr>`,
+    )
+    .join('');
+  helpEl.innerHTML = `<div class="help-card">
+  <h2>mymux keys — app column works in the desktop app; ⌘K works everywhere</h2>
   <table>
-    <tr><th colspan="2">Windows</th></tr>
-    <tr><td>⌘T / +win / ⌘K c/s</td><td>new window (∞ persistent — the default; the app opens with one)</td></tr>
-    <tr><td>⌘K ⇧C</td><td>new ∞ window in a chosen directory</td></tr>
-    <tr><td>⌘K ⇧S</td><td>new throwaway shell (⌁ — dies with the daemon)</td></tr>
-    <tr><td>⌘K w</td><td>new tmux window (starts tmux on demand)</td></tr>
-    <tr><td>⌘K k / ⇧K</td><td>keep (⌁ → ∞) / make throwaway (∞ → ⌁, asks first)</td></tr>
-    <tr><td>⌘1–9, ⌘K n/p</td><td>switch window</td></tr>
-    <tr><td>double-click tab</td><td>rename (✓ or click away = save, ✕ = cancel)</td></tr>
-    <tr><th colspan="2">Panes</th></tr>
-    <tr><td>⌘D / ⌘⇧D</td><td>split right / down</td></tr>
-    <tr><td>⌘⌥arrows</td><td>move focus between panes</td></tr>
-    <tr><td>⌘K z</td><td>zoom (maximize) the pane</td></tr>
-    <tr><td>⌘K { / }</td><td>swap pane with its neighbour</td></tr>
-    <tr><td>⌘K !</td><td>break the pane out into its own window</td></tr>
-    <tr><td>⌘W / ⌘K x</td><td>close pane (asks first when a job is running)</td></tr>
-    <tr><th colspan="2">Panels &amp; hosts</th></tr>
-    <tr><td>⌘E</td><td>code / diff panel</td></tr>
-    <tr><td>⌘K t</td><td>process tree</td></tr>
-    <tr><td>⌘J / ⌘K a</td><td>jump to the agent that needs you</td></tr>
-    <tr><td>⌘⇧1–9</td><td>switch host</td></tr>
-    <tr><td>⌘K ?</td><td>this help</td></tr>
+    <tr><th>app</th><th>⌘K …</th><th></th></tr>
+    ${rows}
+    <tr><td>⌘1–9</td><td>⌘K 1–9</td><td>switch window</td></tr>
+    <tr><td>⌘⇧1–9</td><td></td><td>switch host</td></tr>
+    <tr><td>⌘⌥arrows</td><td>⌘K arrows</td><td>move focus between panes</td></tr>
+    <tr><td colspan="2">double-click tab</td><td>rename (✓ or click away = save, ✕ = cancel)</td></tr>
   </table>
 </div>`;
+}
 document.body.appendChild(helpEl);
 helpEl.addEventListener('click', () => helpEl.classList.remove('show'));
 function toggleHelp() {
@@ -567,7 +564,7 @@ function toggleProc() {
 document.getElementById('btn-code')?.addEventListener('click', toggleCode);
 document.getElementById('btn-proc')?.addEventListener('click', toggleProc);
 
-// ---- keybindings (⌘K leader + direct combos; full iTerm2 set in Tauri) --------
+// ---- keybindings — dispatch driven by the keymap tables (see keymap.ts) -------
 
 let leaderActive = false;
 function setLeader(on: boolean) {
@@ -581,8 +578,36 @@ function copySelection() {
 }
 
 const ARROWS: Record<string, 'L' | 'R' | 'U' | 'D'> = {
-  ArrowLeft: 'L', ArrowRight: 'R', ArrowUp: 'U', ArrowDown: 'D',
-  h: 'L', l: 'R', k: 'U', j: 'D',
+  ArrowLeft: 'L',
+  ArrowRight: 'R',
+  ArrowUp: 'U',
+  ArrowDown: 'D',
+};
+
+// ⌁↔∞ toggle on the active window: promote silently, demote with a confirm.
+function keepToggle() {
+  const w = active();
+  if (!w) return;
+  const win = w.windowList.find((x) => x.active);
+  if (!win) return;
+  if (win.ephemeral) {
+    w.sendJson({ t: 'promote_window', id: win.id });
+    toast('Promoted to ∞ — this shell now survives restarts.');
+  } else if (win.persistent) {
+    showDemoteConfirm(w, win.id);
+  } else {
+    toast('tmux windows are managed by tmux.');
+  }
+}
+
+const keyDeps: KeyDeps = {
+  ws: () => active(),
+  openCwdPrompt,
+  toggleHelp,
+  toggleProc: () => toggleProc(),
+  toggleCode: () => toggleCode(),
+  jumpAttention: () => jumpToAttention(),
+  keepToggle,
 };
 
 function handleLeaderKey(e: KeyboardEvent) {
@@ -590,55 +615,10 @@ function handleLeaderKey(e: KeyboardEvent) {
   if (k === 'Escape') return;
   const w = active();
   if (!w) return;
-  const lower = k.toLowerCase();
-  // Native persistent windows are the default; tmux windows stay reachable
-  // behind ⌘K w for as long as the tmux engine is kept around.
-  if (lower === 'c') {
-    if (e.shiftKey) return openCwdPrompt();
-    return w.sendJson({ t: 'new_persistent' });
-  }
-  if (lower === 'w') return w.sendJson({ t: 'new_window' });
-  if (lower === 'x') return w.closeActive();
-  if (lower === 'a') return jumpToAttention();
-  if (lower === 't') return toggleProc();
-  // s = another persistent window (the default kind); ⇧S = the throwaway ⌁.
-  if (lower === 's') return w.sendJson({ t: e.shiftKey ? 'new_ephemeral' : 'new_persistent' });
-  if (lower === 'd') return w.splitActive(e.shiftKey ? 'v' : 'h');
-  if (k === '|' || k === '\\') return w.splitActive('h');
-  if (k === '-') return w.splitActive('v');
-  if (lower === 'z') {
-    if (w.activePane != null) w.sendJson({ t: 'zoom', pane: w.activePane });
-    return;
-  }
-  if (k === '{') return w.sendJson({ t: 'swap_pane', next: false });
-  if (k === '}') return w.sendJson({ t: 'swap_pane', next: true });
-  if (k === '!') {
-    if (w.activePane != null) w.sendJson({ t: 'break_pane', pane: w.activePane });
-    return;
-  }
-  if (lower === 'k') {
-    const win = w.windowList.find((x) => x.active);
-    if (!win) return;
-    if (e.shiftKey) {
-      // ∞→⌁ demote loses the survival guarantee — always confirm.
-      if (win.persistent) showDemoteConfirm(w, win.id);
-      else if (win.ephemeral) toast('Already throwaway (⌁).');
-      else toast('tmux windows are managed by tmux.');
-      return;
-    }
-    if (win.ephemeral) {
-      w.sendJson({ t: 'promote_window', id: win.id });
-      toast('Promoted to ∞ — this shell now survives restarts.');
-    } else {
-      toast(win.persistent ? 'Already persistent.' : 'tmux windows are managed by tmux.');
-    }
-    return;
-  }
-  if (k === '?') return toggleHelp();
-  if (k === 'n' || k === ']') return w.switchWindowRel(1);
-  if (k === 'p' || k === '[') return w.switchWindowRel(-1);
+  const a = leaderAction(k.toLowerCase()) ?? leaderAction(k);
+  if (a) return ACTIONS[a].run(keyDeps);
   if (k >= '1' && k <= '9') return w.switchWindowIndex(parseInt(k, 10) - 1);
-  const d = ARROWS[k] ?? ARROWS[lower];
+  const d = ARROWS[k];
   if (d) w.navPane(d);
 }
 
@@ -646,7 +626,7 @@ document.addEventListener(
   'keydown',
   (e) => {
     if (leaderActive) {
-      // Ignore modifier-only keydowns so "leader then Shift+D" works.
+      // Ignore modifier-only keydowns so a chorded second key still works.
       if (['Shift', 'Meta', 'Control', 'Alt'].includes(e.key)) {
         e.preventDefault();
         return;
@@ -685,31 +665,18 @@ document.addEventListener(
     }
 
     if (!mod(e)) return;
-    const lower = e.key.toLowerCase();
     const stop = () => {
       e.preventDefault();
       e.stopPropagation();
     };
+    const lower = e.key.toLowerCase();
 
-    // Works everywhere (browser + Tauri):
-    if (lower === 'e' && !e.shiftKey && !e.altKey) {
-      stop();
-      toggleCode();
-      return;
-    }
-    if (lower === 'j' && !e.shiftKey && !e.altKey) {
-      stop();
-      jumpToAttention();
-      return;
-    }
+    // The leader itself, and the two parameterized families the tables don't
+    // model: ⌘1-9 windows (app), ⌘⇧1-9 hosts (app; the one shift exception),
+    // ⌘⌥arrows pane nav, and ⌘C copy-when-selected.
     if (lower === 'k' && !e.shiftKey && !e.altKey) {
       stop();
       setLeader(true);
-      return;
-    }
-    if (lower === 'd' && !e.altKey) {
-      stop();
-      active()?.splitActive(e.shiftKey ? 'v' : 'h');
       return;
     }
     if (lower === 'c' && !e.shiftKey && !e.altKey) {
@@ -717,32 +684,35 @@ document.addEventListener(
         stop();
         copySelection();
       }
+      return; // no selection → let ⌘C reach the terminal (SIGINT etc.)
+    }
+    if (e.altKey && ARROWS[e.key]) {
+      stop();
+      active()?.navPane(ARROWS[e.key]);
       return;
     }
-
-    // Full iTerm2 direct combos — only in the Tauri app (a browser reserves these):
     if (isTauri) {
       if (e.shiftKey && !e.altKey && e.code >= 'Digit1' && e.code <= 'Digit9') {
-        // ⌘⇧1-9: switch host (⌘1-9 stays window switching).
         stop();
         const ids = [...workspaces.keys()];
         const id = ids[parseInt(e.code.slice(5), 10) - 1];
         if (id) switchTo(id);
-      } else if (lower === 't' && !e.shiftKey && !e.altKey) {
-        stop();
-        active()?.sendJson({ t: 'new_persistent' });
-      } else if (lower === 'w' && !e.shiftKey && !e.altKey) {
-        stop();
-        active()?.closeActive();
-      } else if (!e.shiftKey && !e.altKey && e.key >= '1' && e.key <= '9') {
+        return;
+      }
+      if (!e.shiftKey && !e.altKey && e.key >= '1' && e.key <= '9') {
         stop();
         active()?.switchWindowIndex(parseInt(e.key, 10) - 1);
-      } else if (e.altKey) {
-        const ad = ARROWS[e.key];
-        if (ad) {
-          stop();
-          active()?.navPane(ad);
-        }
+        return;
+      }
+    }
+
+    // Same letter as the leader layer, bound directly under ⌘ where the
+    // platform allows it (shift-free by design).
+    if (!e.shiftKey && !e.altKey) {
+      const action = directAction(e.key.toLowerCase(), isTauri);
+      if (action) {
+        stop();
+        ACTIONS[action].run(keyDeps);
       }
     }
     // Cmd/Ctrl+V paste falls through to xterm, which applies bracketed paste.

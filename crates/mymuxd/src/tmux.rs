@@ -101,6 +101,10 @@ pub struct Hub {
     last_size: Mutex<(u16, u16)>,
     /// One-shot guard for the first-connection default-shell bootstrap.
     booted: std::sync::atomic::AtomicBool,
+    /// Tab display order: window ids (tmux and native share the u32 space)
+    /// in FIRST-SEEN order, so new windows of either engine append on the
+    /// right instead of interleaving by engine.
+    tab_order: Mutex<Vec<u32>>,
 }
 
 impl Hub {
@@ -121,6 +125,7 @@ impl Hub {
             active_view: Mutex::new(ActiveView::Tmux),
             last_size: Mutex::new((80, 24)),
             booted: std::sync::atomic::AtomicBool::new(false),
+            tab_order: Mutex::new(Vec::new()),
         })
     }
 
@@ -590,8 +595,13 @@ impl Hub {
 
     pub async fn new_window(self: &Arc<Self>, cwd: Option<String>) {
         // tmux is opt-in now: the first ⌘K w boots the control client (and
-        // with it the server) on demand — commands queue until it's up.
+        // with it the server) on demand. `new-session` already creates the
+        // first window — sending new-window too would make TWO.
+        let fresh = !self.state.lock().unwrap().running;
         self.ensure_started();
+        if fresh {
+            return;
+        }
         // Open in the requested directory, else the active pane's (never the
         // tmux server's start dir).
         match cwd.as_deref().and_then(canon_dir) {
@@ -850,7 +860,8 @@ impl Hub {
         let agents = self.agents.lock().unwrap();
         let view: BTreeMap<u32, AgentState> =
             agents.entries.iter().map(|(&p, e)| (p, e.state)).collect();
-        build_state_json(&model, &view, &tabs, active.as_ref())
+        let mut order = self.tab_order.lock().unwrap();
+        build_state_json(&model, &view, &tabs, active.as_ref(), &mut order)
     }
 
     /// Update an agent's hook-reported state (`None` clears it), then broadcast.
