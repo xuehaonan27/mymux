@@ -49,6 +49,9 @@ pub enum Status {
     },
     /// Host key CHANGED vs `known_hosts` — possible MITM; refuse.
     HostKeyMismatch,
+    /// SSH works, but nothing listens on the remote daemon port — mymuxd is
+    /// not running/installed on the host. Needs user action; no retry loop.
+    DaemonUnreachable,
     Error(String),
 }
 
@@ -56,7 +59,10 @@ pub enum Status {
 fn is_fatal(s: &Status) -> bool {
     matches!(
         s,
-        Status::AuthFailed | Status::HostKeyUnknown { .. } | Status::HostKeyMismatch
+        Status::AuthFailed
+            | Status::HostKeyUnknown { .. }
+            | Status::HostKeyMismatch
+            | Status::DaemonUnreachable
     )
 }
 
@@ -157,6 +163,31 @@ async fn connect_and_serve(
         let _ = ch
             .exec(false, cfg.remote_daemon_cmd.clone().into_bytes())
             .await;
+    }
+
+    // The tunnel is only useful if mymuxd actually answers on the remote
+    // port — otherwise "Connected" drops the user into a workspace that can
+    // never attach. Probe with a direct-tcpip channel, retrying while the
+    // daemon we just exec'd warms up; give up as a FATAL state (user must
+    // install/start mymuxd) instead of a silent forever-reconnect.
+    let mut daemon_ok = false;
+    for _ in 0..14 {
+        match tokio::time::timeout(
+            Duration::from_secs(3),
+            handle.channel_open_direct_tcpip("localhost", cfg.remote_port as u32, "127.0.0.1", 0),
+        )
+        .await
+        {
+            Ok(Ok(ch)) => {
+                let _ = ch.close().await;
+                daemon_ok = true;
+                break;
+            }
+            _ => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    }
+    if !daemon_ok {
+        return Err(Status::DaemonUnreachable);
     }
 
     let listener = TcpListener::bind(("127.0.0.1", cfg.local_port))

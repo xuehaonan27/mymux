@@ -61,6 +61,8 @@ export interface WorkspaceHooks {
   onSessionEnd(w: Workspace): void;
   /** The daemon wants the user to confirm closing a busy pane. */
   onConfirmClose(w: Workspace, pane: number, cmd: string): void;
+  /** Open the host manager (banner escape hatch; absent in the browser). */
+  onOpenHosts?(): void;
 }
 
 interface Pane {
@@ -164,10 +166,20 @@ export class Workspace {
     if (s === 'open') {
       this.banner.style.display = 'none';
     } else {
-      this.banner.textContent =
+      const text =
         s === 'connecting'
           ? `Connecting to ${this.label}…`
           : `Connection to ${this.label} lost — reconnecting…`;
+      this.banner.replaceChildren(document.createTextNode(text));
+      // Escape hatch: a dead daemon would otherwise leave this banner up
+      // forever with nowhere to go.
+      if (this.hooks.onOpenHosts) {
+        const btn = document.createElement('button');
+        btn.className = 'ws-banner-btn';
+        btn.textContent = 'Hosts';
+        btn.addEventListener('click', () => this.hooks.onOpenHosts?.());
+        this.banner.appendChild(btn);
+      }
       this.banner.style.display = '';
     }
     this.hooks.onStatus(this, s);

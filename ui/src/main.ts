@@ -300,6 +300,7 @@ function ensureWorkspace(id: string, label: string, port: number): Workspace {
       onConfirmClose(w, pane, cmd) {
         showConfirmClose(w, pane, cmd);
       },
+      onOpenHosts: isTauri ? () => hostManager?.open() : undefined,
     },
   });
   workspaces.set(id, w);

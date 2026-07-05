@@ -28,6 +28,7 @@ type Status =
   | 'reconnecting'
   | 'auth_failed'
   | 'host_key_mismatch'
+  | 'daemon_unreachable'
   | { host_key_unknown: { fingerprint: string } }
   | { error: string };
 
@@ -393,6 +394,12 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     else if (s === 'reconnecting') setStatus('info', 'Reconnecting…');
     else if (s === 'auth_failed') {
       setStatus('error', 'Authentication failed — wrong passphrase, or the key isn’t authorized.');
+      settleAttempt();
+    } else if (s === 'daemon_unreachable') {
+      setStatus(
+        'error',
+        'SSH works, but mymuxd isn’t running on that host. Install/start it there: scripts/install-systemd.sh',
+      );
       settleAttempt();
     } else if (s === 'host_key_mismatch') {
       setStatus(
