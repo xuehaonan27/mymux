@@ -280,6 +280,47 @@ body {
   opacity: 0.6;
   cursor: default;
 }
+.pkgs-search {
+  display: flex;
+  gap: 8px;
+}
+.pkgs-search-input {
+  flex: 1;
+  padding: 5px 10px;
+  border-radius: 4px;
+  border: 1px solid #30363d;
+  background: #161b22;
+  color: #e6edf3;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+.pkgs-search-input:focus {
+  border-color: #2f81f7;
+}
+.pkgs-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  margin: 0 8px;
+  border-radius: 8px;
+  border: 1px solid #30363d;
+  color: #9aa5b1;
+}
+.pkgs-badge-openvsx {
+  border-color: #a371f7;
+  color: #a371f7;
+}
+.pkgs-badge-npm {
+  border-color: #d29922;
+  color: #d29922;
+}
+.pkgs-badge-curated {
+  border-color: #3fb950;
+  color: #3fb950;
+}
+.pkgs-card-head .pkgs-ver {
+  margin-left: auto;
+}
 .help-panel {
   display: none;
   position: fixed;

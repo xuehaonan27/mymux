@@ -16,13 +16,52 @@ fn pkg_cli() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("mymux-pkg"))
 }
 
-/// Package names come from the UI: keep them boring before they hit argv.
+/// Package specs come from the UI: keep them boring before they hit argv
+/// (no shell involved, but names shouldn't smuggle path tricks either).
+/// Accepts curated names plus dynamic specs (`openvsx:ns.name@1.2`,
+/// `npm:@scope/pkg`).
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
-        && name.len() <= 64
+        && name.len() <= 128
+        && !name.contains("..")
+        && !name.starts_with('-')
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            .all(|c| c.is_ascii_alphanumeric() || "-_.@:/".contains(c))
+}
+
+/// `GET /pkgs/search?q=` — relay `mymux-pkg search` (curated + Open VSX +
+/// npm). The network calls run HERE, on the daemon host — the client side
+/// may have no route to the registries.
+pub async fn search(
+    axum::extract::Query(q): axum::extract::Query<SearchQuery>,
+) -> Json<serde_json::Value> {
+    let empty = serde_json::json!({ "hits": [], "warnings": [] });
+    let query = q.q.unwrap_or_default();
+    if query.trim().is_empty() || query.len() > 100 {
+        return Json(empty);
+    }
+    let out = Command::new(pkg_cli())
+        .arg("search")
+        .arg(&query)
+        .output()
+        .await;
+    let v = out
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| serde_json::from_slice(&o.stdout).ok())
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "hits": [],
+                "warnings": ["mymux-pkg search failed on the daemon host"],
+            })
+        });
+    Json(v)
+}
+
+#[derive(Deserialize)]
+pub struct SearchQuery {
+    q: Option<String>,
 }
 
 /// `GET /pkgs/catalog` — the CLI's recipe directory (JSON array, relayed).

@@ -57,7 +57,7 @@ fn pkgs_dir() -> Option<PathBuf> {
 
 /// A managed package's server binary for `lang`, if one is installed.
 /// Invalid or unknown packages are skipped (contract: consumers are lenient).
-fn managed_server(lang: &str) -> Option<PathBuf> {
+fn managed_server(lang: &str) -> Option<(PathBuf, Vec<String>)> {
     #[derive(serde::Deserialize)]
     struct Pkg {
         v: u32,
@@ -65,6 +65,8 @@ fn managed_server(lang: &str) -> Option<PathBuf> {
         #[serde(default)]
         langs: Vec<String>,
         bin: String,
+        #[serde(default)]
+        args: Vec<String>,
     }
     for e in std::fs::read_dir(pkgs_dir()?).ok()?.flatten() {
         let dir = e.path();
@@ -74,26 +76,38 @@ fn managed_server(lang: &str) -> Option<PathBuf> {
         let Ok(p) = serde_json::from_str::<Pkg>(&s) else {
             continue;
         };
-        if p.v != 1 || p.kind != "lsp-server" || !p.langs.iter().any(|l| l == lang) {
+        if p.v != 1 || p.kind != "lsp-server" || p.bin.is_empty() {
+            continue;
+        }
+        if !p.langs.iter().any(|l| l == lang) {
             continue;
         }
         let bin = dir.join(p.bin);
         if bin.is_file() {
-            return Some(bin);
+            return Some((bin, p.args));
         }
     }
     None
 }
 
-/// Resolve the server binary for a language: managed package → PATH heuristic
-/// (with a `--version` probe — a rustup shim can exist without the component;
-/// managed installs were verified at install time and skip the probe, which
-/// some servers, e.g. pyright-langserver, wouldn't survive anyway).
-async fn resolve_server(lang: &str) -> Option<PathBuf> {
-    let (cmd, _) = server_cmd(lang)?;
-    if let Some(bin) = managed_server(lang) {
-        return Some(bin);
+/// Resolve the server launch (binary + args) for a language: a managed
+/// package first — including languages the built-in table doesn't know, when
+/// the user bound one via `mymux-pkg lang` (its manifest carries the launch
+/// args) — then the PATH heuristic for the built-in table (with a
+/// `--version` probe: a rustup shim can exist without the component; managed
+/// installs were verified at install time and skip the probe).
+async fn resolve_server(lang: &str) -> Option<(PathBuf, Vec<String>)> {
+    if let Some((bin, mut args)) = managed_server(lang) {
+        // Manifests written before `args` existed have none; for built-in
+        // languages fall back to the table defaults (pyright needs --stdio).
+        if args.is_empty() {
+            if let Some((_, table_args)) = server_cmd(lang) {
+                args = table_args.iter().map(|s| s.to_string()).collect();
+            }
+        }
+        return Some((bin, args));
     }
+    let (cmd, args) = server_cmd(lang)?;
     let bin = find_server(cmd)?;
     let runs = Command::new(&bin)
         .arg("--version")
@@ -103,7 +117,7 @@ async fn resolve_server(lang: &str) -> Option<PathBuf> {
         .await
         .map(|s| s.success())
         .unwrap_or(false);
-    runs.then_some(bin)
+    runs.then(|| (bin, args.iter().map(|s| s.to_string()).collect()))
 }
 
 /// Locate a server binary. Under systemd --user the daemon's PATH is minimal
@@ -124,6 +138,29 @@ fn find_server(cmd: &str) -> Option<PathBuf> {
             .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
             .unwrap_or(false)
     })
+}
+
+/// PATH for spawned servers. npm-installed servers are `#!/usr/bin/env node`
+/// scripts, and under systemd --user the daemon's PATH has no node — extend
+/// it with the usual per-user tool dirs (newest nvm node first).
+fn augmented_path() -> std::ffi::OsString {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let mut nvm: Vec<PathBuf> = std::fs::read_dir(home.join(".nvm/versions/node"))
+            .map(|rd| rd.flatten().map(|e| e.path().join("bin")).collect())
+            .unwrap_or_default();
+        nvm.sort();
+        if let Some(newest) = nvm.pop() {
+            dirs.push(newest);
+        }
+        dirs.push(home.join(".cargo/bin"));
+        dirs.push(home.join(".local/bin"));
+        dirs.push(home.join("go/bin"));
+    }
+    std::env::join_paths(dirs.iter().filter(|d| d.is_dir()))
+        .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
 }
 
 /// The nearest ancestor of `cwd` (inclusive) containing one of `markers`.
@@ -192,12 +229,23 @@ fn unavailable(reason: String, fs_root: Option<String>, installable: bool) -> Js
 
 /// `GET /lsp/info?pane=&lang=` — can we serve LSP for this pane, and where from?
 pub async fn info(Query(q): Query<LspQuery>) -> Json<LspInfo> {
-    let Some((cmd, _)) = server_cmd(&q.lang) else {
-        return unavailable(format!("unsupported language: {}", q.lang), None, false);
-    };
     let fs_root = root_for(q.pane).await.display().to_string();
     if resolve_server(&q.lang).await.is_none() {
-        return unavailable(format!("{cmd} is not installed"), Some(fs_root), true);
+        // Not resolvable. Built-in languages have a one-recipe install; other
+        // languages need the packages panel + a `mymux-pkg lang` binding.
+        return match server_cmd(&q.lang) {
+            Some((cmd, _)) => {
+                unavailable(format!("{cmd} is not installed"), Some(fs_root), true)
+            }
+            None => unavailable(
+                format!(
+                    "no language server bound for {} (install one in the packages panel, then `mymux-pkg lang <pkg> {}`)",
+                    q.lang, q.lang
+                ),
+                Some(fs_root),
+                false,
+            ),
+        };
     }
     match lsp_root(q.pane, &q.lang).await {
         Some(root) => Json(LspInfo {
@@ -283,10 +331,7 @@ pub async fn ws_handler(ws: WebSocketUpgrade, Query(q): Query<LspQuery>) -> Resp
 }
 
 async fn handle(socket: WebSocket, q: LspQuery) {
-    let Some((cmd, args)) = server_cmd(&q.lang) else {
-        return;
-    };
-    let Some(bin) = resolve_server(&q.lang).await else {
+    let Some((bin, args)) = resolve_server(&q.lang).await else {
         return;
     };
     let Some(root) = lsp_root(q.pane, &q.lang).await else {
@@ -294,8 +339,9 @@ async fn handle(socket: WebSocket, q: LspQuery) {
     };
 
     let spawn = Command::new(&bin)
-        .args(args)
+        .args(&args)
         .current_dir(&root)
+        .env("PATH", augmented_path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -304,7 +350,7 @@ async fn handle(socket: WebSocket, q: LspQuery) {
     let mut child = match spawn {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("mymuxd: lsp spawn {cmd}: {e}");
+            eprintln!("mymuxd: lsp spawn {}: {e}", bin.display());
             return;
         }
     };

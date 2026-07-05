@@ -29,6 +29,15 @@ Copilot) are NEVER touched** — enforced by a unit test in mymux-pkg.
   else hex-dumps its first 4 KiB); the placeholder only remains for real
   errors (404 …). Markdown PREVIEW deliberately deferred: needs a sanitizer
   chain to be XSS-safe in the Tauri webview, low value while md is editable.
+- ~~Dynamic sources (no more hardcoded-only recipes)~~ — **DONE 2026-07-05**:
+  `mymux-pkg search` (curated + Open VSX API + npm registry, network from the
+  daemon host), `install openvsx:ns.name[@ver]` / `install npm:pkg[@ver]`
+  (auto bin detection → `lsp-server`), `lang <pkg> <lang…> -- <launch args…>`
+  binding, manifest `args`/`spec`/`sha256` fields, daemon `GET /pkgs/search`
+  + spec-tolerant validation, packages-panel search box with source badges,
+  managed LSP resolution for ANY bound language id + augmented spawn PATH
+  (nvm node under systemd). Verified: real bash-language-server session
+  (search → install → bind → hover) end-to-end through the daemon.
 - P2.5 (optional): TextMate grammars/themes from Open VSX for CodeMirror
   highlighting of languages we don't bundle (vscode-textmate/shiki route).
 - P3 (only if ever needed): third-party loading (JS/WASM). Revisit after P2;

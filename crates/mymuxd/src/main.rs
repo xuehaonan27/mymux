@@ -22,8 +22,60 @@ use axum::Router;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Env defaults (proxy etc.) must land BEFORE the runtime spawns worker
+    // threads — set_var is only sound single-threaded.
+    load_env_file();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(run());
+}
+
+/// Load `$MYMUX_CONFIG_DIR|~/.config/mymux/env` as environment DEFAULTS (the
+/// process env wins). Mirrors mymux-pkg's loader — the env-file location is
+/// part of the shared convention (see PKG-SPEC), not shared code. This keeps
+/// a dev-run mymuxd consistent with the systemd unit, whose
+/// `EnvironmentFile=` reads the same file.
+fn load_env_file() {
+    let dir = std::env::var_os("MYMUX_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config/mymux"))
+        });
+    let Some(path) = dir.map(|d| d.join("env")) else {
+        return;
+    };
+    let Ok(s) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for l in s.lines() {
+        let t = l.trim();
+        let t = t.strip_prefix("export ").unwrap_or(t).trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = t.split_once('=') else {
+            continue;
+        };
+        let k = k.trim();
+        if k.is_empty() || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            continue;
+        }
+        let v = v.trim();
+        let v = v
+            .strip_prefix('"')
+            .and_then(|x| x.strip_suffix('"'))
+            .or_else(|| v.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')))
+            .unwrap_or(v);
+        if std::env::var_os(k).is_none() {
+            std::env::set_var(k, v);
+        }
+    }
+}
+
+async fn run() {
     let hub = tmux::Hub::new();
     fs::init_hub(hub.clone()); // /fs, /git, /lsp roots resolve native panes via the Hub
     tokio::spawn(tmux::heuristic_sweep(hub.clone()));
@@ -87,6 +139,7 @@ async fn main() {
         .route("/lsp/info", get(lsp::info))
         .route("/lsp/install", post(lsp::install))
         .route("/pkgs/catalog", get(pkgs::catalog))
+        .route("/pkgs/search", get(pkgs::search))
         .route("/pkgs/install", post(pkgs::install))
         .route("/pkgs/remove", post(pkgs::remove))
         .route("/proc/tree", get(proc::tree))

@@ -21,6 +21,12 @@ RestartSec=2
 # searches these itself, so this is belt-and-braces.
 Environment=PATH=%h/.cargo/bin:%h/.local/bin:%h/go/bin:/usr/local/bin:/usr/bin:/bin
 
+# User environment defaults — proxy settings for clusters whose egress needs
+# one (https_proxy / MYMUX_PROXY, picked up by package installs & searches),
+# MYMUX_* knobs, extra PATH. `-` = optional. mymuxd and mymux-pkg also read
+# this file themselves, so dev runs behave the same.
+EnvironmentFile=-%h/.config/mymux/env
+
 # Optional overrides:
 # Environment=MYMUX_ROOT=%h
 # Environment=MYMUX_ADDR=127.0.0.1:8088

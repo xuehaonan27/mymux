@@ -213,13 +213,59 @@ async function applyCodeAction(view: EditorView, action: LspCodeAction): Promise
   return null;
 }
 
+// Extension → LSP language id. Broad on purpose: any of these can be served
+// by a dynamically installed server (`mymux-pkg lang <pkg> <lang>`); built-in
+// resolution only exists for rust/go/python/c/cpp.
+const EXT_LANG: Record<string, string> = {
+  rs: 'rust',
+  go: 'go',
+  py: 'python',
+  pyi: 'python',
+  c: 'c',
+  h: 'c',
+  cc: 'cpp',
+  cpp: 'cpp',
+  cxx: 'cpp',
+  hpp: 'cpp',
+  hh: 'cpp',
+  sh: 'bash',
+  bash: 'bash',
+  ts: 'typescript',
+  tsx: 'typescriptreact',
+  js: 'javascript',
+  jsx: 'javascriptreact',
+  mjs: 'javascript',
+  cjs: 'javascript',
+  json: 'json',
+  yaml: 'yaml',
+  yml: 'yaml',
+  toml: 'toml',
+  md: 'markdown',
+  html: 'html',
+  css: 'css',
+  scss: 'scss',
+  lua: 'lua',
+  rb: 'ruby',
+  php: 'php',
+  java: 'java',
+  kt: 'kotlin',
+  swift: 'swift',
+  zig: 'zig',
+  hs: 'haskell',
+  ml: 'ocaml',
+  ex: 'elixir',
+  exs: 'elixir',
+  sql: 'sql',
+  tf: 'terraform',
+  vue: 'vue',
+  svelte: 'svelte',
+};
+
 const langOf = (path: string): string | null => {
-  if (path.endsWith('.rs')) return 'rust';
-  if (path.endsWith('.go')) return 'go';
-  if (path.endsWith('.py')) return 'python';
-  if (/\.(c|h)$/.test(path)) return 'c';
-  if (/\.(cc|cpp|cxx|hpp|hh)$/.test(path)) return 'cpp';
-  return null;
+  const base = path.split('/').pop() ?? path;
+  if (/^dockerfile$/i.test(base)) return 'dockerfile';
+  const ext = base.includes('.') ? (base.split('.').pop() ?? '').toLowerCase() : '';
+  return EXT_LANG[ext] ?? null;
 };
 
 /**
