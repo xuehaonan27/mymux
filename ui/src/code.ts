@@ -2,7 +2,8 @@ import { EditorView, basicSetup } from 'codemirror';
 import { MergeView } from '@codemirror/merge';
 import { EditorState, type Extension } from '@codemirror/state';
 import { keymap, lineNumbers } from '@codemirror/view';
-import { oneDark } from '@codemirror/theme-one-dark';
+import { getPrefs } from './prefs';
+import { cmThemeSlot, cmThemeFor, presetById, rethemeState } from './theme';
 import { rust } from '@codemirror/lang-rust';
 import { javascript } from '@codemirror/lang-javascript';
 import { python } from '@codemirror/lang-python';
@@ -210,6 +211,8 @@ export interface CodePanel {
   quickOpen(): void;
   /** Esc pressed: returns true if consumed (e.g. closed quick-open). */
   escape(): boolean;
+  /** Re-apply the current theme preset to every editor and buffer. */
+  retheme(): void;
 }
 
 // One code view per pane. The tree, the changes list and the editor are all
@@ -427,10 +430,11 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
 
   // Placeholder shown when a pane has no file open — read-only so it can't be
   // mistaken for an editable buffer.
+  const themed = () => cmThemeSlot.of(cmThemeFor(presetById(getPrefs().theme)));
   const emptyState = () =>
     EditorState.create({
       doc: '',
-      extensions: [basicSetup, oneDark, editorTheme, EditorView.editable.of(false)],
+      extensions: [basicSetup, editorTheme, themed(), EditorView.editable.of(false)],
     });
 
   function fileState(path: string, doc: string, lsp: Extension | null): EditorState {
@@ -438,8 +442,8 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       doc,
       extensions: [
         basicSetup,
-        oneDark,
         editorTheme,
+        themed(),
         langFor(path),
         ...(lsp ? [lsp] : []),
         keymap.of([
@@ -649,8 +653,8 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
         lineNumbers(),
         EditorState.readOnly.of(true),
         EditorView.editable.of(false),
-        oneDark,
         editorTheme,
+        themed(),
         langFor(path),
       ];
       mergeView = new MergeView({
@@ -984,6 +988,15 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
         return true;
       }
       return false;
+    },
+    retheme() {
+      const preset = presetById(getPrefs().theme);
+      if (editor) editor.dispatch({ effects: cmThemeSlot.reconfigure(cmThemeFor(preset)) });
+      if (current) {
+        for (const [, b] of current.buffers) {
+          if (b.kind === 'text') b.state = rethemeState(b.state, preset);
+        }
+      }
     },
     toggle() {
       if (open) {

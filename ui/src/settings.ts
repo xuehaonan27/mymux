@@ -4,6 +4,7 @@
 // reacts via onPrefsChange.
 
 import { getPrefs, setPrefs, type Prefs } from './prefs';
+import { PRESETS } from './theme';
 
 export interface SettingsPanel {
   toggle(): void;
@@ -42,6 +43,24 @@ export function initSettingsPanel(): SettingsPanel {
     title.className = 'pkgs-title';
     title.textContent = 'Settings';
     panel.append(title);
+
+    // Theme preset: switch applies live (chrome / terminal / editor).
+    const themeRow = document.createElement('div');
+    themeRow.className = 'settings-row';
+    const themeLab = document.createElement('span');
+    themeLab.textContent = 'Theme: ';
+    const sel = document.createElement('select');
+    sel.className = 'settings-select';
+    for (const preset of PRESETS) {
+      const o = document.createElement('option');
+      o.value = preset.id;
+      o.textContent = preset.name;
+      sel.appendChild(o);
+    }
+    sel.value = p.theme;
+    sel.addEventListener('change', () => setPrefs({ theme: sel.value }));
+    themeRow.append(themeLab, sel);
+    panel.append(themeRow);
 
     panel.append(
       checkboxRow('Always show the host bar (even with one host)', 'hostBarAlways'),

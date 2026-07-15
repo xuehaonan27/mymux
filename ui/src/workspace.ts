@@ -5,6 +5,7 @@
 // aggregate agent counts) from workspace data via the hooks.
 
 import { Terminal } from '@xterm/xterm';
+import type { ITheme } from '@xterm/xterm';
 
 export type Kind = 'leaf' | 'cols' | 'rows';
 export interface LayoutNode {
@@ -49,7 +50,7 @@ export interface TermStyle {
   font: string;
   fontSize: number;
   lineHeight: number;
-  theme: { background: string; foreground: string };
+  theme: ITheme;
   cellW: number;
   cellH: number;
 }
@@ -401,6 +402,11 @@ export class Workspace {
     this.sendJson({ t: 'focus', pane: id });
     this.setActivePane(id);
     this.panes.get(id)?.term.focus();
+  }
+
+  /** Live-apply a new theme preset to every pane in this workspace. */
+  setTermTheme(theme: ITheme) {
+    for (const p of this.panes.values()) p.term.options.theme = theme;
   }
 
   /** Return keyboard focus to the active pane (e.g. after an inline input). */

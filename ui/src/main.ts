@@ -12,6 +12,7 @@ import { ACTIONS, directAction, leaderAction, helpRows, KeyDeps } from './keymap
 import { initNotify } from './notify';
 import { getPrefs, setPrefs, onPrefsChange } from './prefs';
 import { initSettingsPanel } from './settings';
+import { presetById } from './theme';
 
 // The shell: a registry of per-host Workspaces (each owns its WS + panes; see
 // workspace.ts), the shared bar (host chips / window tabs / agent counts), the
@@ -20,9 +21,20 @@ import { initSettingsPanel } from './settings';
 const FONT = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 const FONT_SIZE = 13;
 const LINE_HEIGHT = 1.2;
-const THEME = { background: '#0b0e14', foreground: '#c5cdd9' };
+// Terminal colors come from the active theme preset (see theme.ts); the whole
+// app re-themes live when the user switches presets in settings.
+const THEME = presetById(getPrefs().theme).term;
 const { cellW, cellH } = measureCell(FONT, FONT_SIZE, LINE_HEIGHT);
 const STYLE = { font: FONT, fontSize: FONT_SIZE, lineHeight: LINE_HEIGHT, theme: THEME, cellW, cellH };
+
+/** Apply the active preset everywhere: chrome (body[data-theme]), every
+ * workspace's terminals, and the code panel's editors. */
+function applyTheme(id: string) {
+  const preset = presetById(id);
+  document.body.dataset.theme = preset.id;
+  for (const w of workspaces.values()) w.setTermTheme(preset.term);
+  codePanel.retheme();
+}
 
 const termArea = document.getElementById('term') as HTMLDivElement;
 const tabsEl = document.getElementById('tabs') as HTMLDivElement;
@@ -616,6 +628,7 @@ const codePanel = {
   },
   quickOpen: () => codeReal?.quickOpen(),
   escape: () => codeReal?.escape() ?? false,
+  retheme: () => codeReal?.retheme(),
 };
 const procPanel = initProcPanel({
   getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
@@ -680,7 +693,9 @@ document.getElementById('btn-settings')?.addEventListener('click', () => setting
 onPrefsChange(() => {
   renderHosts();
   renderNotifyBtn();
+  applyTheme(getPrefs().theme);
 });
+applyTheme(getPrefs().theme); // boot: dataset + (no workspaces yet, but code panel later reads prefs)
 
 // ---- keybindings — dispatch driven by the keymap tables (see keymap.ts) -------
 

@@ -10,12 +10,15 @@ export interface Prefs {
   notify: boolean;
   /** The code panel's default root before any manual switch. */
   codeRoot: 'pane' | 'repo';
+  /** Color theme preset id (ui/src/theme.ts PRESETS). */
+  theme: string;
 }
 
 const DEFAULTS: Prefs = {
   hostBarAlways: false,
   notify: false,
   codeRoot: 'pane',
+  theme: 'mymux-night',
 };
 
 const KEY = 'mymux.prefs';
