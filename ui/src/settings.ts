@@ -71,6 +71,62 @@ export function initSettingsPanel(): SettingsPanel {
       ),
     );
 
+    // Backdrop image + transparency: a path/URL behind the whole app, a dim
+    // overlay for readability, and how opaque the terminal panes stay on top.
+    const bgRow = document.createElement('div');
+    bgRow.className = 'settings-row';
+    const bgLab = document.createElement('span');
+    bgLab.textContent = 'Background image (path or URL): ';
+    const bgInput = document.createElement('input');
+    bgInput.className = 'settings-select settings-bginput';
+    bgInput.placeholder = '/Users/you/Pictures/wall.jpg or https://…';
+    bgInput.value = p.bgImage;
+    const applyBg = () => setPrefs({ bgImage: bgInput.value.trim() });
+    bgInput.addEventListener('change', applyBg);
+    bgInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') applyBg();
+      if (e.key !== 'Escape') e.stopPropagation(); // Esc must still close the panel
+    });
+    bgRow.append(bgLab, bgInput);
+    panel.append(bgRow);
+
+    const sliderRow = (
+      label: string,
+      value: number,
+      min: number,
+      max: number,
+      apply: (v: number) => void,
+    ): HTMLElement => {
+      const row = document.createElement('div');
+      row.className = 'settings-row settings-slider-row';
+      const lab = document.createElement('span');
+      lab.textContent = label;
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min = String(min);
+      slider.max = String(max);
+      slider.step = '0.05';
+      slider.value = String(value);
+      const val = document.createElement('span');
+      val.className = 'settings-slider-val';
+      val.textContent = `${Math.round(value * 100)}%`;
+      slider.addEventListener('input', () => {
+        const v = Number(slider.value);
+        val.textContent = `${Math.round(v * 100)}%`;
+        apply(v);
+      });
+      row.append(lab, slider, val);
+      return row;
+    };
+    panel.append(
+      sliderRow('Pane opacity', p.paneOpacity, 0.5, 1, (v) => setPrefs({ paneOpacity: v })),
+      sliderRow('Backdrop dim', p.bgDim, 0, 0.8, (v) => setPrefs({ bgDim: v })),
+    );
+    const bgHint = document.createElement('div');
+    bgHint.className = 'settings-hint';
+    bgHint.textContent = 'Opacity and dim take effect once a backdrop image is set. Clear the field to go back to solid.';
+    panel.append(bgHint);
+
     const r = document.createElement('div');
     r.className = 'settings-row';
     const lab = document.createElement('span');

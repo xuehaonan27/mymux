@@ -141,6 +141,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     cb.onchange = () => hooks.prefs.setHostBarAlways(cb.checked);
     pref.append(cb, document.createTextNode(' Always show the host bar'));
     root.appendChild(pref);
+    root.appendChild(closeX());
     panel.replaceChildren(root);
 
     if (!booted) {
@@ -169,6 +170,38 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     attempt = null;
     if (a) await invoke('disconnect', { host_id: a.host.id }).catch(() => {});
   }
+
+  /// User bail-out (Esc / backdrop click / ✕): hide, abandon the restore
+  /// guide and cancel any in-flight attempt. Always recoverable — the bar's
+  /// host button reopens the panel.
+  function dismiss() {
+    restoreQueue = [];
+    void cancelAttempt();
+    hidePanel();
+  }
+
+  function closeX(): HTMLElement {
+    const x = el('button', 'host-x', '✕');
+    x.title = 'Close (Esc)';
+    x.onclick = (e) => {
+      e.stopPropagation();
+      dismiss();
+    };
+    return x;
+  }
+
+  // Esc closes the panel (it's the topmost overlay; the terminal keymap
+  // ignores bare Esc anyway). Backdrop clicks dismiss too.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && panel.classList.contains('show')) {
+      e.preventDefault();
+      e.stopPropagation();
+      dismiss();
+    }
+  });
+  panel.addEventListener('mousedown', (e) => {
+    if (e.target === panel) dismiss();
+  });
 
   function hostCard(h: Host, conn?: ConnInfo): HTMLElement {
     const live = conn?.status === 'connected';
@@ -286,6 +319,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     statusEl = el('div', 'host-status');
     const reportBox = el('div', 'host-report');
     root.append(pass, scan, unBtn, statusEl, reportBox);
+    root.appendChild(closeX());
     panel.replaceChildren(root);
     pass.focus();
 
@@ -411,6 +445,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     btn.onclick = go;
     statusEl = el('div', 'host-status');
     root.append(pass, btn, statusEl);
+    root.appendChild(closeX());
     panel.replaceChildren(root);
     pass.focus();
   }
@@ -454,6 +489,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
       void showList();
     };
     root.appendChild(save);
+    root.appendChild(closeX());
     panel.replaceChildren(root);
   }
 

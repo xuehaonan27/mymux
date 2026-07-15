@@ -13,6 +13,7 @@ import { initNotify } from './notify';
 import { getPrefs, setPrefs, onPrefsChange } from './prefs';
 import { initSettingsPanel } from './settings';
 import { presetById } from './theme';
+import type { ITheme } from '@xterm/xterm';
 
 // The shell: a registry of per-host Workspaces (each owns its WS + panes; see
 // workspace.ts), the shared bar (host chips / window tabs / agent counts), the
@@ -21,6 +22,21 @@ import { presetById } from './theme';
 const FONT = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 const FONT_SIZE = 13;
 const LINE_HEIGHT = 1.2;
+
+/** The preset's term theme with the pane-opacity pref applied to its
+ * background — the backdrop-image feature needs the xterm canvas to let the
+ * (dimmed) image through. Alpha 1 = the solid preset color, as before. */
+function termThemeWithOpacity(theme: ITheme, alpha: number): ITheme {
+  if (alpha >= 1 || !theme.background) return theme;
+  const m = /^#([0-9a-f]{6})$/i.exec(theme.background);
+  if (!m) return theme;
+  const n = parseInt(m[1], 16);
+  return {
+    ...theme,
+    background: `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`,
+  };
+}
+
 // Terminal colors come from the active theme preset (see theme.ts); the whole
 // app re-themes live when the user switches presets in settings.
 const THEME = presetById(getPrefs().theme).term;
@@ -32,8 +48,25 @@ const STYLE = { font: FONT, fontSize: FONT_SIZE, lineHeight: LINE_HEIGHT, theme:
 function applyTheme(id: string) {
   const preset = presetById(id);
   document.body.dataset.theme = preset.id;
-  for (const w of workspaces.values()) w.setTermTheme(preset.term);
+  const term = termThemeWithOpacity(preset.term, getPrefs().paneOpacity);
+  for (const w of workspaces.values()) w.setTermTheme(term);
   codePanel.retheme();
+}
+
+/** Apply the backdrop-image prefs: a (dimmed) image painted ON the body's own
+ * background (a ::before would be covered BY the body background), so the
+ * transparent #term / lightly-tinted panes let it through. The pane opacity
+ * itself rides in applyTheme's xterm canvas alpha. */
+function applyBackground() {
+  const p = getPrefs();
+  const img = p.bgImage.trim();
+  const has = img.length > 0;
+  document.body.classList.toggle('has-bgimage', has);
+  document.body.style.backgroundImage = has
+    ? `linear-gradient(rgba(5, 8, 12, ${p.bgDim}), rgba(5, 8, 12, ${p.bgDim})), url('${img.replace(/'/g, '%27')}')`
+    : '';
+  document.body.style.backgroundSize = has ? 'cover' : '';
+  document.body.style.backgroundPosition = has ? 'center' : '';
 }
 
 const termArea = document.getElementById('term') as HTMLDivElement;
@@ -291,7 +324,8 @@ function ensureWorkspace(id: string, label: string, port: number): Workspace {
     wsUrl: `ws://127.0.0.1:${port}/ws`,
     apiBase: `http://127.0.0.1:${port}`,
     container: termArea,
-    style: STYLE,
+    // A workspace born after the user set pane opacity must not flash solid.
+    style: { ...STYLE, theme: termThemeWithOpacity(STYLE.theme, getPrefs().paneOpacity) },
     hooks: {
       onUpdate(w) {
         updateQueue(w);
@@ -694,8 +728,10 @@ onPrefsChange(() => {
   renderHosts();
   renderNotifyBtn();
   applyTheme(getPrefs().theme);
+  applyBackground();
 });
 applyTheme(getPrefs().theme); // boot: dataset + (no workspaces yet, but code panel later reads prefs)
+applyBackground();
 
 // ---- keybindings — dispatch driven by the keymap tables (see keymap.ts) -------
 

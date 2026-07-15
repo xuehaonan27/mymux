@@ -298,6 +298,9 @@ export class Workspace {
         this.panes.delete(pid);
       }
     }
+    // The active-pane ring exists to tell SPLIT panes apart — around a single
+    // full-window pane it's just an ugly frame.
+    this.root.classList.toggle('multi', this.panes.size > 1);
     this.renderDividers(root);
   }
 
@@ -388,6 +391,8 @@ export class Workspace {
       lineHeight: this.style.lineHeight,
       scrollback: 10000,
       cursorBlink: true,
+      // Lets an rgba() theme background show through (backdrop-image pref).
+      allowTransparency: true,
       theme: this.style.theme,
     });
     term.open(el);
