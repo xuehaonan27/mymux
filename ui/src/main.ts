@@ -6,7 +6,7 @@ import { measureCell } from './metrics';
 import type { CodePanel, CodePanelOpts } from './code';
 import { initProcPanel } from './proc';
 import { initPkgsPanel } from './pkgs';
-import { initHostManager } from './hostmanager';
+import { initHostManager, type HostManager } from './hostmanager';
 import { Workspace, WinInfo, WsState } from './workspace';
 import { ACTIONS, directAction, leaderAction, helpRows, KeyDeps } from './keymap';
 import { initNotify } from './notify';
@@ -43,30 +43,42 @@ const THEME = presetById(getPrefs().theme).term;
 const { cellW, cellH } = measureCell(FONT, FONT_SIZE, LINE_HEIGHT);
 const STYLE = { font: FONT, fontSize: FONT_SIZE, lineHeight: LINE_HEIGHT, theme: THEME, cellW, cellH };
 
+/** The xterm background alpha: product of the pane-opacity pref (backdrop
+ * image feature) and, in the desktop app, the window-opacity pref. */
+function currentTermAlpha(): number {
+  return getPrefs().paneOpacity * (isTauri ? getPrefs().windowOpacity : 1);
+}
+
 /** Apply the active preset everywhere: chrome (body[data-theme]), every
  * workspace's terminals, and the code panel's editors. */
 function applyTheme(id: string) {
   const preset = presetById(id);
   document.body.dataset.theme = preset.id;
-  const term = termThemeWithOpacity(preset.term, getPrefs().paneOpacity);
+  const term = termThemeWithOpacity(preset.term, currentTermAlpha());
   for (const w of workspaces.values()) w.setTermTheme(term);
   codePanel.retheme();
 }
 
-/** Apply the backdrop-image prefs: a (dimmed) image painted ON the body's own
- * background (a ::before would be covered BY the body background), so the
- * transparent #term / lightly-tinted panes let it through. The pane opacity
- * itself rides in applyTheme's xterm canvas alpha. */
+/** Apply the backdrop prefs. Two mutually exclusive modes:
+ * - backdrop IMAGE: a (dimmed) image painted ON the body's own background (a
+ *   ::before would be covered BY the body background); #term goes transparent
+ *   and panes keep a light tint so it shows through.
+ * - WINDOW transparency (desktop app, windowOpacity < 1): html+body go fully
+ *   transparent so the desktop shows through the app window; the image is
+ *   suppressed in favor of the real desktop. */
 function applyBackground() {
   const p = getPrefs();
+  const winTranslucent = isTauri && p.windowOpacity < 1;
   const img = p.bgImage.trim();
-  const has = img.length > 0;
-  document.body.classList.toggle('has-bgimage', has);
-  document.body.style.backgroundImage = has
+  const hasImg = img.length > 0 && !winTranslucent;
+  document.body.classList.toggle('has-bgimage', hasImg);
+  document.body.classList.toggle('has-winalpha', winTranslucent);
+  document.documentElement.style.background = winTranslucent ? 'transparent' : '';
+  document.body.style.backgroundImage = hasImg
     ? `linear-gradient(rgba(5, 8, 12, ${p.bgDim}), rgba(5, 8, 12, ${p.bgDim})), url('${img.replace(/'/g, '%27')}')`
     : '';
-  document.body.style.backgroundSize = has ? 'cover' : '';
-  document.body.style.backgroundPosition = has ? 'center' : '';
+  document.body.style.backgroundSize = hasImg ? 'cover' : '';
+  document.body.style.backgroundPosition = hasImg ? 'center' : '';
 }
 
 const termArea = document.getElementById('term') as HTMLDivElement;
@@ -303,17 +315,55 @@ helpEl.className = 'help-panel';
 </div>`;
 }
 document.body.appendChild(helpEl);
-helpEl.addEventListener('click', () => helpEl.classList.remove('show'));
+helpEl.addEventListener('click', () => {
+  helpEl.classList.remove('show');
+  noteModal('help', false);
+});
 function toggleHelp() {
   helpEl.classList.toggle('show');
+  noteModal('help', helpEl.classList.contains('show'));
 }
+
+// ---- modal stack ------------------------------------------------------------
+// Overlays register here so Esc (and modal-scoped keys) always hit the TOP
+// layer, never one underneath (was a fixed-order cascade: opening settings
+// over the editor, then Esc, closed the EDITOR). Every open/close path calls
+// noteModal; entries whose panel closed out-of-band self-prune on read.
+interface Modal {
+  isOpen(): boolean;
+  close(): void;
+  /** Modal-scoped keys (e.g. the code panel's ⌘E/⌘P/Esc). true = consumed. */
+  onKey?(e: KeyboardEvent): boolean;
+}
+const modalOrder: string[] = []; // bottom → top
+const modalRegistry = new Map<string, Modal>();
+function registerModal(id: string, m: Modal) {
+  modalRegistry.set(id, m);
+}
+function noteModal(id: string, open: boolean) {
+  const i = modalOrder.indexOf(id);
+  if (i >= 0) modalOrder.splice(i, 1);
+  if (open) modalOrder.push(id);
+}
+function topModal(): Modal | null {
+  while (modalOrder.length) {
+    const m = modalRegistry.get(modalOrder[modalOrder.length - 1]);
+    if (m?.isOpen()) return m;
+    modalOrder.pop(); // stale (closed out-of-band) or never registered
+  }
+  return null;
+}
+registerModal('help', {
+  isOpen: () => helpEl.classList.contains('show'),
+  close: () => toggleHelp(),
+});
 
 // ---- workspace registry ----------------------------------------------------
 
 const workspaces = new Map<string, Workspace>();
 let activeWs: Workspace | null = null;
 const active = () => activeWs;
-let hostManager: { open(): void } | null = null;
+let hostManager: HostManager | null = null;
 
 function ensureWorkspace(id: string, label: string, port: number): Workspace {
   const existing = workspaces.get(id);
@@ -325,7 +375,7 @@ function ensureWorkspace(id: string, label: string, port: number): Workspace {
     apiBase: `http://127.0.0.1:${port}`,
     container: termArea,
     // A workspace born after the user set pane opacity must not flash solid.
-    style: { ...STYLE, theme: termThemeWithOpacity(STYLE.theme, getPrefs().paneOpacity) },
+    style: { ...STYLE, theme: termThemeWithOpacity(STYLE.theme, currentTermAlpha()) },
     hooks: {
       onUpdate(w) {
         updateQueue(w);
@@ -658,6 +708,10 @@ const codePanel = {
     void import('./code').then((m) => {
       codeReal = m.initCodePanel(codeOpts);
       codeReal.toggle();
+      // The panel materializes HERE (async chunk) — this is when the modal
+      // stack can truthfully record it (a synchronous noteModal at the call
+      // site would read isOpen()=false and drop the entry).
+      noteModal('code', codeReal.isOpen());
     });
   },
   quickOpen: () => codeReal?.quickOpen(),
@@ -679,15 +733,46 @@ function closeOtherPanels(keep: 'code' | 'proc' | 'pkgs') {
 function toggleCode() {
   closeOtherPanels('code');
   codePanel.toggle();
+  // codeReal is null while the chunk loads — the stack entry lands in the
+  // wrapper's .then above; here we only keep a LOADED panel's record exact.
+  if (codeReal) noteModal('code', codeReal.isOpen());
+  setLeader(false);
 }
 function toggleProc() {
   closeOtherPanels('proc');
   procPanel.toggle();
+  noteModal('proc', procPanel.isOpen());
+  setLeader(false);
 }
 function togglePlugins() {
   closeOtherPanels('pkgs');
   pkgsPanel.toggle();
+  noteModal('pkgs', pkgsPanel.isOpen());
+  setLeader(false);
 }
+registerModal('code', {
+  isOpen: () => codePanel.isOpen(),
+  close: () => codePanel.toggle(),
+  onKey: (e) => {
+    const lower = e.key.toLowerCase();
+    if (mod(e) && lower === 'e' && !e.shiftKey && !e.altKey) {
+      toggleCode();
+      return true;
+    }
+    if (mod(e) && lower === 'p' && !e.shiftKey && !e.altKey) {
+      codePanel.quickOpen();
+      return true;
+    }
+    if (e.key === 'Escape') {
+      // The editor's own layers (quick-open, code-action menu) consume first.
+      if (!codePanel.escape()) codePanel.toggle();
+      return true;
+    }
+    return false;
+  },
+});
+registerModal('proc', { isOpen: () => procPanel.isOpen(), close: () => toggleProc() });
+registerModal('pkgs', { isOpen: () => pkgsPanel.isOpen(), close: () => togglePlugins() });
 document.getElementById('btn-code')?.addEventListener('click', toggleCode);
 document.getElementById('btn-proc')?.addEventListener('click', toggleProc);
 document.getElementById('btn-pkgs')?.addEventListener('click', togglePlugins);
@@ -721,7 +806,16 @@ notifyBtn.addEventListener('click', () => {
 renderNotifyBtn();
 
 const settingsPanel = initSettingsPanel();
-document.getElementById('btn-settings')?.addEventListener('click', () => settingsPanel.toggle());
+function toggleSettings() {
+  settingsPanel.toggle();
+  noteModal('settings', settingsPanel.isOpen());
+  setLeader(false);
+}
+registerModal('settings', {
+  isOpen: () => settingsPanel.isOpen(),
+  close: () => toggleSettings(),
+});
+document.getElementById('btn-settings')?.addEventListener('click', toggleSettings);
 // Prefs written anywhere (settings panel, bell, host manager) re-render the
 // surfaces they affect.
 onPrefsChange(() => {
@@ -778,7 +872,7 @@ const keyDeps: KeyDeps = {
   jumpAttention: () => jumpToAttention(),
   keepToggle,
   togglePlugins: () => togglePlugins(),
-  toggleSettings: () => settingsPanel.toggle(),
+  toggleSettings: () => toggleSettings(),
 };
 
 function handleLeaderKey(e: KeyboardEvent) {
@@ -796,6 +890,23 @@ function handleLeaderKey(e: KeyboardEvent) {
 document.addEventListener(
   'keydown',
   (e) => {
+    // Modal stack first: the TOP overlay owns Esc and its scoped keys; while
+    // any overlay is open the app keymap (leader, ⌘ actions) is suspended.
+    // Keys it doesn't consume still reach the focused element (editor, input).
+    const top = topModal();
+    if (top) {
+      const consumed = top.onKey?.(e) ?? false;
+      if (consumed) {
+        e.preventDefault();
+        e.stopPropagation();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        top.close();
+      }
+      return;
+    }
+
     if (leaderActive) {
       // Ignore modifier-only keydowns so a chorded second key still works.
       if (['Shift', 'Meta', 'Control', 'Alt'].includes(e.key)) {
@@ -806,46 +917,6 @@ document.addEventListener(
       e.stopPropagation();
       handleLeaderKey(e);
       setLeader(false);
-      return;
-    }
-
-    // With the code panel open, only ⌘E / ⌘P / Esc are ours — the rest goes to
-    // the editor (or the quick-open input).
-    if (codePanel.isOpen()) {
-      if (mod(e) && e.key.toLowerCase() === 'e' && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        e.stopPropagation();
-        codePanel.toggle();
-      } else if (mod(e) && e.key.toLowerCase() === 'p' && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        e.stopPropagation();
-        codePanel.quickOpen();
-      } else if (e.key === 'Escape') {
-        if (!codePanel.escape()) codePanel.toggle();
-      }
-      return;
-    }
-
-    // The process panel is a read-only modal overlay: esc closes it.
-    if (procPanel.isOpen()) {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        procPanel.toggle();
-      }
-      return;
-    }
-    if (pkgsPanel.isOpen()) {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        pkgsPanel.toggle();
-      }
-      return;
-    }
-    if (settingsPanel.isOpen()) {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        settingsPanel.toggle();
-      }
       return;
     }
 
@@ -921,10 +992,17 @@ if (isTauri) {
       const w = workspaces.get(hostId);
       if (w) endWorkspace(w, false); // tunnel already torn down by the manager
     },
+    onVisibility(open) {
+      noteModal('host', open);
+    },
     prefs: {
       hostBarAlways: () => getPrefs().hostBarAlways,
       setHostBarAlways: (v) => setPrefs({ hostBarAlways: v }),
     },
+  });
+  registerModal('host', {
+    isOpen: () => hostManager!.isOpen(),
+    close: () => hostManager!.close(),
   });
   const hostBtn = document.getElementById('btn-host');
   if (hostBtn) {

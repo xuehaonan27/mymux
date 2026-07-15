@@ -48,6 +48,8 @@ export interface HostManagerHooks {
   onConnected(host: { id: string; label: string; port: number }): void;
   /** The user disconnected a host from the manager; its tunnel is already down. */
   onDisconnected(hostId: string): void;
+  /** Panel visibility flips — the shell's modal stack tracks it for Esc. */
+  onVisibility(open: boolean): void;
   /** Client-side prefs surfaced in the manager (host bar visibility). */
   prefs: {
     hostBarAlways(): boolean;
@@ -57,6 +59,9 @@ export interface HostManagerHooks {
 
 export interface HostManager {
   open(): void;
+  isOpen(): boolean;
+  /** Esc path from the modal stack: hide + cancel any in-flight attempt. */
+  close(): void;
 }
 
 export function initHostManager(hooks: HostManagerHooks): HostManager {
@@ -64,6 +69,12 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   panel.id = 'host';
   panel.className = 'host-panel show';
   document.body.appendChild(panel);
+
+  /** Single visibility choke point — the shell's modal stack follows it. */
+  function setVisible(v: boolean) {
+    panel.classList.toggle('show', v);
+    hooks.onVisibility(v);
+  }
 
   // The connect attempt currently driven from this panel (for status routing
   // and the host-key trust retry). Events for other hosts are ignored here —
@@ -158,7 +169,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   /// keep focus in some webviews, and the workspace's focus logic deliberately
   /// never steals from an input — blur explicitly so the terminal can take it.
   function hidePanel() {
-    panel.classList.remove('show');
+    setVisible(false);
     const ae = document.activeElement;
     if (ae instanceof HTMLElement) ae.blur();
   }
@@ -190,15 +201,8 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     return x;
   }
 
-  // Esc closes the panel (it's the topmost overlay; the terminal keymap
-  // ignores bare Esc anyway). Backdrop clicks dismiss too.
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && panel.classList.contains('show')) {
-      e.preventDefault();
-      e.stopPropagation();
-      dismiss();
-    }
-  });
+  // Esc is the shell's modal stack's business (it routes Esc to the TOP
+  // overlay, which is this panel when shown). Backdrop clicks dismiss here.
   panel.addEventListener('mousedown', (e) => {
     if (e.target === panel) dismiss();
   });
@@ -545,7 +549,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
           );
           const h = store.hosts.find((x) => x.id === restoreQueue[0]);
           if (h) {
-            panel.classList.add('show');
+            setVisible(true);
             showConnect(h);
           } else {
             hidePanel();
@@ -598,10 +602,14 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   void listen<StatusEvent>('mymux:status', (ev) => onStatus(ev.payload));
 
   void showList();
+  // The boot gate starts shown — tell the modal stack.
+  hooks.onVisibility(true);
   return {
     open: () => {
-      panel.classList.add('show');
+      setVisible(true);
       void showList();
     },
+    isOpen: () => panel.classList.contains('show'),
+    close: () => dismiss(),
   };
 }

@@ -169,12 +169,19 @@ body {
 /* With a backdrop image set (applied inline on body by applyBackground), pane
  * gaps and the panes themselves let it through. The pane div keeps only a
  * light tint — the OPACITY pref lives in the xterm canvas (applyTheme), so
- * "pane opacity" maps to what the user sees instead of stacking two alphas. */
-body.has-bgimage #term {
+ * "pane opacity" maps to what the user sees instead of stacking two alphas.
+ * has-winalpha is the desktop app's whole-window transparency: same plumbing,
+ * but what's behind the panes is the desktop itself. */
+body.has-bgimage #term,
+body.has-winalpha #term {
   background: transparent;
 }
-body.has-bgimage .pane {
+body.has-bgimage .pane,
+body.has-winalpha .pane {
   background: color-mix(in srgb, var(--pane-bg) 15%, transparent);
+}
+body.has-winalpha {
+  background: transparent;
 }
 #app {
   display: flex;

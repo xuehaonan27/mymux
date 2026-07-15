@@ -6,6 +6,21 @@
 import { getPrefs, setPrefs, type Prefs } from './prefs';
 import { PRESETS } from './theme';
 
+/** A chosen image file → downscaled JPEG data URL (max 2880px on the long
+ * side), small enough for localStorage yet crisp on a retina screen. */
+async function fileToDataUrl(file: File, maxDim = 2880): Promise<string> {
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(bmp.width * scale));
+  c.height = Math.max(1, Math.round(bmp.height * scale));
+  const ctx = c.getContext('2d');
+  if (!ctx) throw new Error('no canvas 2d');
+  ctx.drawImage(bmp, 0, 0, c.width, c.height);
+  bmp.close();
+  return c.toDataURL('image/jpeg', 0.82);
+}
+
 export interface SettingsPanel {
   toggle(): void;
   isOpen(): boolean;
@@ -71,24 +86,56 @@ export function initSettingsPanel(): SettingsPanel {
       ),
     );
 
-    // Backdrop image + transparency: a path/URL behind the whole app, a dim
-    // overlay for readability, and how opaque the terminal panes stay on top.
+    // Backdrop image + transparency: a local file (native picker — Finder in
+    // the desktop app) downscaled to a data URL, or a typed URL; a dim
+    // overlay for readability; how opaque panes / the whole window stay.
     const bgRow = document.createElement('div');
     bgRow.className = 'settings-row';
     const bgLab = document.createElement('span');
-    bgLab.textContent = 'Background image (path or URL): ';
-    const bgInput = document.createElement('input');
-    bgInput.className = 'settings-select settings-bginput';
-    bgInput.placeholder = '/Users/you/Pictures/wall.jpg or https://…';
-    bgInput.value = p.bgImage;
-    const applyBg = () => setPrefs({ bgImage: bgInput.value.trim() });
-    bgInput.addEventListener('change', applyBg);
-    bgInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') applyBg();
+    bgLab.textContent = 'Background image: ';
+    const choose = document.createElement('button');
+    choose.className = 'pkgs-btn';
+    choose.textContent = 'Choose image…';
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = 'image/*';
+    fileInput.style.display = 'none';
+    const urlInput = document.createElement('input');
+    urlInput.className = 'settings-select settings-bginput';
+    urlInput.placeholder = '…or paste an image URL and press Enter';
+    urlInput.value = p.bgImage.startsWith('data:') ? '' : p.bgImage;
+    const applyUrl = () => {
+      setPrefs({ bgImage: urlInput.value.trim() });
+      localName.textContent = '';
+    };
+    urlInput.addEventListener('change', applyUrl);
+    urlInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') applyUrl();
       if (e.key !== 'Escape') e.stopPropagation(); // Esc must still close the panel
     });
-    bgRow.append(bgLab, bgInput);
-    panel.append(bgRow);
+    choose.addEventListener('click', () => fileInput.click());
+    const localName = document.createElement('span');
+    localName.className = 'settings-hint';
+    localName.textContent = p.bgImage.startsWith('data:') ? 'local image (stored on this device)' : '';
+    fileInput.addEventListener('change', () => {
+      const f = fileInput.files?.[0];
+      if (!f) return;
+      void fileToDataUrl(f)
+        .then((dataUrl) => {
+          try {
+            setPrefs({ bgImage: dataUrl });
+            urlInput.value = '';
+            localName.textContent = `local image: ${f.name} (stored on this device)`;
+          } catch {
+            localName.textContent = 'image too large for local storage — try a smaller one';
+          }
+        })
+        .catch(() => {
+          localName.textContent = 'could not read that image file';
+        });
+    });
+    bgRow.append(bgLab, choose, fileInput, localName);
+    panel.append(bgRow, urlInput);
 
     const sliderRow = (
       label: string,
@@ -121,10 +168,12 @@ export function initSettingsPanel(): SettingsPanel {
     panel.append(
       sliderRow('Pane opacity', p.paneOpacity, 0.5, 1, (v) => setPrefs({ paneOpacity: v })),
       sliderRow('Backdrop dim', p.bgDim, 0, 0.8, (v) => setPrefs({ bgDim: v })),
+      sliderRow('Window opacity', p.windowOpacity, 0.2, 1, (v) => setPrefs({ windowOpacity: v })),
     );
     const bgHint = document.createElement('div');
     bgHint.className = 'settings-hint';
-    bgHint.textContent = 'Opacity and dim take effect once a backdrop image is set. Clear the field to go back to solid.';
+    bgHint.textContent =
+      'Pane opacity / dim apply with a backdrop image. Window opacity (desktop app only) makes the whole window see-through and overrides the image.';
     panel.append(bgHint);
 
     const r = document.createElement('div');

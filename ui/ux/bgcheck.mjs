@@ -45,7 +45,7 @@ const browser = await chromium.launch();
   await page.waitForTimeout(300);
   const sliders = await page.locator('.settings-panel input[type=range]').count();
   const bgInput = await page.locator('.settings-bginput').count();
-  check(`settings: 2 sliders + image input (s=${sliders} i=${bgInput})`, sliders === 2 && bgInput === 1);
+  check(`settings: 3 sliders + image input (s=${sliders} i=${bgInput})`, sliders === 3 && bgInput === 1);
   await page.screenshot({ path: `${OUT}bg-settings.png` });
   await page.keyboard.press('Escape');
   await page.close();

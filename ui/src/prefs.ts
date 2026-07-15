@@ -18,6 +18,9 @@ export interface Prefs {
   bgDim: number;
   /** Terminal pane background opacity, 0.5 .. 1 (solid). */
   paneOpacity: number;
+  /** WHOLE-WINDOW opacity (desktop app only): < 1 lets the desktop show
+   * through the window — iTerm-style transparency. 0.2 .. 1 (opaque). */
+  windowOpacity: number;
 }
 
 const DEFAULTS: Prefs = {
@@ -28,6 +31,7 @@ const DEFAULTS: Prefs = {
   bgImage: '',
   bgDim: 0.4,
   paneOpacity: 1,
+  windowOpacity: 1,
 };
 
 const KEY = 'mymux.prefs';
@@ -40,6 +44,7 @@ function load(): Prefs {
     // clamp to the sliders' ranges so a bad value can't blank the UI.
     p.bgDim = Math.min(0.8, Math.max(0, Number(p.bgDim) || 0));
     p.paneOpacity = Math.min(1, Math.max(0.5, Number(p.paneOpacity) || 1));
+    p.windowOpacity = Math.min(1, Math.max(0.2, Number(p.windowOpacity) || 1));
     if (typeof p.bgImage !== 'string') p.bgImage = '';
     return p;
   } catch {
