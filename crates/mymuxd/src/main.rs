@@ -23,6 +23,11 @@ use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 
 fn main() {
+    // `mymuxd --version` — the bootstrap script's freshness probe.
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("mymuxd {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     // Env defaults (proxy etc.) must land BEFORE the runtime spawns worker
     // threads — set_var is only sound single-threaded.
     load_env_file();

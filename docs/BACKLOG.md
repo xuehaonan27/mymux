@@ -135,6 +135,14 @@ principle):
   badge in some contexts). No bite reported yet; revisit if it shows.
 
 ## Connectivity (M2)
+- ~~Zero dev-box pre-setup (stage 1)~~ — **DONE 2026-07-15**:
+  `scripts/mymux-bootstrap.sh <host>` (run from the Mac) installs/upgrades
+  mymuxd in one idempotent command: rsync'd prebuilts (`--bin-dir`, ELF-checked)
+  or a source build on the box (`--with-rustup` when cargo is missing), systemd
+  units best-effort, restart only when the installed state actually changed
+  (verified against localhost: idempotent, no-op runs leave the daemon alone).
+  The box-side half, `scripts/mymux-install-remote.sh`, is self-contained
+  (embedded units) so the app can reuse it — see the zero-touch entry below.
 - Tauri `SSH_ASKPASS` passphrase dialog — a fallback for a passphrase-locked key
   when there's no agent (the agent path is preferred, so this is only a safety net).
 - Surface connection status + the "load your key" guidance *inside the app

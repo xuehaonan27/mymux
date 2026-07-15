@@ -22,13 +22,20 @@ Tauri app / browser (xterm.js UI)
 
 ## Quick start (desktop app)
 
-**On the dev box (remote Linux, once).** Requires `tmux` installed:
+**On the dev box (remote Linux).** Requires `tmux` installed. One command,
+run from your Mac (or any machine with ssh and this repo):
 
 ```sh
-scripts/install-systemd.sh          # build + install mymuxd as a systemd --user service
-scripts/install-claude-hooks.sh     # optional: Claude Code agent-status hooks
-scripts/install-codex-notify.sh     # optional: Codex agent-status (turn-complete)
+scripts/mymux-bootstrap.sh user@dev-box   # install/upgrade mymuxd, idempotent
 ```
+
+It lands the daemons in `~/.local/bin` (rsync'd prebuilts via `--bin-dir`, or a
+source build on the box — `--with-rustup` when the box has no cargo) and
+registers the systemd --user services when available. On the box itself, the
+equivalents are `scripts/mymux-install-remote.sh` (self-contained) and
+`scripts/install-systemd.sh` (the classic). Optional agent wiring:
+`install-claude-hooks.sh` / `install-codex-notify.sh` /
+`install-kimi-hooks.sh` / `install-opencode-plugin.sh` (see Agent status).
 
 **On your Mac:**
 
@@ -163,8 +170,9 @@ every pane from tmux on reconnect.
 
 ## Run mymuxd as a service (remote, systemd)
 
-For a daemon that survives SSH logout and restarts cleanly, install it as a
-`systemd --user` service on the dev box:
+The easy path is `scripts/mymux-bootstrap.sh` from your Mac (above); this
+section is the on-box equivalent. For a daemon that survives SSH logout and
+restarts cleanly, install it as a `systemd --user` service on the dev box:
 
 ```sh
 scripts/install-systemd.sh     # builds release, installs the unit, enables linger
