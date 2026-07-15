@@ -182,21 +182,19 @@ body.has-bgimage .pane,
 body.has-winalpha .pane {
   background: color-mix(in srgb, var(--pane-bg) calc(var(--surface-alpha, 1) * 100%), transparent);
 }
-body.has-bgimage .pane .xterm,
-body.has-bgimage .pane .xterm-viewport,
-body.has-winalpha .pane .xterm,
-body.has-winalpha .pane .xterm-viewport {
-  background-color: transparent !important;
-}
 body.has-winalpha {
   background: transparent;
 }
 /* The vscode-fork xterm wraps the viewport in a scrollable element with an
- * INLINE black background (always, regardless of theme) — the real layer that
- * blocked every see-through. Transparent always: below it sits the viewport,
- * which stays #000 in opaque mode (today's look) and is forced transparent
- * when see-through is on. */
-.pane .xterm-scrollable-element {
+ * INLINE black background (always, regardless of theme), and the stock
+ * viewport itself carries #000 in xterm.css — the layers that blocked every
+ * see-through. Both are forced transparent UNCONDITIONALLY: the .pane surface
+ * becomes the single terminal background in every mode (opaque default: solid
+ * pane-bg where the stock viewport used to show #000 voids; see-through
+ * modes: the alpha-carrying surface). */
+.pane .xterm,
+.pane .xterm-scrollable-element,
+.pane .xterm-viewport {
   background-color: transparent !important;
 }
 /* The chrome follows the window alpha too — a see-through window with an

@@ -25,6 +25,8 @@ def close(got, exp, tol=16): return all(abs(a - e) <= tol for a, e in zip(got, e
 
 see = Image.open(f'{HERE}/shots/alpha-see.png').convert('RGB')
 solid = Image.open(f'{HERE}/shots/alpha-solid.png').convert('RGB')
+noimg = Image.open(f'{HERE}/shots/alpha-noimg.png').convert('RGB')
+dflt = Image.open(f'{HERE}/shots/alpha-default.png').convert('RGB')
 layout = json.load(open(f'{HERE}/shots/alpha-layout.json'))
 panes = sorted(layout, key=lambda p: p['x'])
 a, b = panes[0], panes[1]
@@ -44,5 +46,13 @@ ix, iy = interior
 check('pane interior = 60% pane-bg over image', see.getpixel(interior), blend(PANE_BG, wall(ix, iy), 0.6))
 gx, gy = gap
 check('split gap = raw image', see.getpixel(gap), wall(gx, gy))
-check('opaque mode stays solid', solid.getpixel(interior), PANE_BG)
+# Slider-without-backdrop must be INERT: identical rendering to the plain
+# default at both sample points (whatever the stock look is there).
+check('no-image slider is inert (interior matches default)', noimg.getpixel(interior), dflt.getpixel(interior))
+check('no-image slider is inert (gap strip matches default)', noimg.getpixel(gap), dflt.getpixel(gap))
+# The pane surface is the single terminal background: rows AND empty voids
+# show pane-bg in every mode (was stock #000 voids before the unification).
+check('default voids are pane-bg, not black', dflt.getpixel(interior), PANE_BG)
+# Image set but slider at 100%: panes stay solid (image in gaps/bar only).
+check('image at 100% opacity keeps solid pane', solid.getpixel(interior), PANE_BG)
 sys.exit(1 if fails else 0)

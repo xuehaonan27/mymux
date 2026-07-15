@@ -187,7 +187,7 @@ export function initSettingsPanel(): SettingsPanel {
     const bgHint = document.createElement('div');
     bgHint.className = 'settings-hint';
     bgHint.textContent =
-      'Pane opacity / dim apply with a backdrop image. Window opacity (desktop app only) makes the whole window see-through and overrides the image.';
+      'Pane opacity and dim take effect once a backdrop image is set (inert otherwise). Window opacity (desktop app only) shows the desktop through the whole window and overrides the image.';
     panel.append(bgHint);
 
     const r = document.createElement('div');

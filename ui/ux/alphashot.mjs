@@ -24,5 +24,10 @@ async function shot(name, prefs) {
 }
 const layout = await shot('alpha-see', { theme: 'mymux-night', bgImage: '/ux/wall-test.png', bgDim: 0, paneOpacity: 0.6 });
 await shot('alpha-solid', { theme: 'mymux-night', bgImage: '/ux/wall-test.png', bgDim: 0, paneOpacity: 1 });
+// No backdrop: the slider must be INERT (regression: xterm went transparent
+// over the stock black viewport = "the slider just darkens").
+await shot('alpha-noimg', { theme: 'mymux-night', bgImage: '', paneOpacity: 0.6 });
+// The plain default (no image, opacity 1): the inert reference point.
+await shot('alpha-default', { theme: 'mymux-night' });
 writeFileSync('shots/alpha-layout.json', JSON.stringify(layout));
 console.log('done', JSON.stringify(layout));

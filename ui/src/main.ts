@@ -39,10 +39,34 @@ const THEME = presetById(getPrefs().theme).term;
 const { cellW, cellH } = measureCell(FONT, FONT_SIZE, LINE_HEIGHT);
 const STYLE = { font: FONT, fontSize: FONT_SIZE, lineHeight: LINE_HEIGHT, theme: THEME, cellW, cellH };
 
-/** The xterm background alpha: product of the pane-opacity pref (backdrop
- * image feature) and, in the desktop app, the window-opacity pref. */
+/** The single source of truth for the see-through state. The sliders are
+ * INERT unless there is a backdrop to reveal — without one, dragging them
+ * must change nothing (previously the xterm canvas still went transparent,
+ * over the stock opaque viewport it read as "the terminal just darkens").
+ * Two mutually exclusive backdrop modes: image (desktop app or browser) and
+ * whole-window transparency (desktop app only, image yields to it). */
+function backdropState(): {
+  hasImg: boolean;
+  winTranslucent: boolean;
+  /** Effective .pane surface alpha: paneOpacity × windowOpacity, else 1. */
+  surfaceAlpha: number;
+} {
+  const p = getPrefs();
+  const winTranslucent = isTauri && p.windowOpacity < 1;
+  const hasImg = p.bgImage.trim().length > 0 && !winTranslucent;
+  const active = winTranslucent || hasImg;
+  return {
+    hasImg,
+    winTranslucent,
+    surfaceAlpha: active ? p.paneOpacity * (winTranslucent ? p.windowOpacity : 1) : 1,
+  };
+}
+
+/** The xterm canvas alpha for the current state: solid unless a backdrop is
+ * active — see backdropState for why the sliders are otherwise inert. */
 function currentTermAlpha(): number {
-  return getPrefs().paneOpacity * (isTauri ? getPrefs().windowOpacity : 1);
+  const { surfaceAlpha } = backdropState();
+  return surfaceAlpha;
 }
 
 /** Apply the active preset everywhere: chrome (body[data-theme]), every
@@ -55,34 +79,26 @@ function applyTheme(id: string) {
   codePanel.retheme();
 }
 
-/** Apply the backdrop prefs. Two mutually exclusive modes:
- * - backdrop IMAGE: a (dimmed) image painted ON the body's own background (a
- *   ::before would be covered BY the body background).
- * - WINDOW transparency (desktop app, windowOpacity < 1): html+body go fully
- *   transparent so the desktop shows through the app window; the image is
- *   suppressed in favor of the real desktop.
- * Both share one see-through model: #term transparent, the .pane SURFACE
- * carries --surface-alpha (paneOpacity × windowOpacity), the xterm canvas
- * itself is backgroundless (see termThemeWithOpacity), and xterm's stock
- * opaque viewport is CSS-overridden — it alone blocked everything. */
+/** Apply the backdrop prefs, driven by backdropState(). Backdrop IMAGE: a
+ * (dimmed) image painted ON the body's own background (a ::before would be
+ * covered BY the body background). WINDOW transparency: html+body go fully
+ * transparent so the desktop shows through; the image yields to it. Shared
+ * plumbing: #term transparent, the .pane SURFACE carries --surface-alpha,
+ * the xterm canvas goes backgroundless (termThemeWithOpacity), and xterm's
+ * stock opaque viewport is CSS-overridden in these modes. */
 function applyBackground() {
   const p = getPrefs();
-  const winTranslucent = isTauri && p.windowOpacity < 1;
-  const img = p.bgImage.trim();
-  const hasImg = img.length > 0 && !winTranslucent;
-  const translucent = winTranslucent || (hasImg && p.paneOpacity < 1);
+  const { hasImg, winTranslucent, surfaceAlpha } = backdropState();
   document.body.classList.toggle('has-bgimage', hasImg);
   document.body.classList.toggle('has-winalpha', winTranslucent);
   document.documentElement.style.background = winTranslucent ? 'transparent' : '';
+  const img = p.bgImage.trim();
   document.body.style.backgroundImage = hasImg
     ? `linear-gradient(rgba(5, 8, 12, ${p.bgDim}), rgba(5, 8, 12, ${p.bgDim})), url('${img.replace(/'/g, '%27')}')`
     : '';
   document.body.style.backgroundSize = hasImg ? 'cover' : '';
   document.body.style.backgroundPosition = hasImg ? 'center' : '';
-  document.body.style.setProperty(
-    '--surface-alpha',
-    String(translucent ? p.paneOpacity * (winTranslucent ? p.windowOpacity : 1) : 1),
-  );
+  document.body.style.setProperty('--surface-alpha', String(surfaceAlpha));
   document.body.style.setProperty('--win-alpha', String(winTranslucent ? p.windowOpacity : 1));
 }
 
