@@ -146,6 +146,35 @@ impl Hub {
         self.persist.set_meta(blob);
     }
 
+    /// Drag a split divider: move the boundary next to a pane. Native windows
+    /// edit the layout tree (ptyd then gets the new sizes); tmux panes go to
+    /// tmux's own resize-pane. The UI always targets the boundary's left/top
+    /// leaf, so dir is 'right' | 'down' with a signed cell count.
+    pub async fn resize_pane(&self, pane: u32, dir: String, cells: i32) {
+        if self.persist.pid_of(pane).is_some() {
+            let changed = self.natives.lock().unwrap().resize_pane(pane, &dir, cells);
+            if let Some(changed) = changed {
+                for (p, w, h) in changed {
+                    self.persist.resize(p, w, h);
+                }
+                self.save_layout_blob();
+                self.emit(ServerEvent::State(self.state_json()));
+            }
+            return;
+        }
+        let flag = match (dir.as_str(), cells >= 0) {
+            ("right", true) => "-R",
+            ("right", false) => "-L",
+            ("down", true) => "-D",
+            ("down", false) => "-U",
+            _ => return,
+        };
+        if cells != 0 {
+            self.send_cmd(format!("resize-pane -t %{pane} {flag} {}", cells.abs()))
+                .await;
+        }
+    }
+
     /// Move a window (any engine) to a new position in the tab order.
     pub async fn reorder_window(&self, id: u32, to: usize) {
         {
@@ -1339,6 +1368,11 @@ impl Hub {
     pub async fn persist_disconnected(self: &Arc<Self>) {
         let had = self.persist.clear();
         self.natives.lock().unwrap().clear();
+        // The initial window died with ptyd — allow the next connection to
+        // boot one again (booted is the once-per-daemon guard; a ptyd loss
+        // resets the invariant it protects).
+        self.booted
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let was_native = matches!(*self.active_view.lock().unwrap(), ActiveView::Native(_));
         if had || was_native {
             eprintln!("mymuxd: mymux-ptyd connection lost — native panes are gone");
