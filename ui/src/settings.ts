@@ -107,6 +107,7 @@ export function initSettingsPanel(): SettingsPanel {
     const applyUrl = () => {
       setPrefs({ bgImage: urlInput.value.trim() });
       localName.textContent = '';
+      clear.disabled = urlInput.value.trim().length === 0;
     };
     urlInput.addEventListener('change', applyUrl);
     urlInput.addEventListener('keydown', (e) => {
@@ -114,6 +115,18 @@ export function initSettingsPanel(): SettingsPanel {
       if (e.key !== 'Escape') e.stopPropagation(); // Esc must still close the panel
     });
     choose.addEventListener('click', () => fileInput.click());
+    const clear = document.createElement('button');
+    clear.className = 'pkgs-btn';
+    clear.textContent = 'Remove';
+    clear.title = 'Remove the background image (back to solid)';
+    clear.disabled = p.bgImage.length === 0;
+    clear.addEventListener('click', () => {
+      setPrefs({ bgImage: '' });
+      urlInput.value = '';
+      localName.textContent = '';
+      clear.disabled = true;
+      fileInput.value = '';
+    });
     const localName = document.createElement('span');
     localName.className = 'settings-hint';
     localName.textContent = p.bgImage.startsWith('data:') ? 'local image (stored on this device)' : '';
@@ -126,6 +139,7 @@ export function initSettingsPanel(): SettingsPanel {
             setPrefs({ bgImage: dataUrl });
             urlInput.value = '';
             localName.textContent = `local image: ${f.name} (stored on this device)`;
+            clear.disabled = false;
           } catch {
             localName.textContent = 'image too large for local storage — try a smaller one';
           }
@@ -134,7 +148,7 @@ export function initSettingsPanel(): SettingsPanel {
           localName.textContent = 'could not read that image file';
         });
     });
-    bgRow.append(bgLab, choose, fileInput, localName);
+    bgRow.append(bgLab, choose, clear, fileInput, localName);
     panel.append(bgRow, urlInput);
 
     const sliderRow = (
@@ -166,9 +180,9 @@ export function initSettingsPanel(): SettingsPanel {
       return row;
     };
     panel.append(
-      sliderRow('Pane opacity', p.paneOpacity, 0.5, 1, (v) => setPrefs({ paneOpacity: v })),
-      sliderRow('Backdrop dim', p.bgDim, 0, 0.8, (v) => setPrefs({ bgDim: v })),
-      sliderRow('Window opacity', p.windowOpacity, 0.2, 1, (v) => setPrefs({ windowOpacity: v })),
+      sliderRow('Pane opacity', p.paneOpacity, 0, 1, (v) => setPrefs({ paneOpacity: v })),
+      sliderRow('Backdrop dim', p.bgDim, 0, 1, (v) => setPrefs({ bgDim: v })),
+      sliderRow('Window opacity', p.windowOpacity, 0, 1, (v) => setPrefs({ windowOpacity: v })),
     );
     const bgHint = document.createElement('div');
     bgHint.className = 'settings-hint';

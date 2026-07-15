@@ -110,6 +110,17 @@ const browser = await chromium.launch();
   const bg = await page.evaluate(() => JSON.parse(localStorage.getItem('mymux.prefs') ?? '{}').bgImage ?? '');
   check('file picker stores a jpeg data URL', bg.startsWith('data:image/jpeg'));
   check('has-bgimage after file pick', await page.evaluate(() => document.body.classList.contains('has-bgimage')));
+  // Remove button clears it again (and re-enables solid mode).
+  await page.click('.settings-panel .pkgs-btn + .pkgs-btn');
+  await page.waitForTimeout(300);
+  const bgAfter = await page.evaluate(() => JSON.parse(localStorage.getItem('mymux.prefs') ?? '{}').bgImage ?? 'x');
+  check('Remove clears the image pref', bgAfter === '');
+  check('has-bgimage removed', await page.evaluate(() => !document.body.classList.contains('has-bgimage')));
+  // Sliders span the full 0..100% range.
+  const mins = await page.evaluate(() =>
+    [...document.querySelectorAll('.settings-panel input[type=range]')].map((s) => s.min),
+  );
+  check('sliders start at 0', mins.every((m) => m === '0'));
   await page.close();
 }
 
