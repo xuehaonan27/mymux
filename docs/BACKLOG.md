@@ -233,8 +233,11 @@ Native ∞ windows are the default; keep closing the gap to a great daily driver
   for native and tmux panes.
 - ~~Help overlay~~ — **DONE 2026-07-03** (⌘K ?, static keymap card,
   click-to-dismiss — Esc stays inert by design).
-- Rearrange tabs (custom window order, drag) — needs an order model beyond
-  BTreeMap id order + tmux/native interleaving rules.
+- ~~Rearrange tabs (custom window order, drag)~~ — **VERIFIED DONE 2026-07-15**
+  (implemented earlier; the backlog entry was stale): UI drag handlers send
+  `reorder_window`, the daemon owns one global `tab_order` for both engines
+  and rides it in the ptyd blob. Harness check (ui/ux/dragcheck.mjs): drag
+  reorders the DOM and the order survives a page reload.
 - Drag the split divider to resize panes (UI + a `resize_leaf` verb).
 - ~~Unlimited history~~ — **DONE 2026-07-03** via raw per-pane output logs in
   ptyd (`$XDG_STATE_HOME/mymux/history/<short>-<pid>.log`, ANSI included,
