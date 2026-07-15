@@ -23,18 +23,14 @@ const FONT = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 const FONT_SIZE = 13;
 const LINE_HEIGHT = 1.2;
 
-/** The preset's term theme with the pane-opacity pref applied to its
- * background — the backdrop-image feature needs the xterm canvas to let the
- * (dimmed) image through. Alpha 1 = the solid preset color, as before. */
+/** The preset's term theme for the current translucency state. While anything
+ * is see-through (alpha < 1) the xterm canvas must carry NO background of its
+ * own — opacity lives on the .pane surface (--surface-alpha), so "pane
+ * opacity" means "how solid the terminal SURFACE is" instead of just shading
+ * the canvas. Opaque default = the preset's solid color, as before. */
 function termThemeWithOpacity(theme: ITheme, alpha: number): ITheme {
-  if (alpha >= 1 || !theme.background) return theme;
-  const m = /^#([0-9a-f]{6})$/i.exec(theme.background);
-  if (!m) return theme;
-  const n = parseInt(m[1], 16);
-  return {
-    ...theme,
-    background: `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`,
-  };
+  if (alpha >= 1) return theme;
+  return { ...theme, background: 'transparent' };
 }
 
 // Terminal colors come from the active theme preset (see theme.ts); the whole
@@ -61,16 +57,20 @@ function applyTheme(id: string) {
 
 /** Apply the backdrop prefs. Two mutually exclusive modes:
  * - backdrop IMAGE: a (dimmed) image painted ON the body's own background (a
- *   ::before would be covered BY the body background); #term goes transparent
- *   and panes keep a light tint so it shows through.
+ *   ::before would be covered BY the body background).
  * - WINDOW transparency (desktop app, windowOpacity < 1): html+body go fully
  *   transparent so the desktop shows through the app window; the image is
- *   suppressed in favor of the real desktop. */
+ *   suppressed in favor of the real desktop.
+ * Both share one see-through model: #term transparent, the .pane SURFACE
+ * carries --surface-alpha (paneOpacity × windowOpacity), the xterm canvas
+ * itself is backgroundless (see termThemeWithOpacity), and xterm's stock
+ * opaque viewport is CSS-overridden — it alone blocked everything. */
 function applyBackground() {
   const p = getPrefs();
   const winTranslucent = isTauri && p.windowOpacity < 1;
   const img = p.bgImage.trim();
   const hasImg = img.length > 0 && !winTranslucent;
+  const translucent = winTranslucent || (hasImg && p.paneOpacity < 1);
   document.body.classList.toggle('has-bgimage', hasImg);
   document.body.classList.toggle('has-winalpha', winTranslucent);
   document.documentElement.style.background = winTranslucent ? 'transparent' : '';
@@ -79,6 +79,11 @@ function applyBackground() {
     : '';
   document.body.style.backgroundSize = hasImg ? 'cover' : '';
   document.body.style.backgroundPosition = hasImg ? 'center' : '';
+  document.body.style.setProperty(
+    '--surface-alpha',
+    String(translucent ? p.paneOpacity * (winTranslucent ? p.windowOpacity : 1) : 1),
+  );
+  document.body.style.setProperty('--win-alpha', String(winTranslucent ? p.windowOpacity : 1));
 }
 
 const termArea = document.getElementById('term') as HTMLDivElement;

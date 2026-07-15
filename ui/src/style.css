@@ -166,22 +166,44 @@ body {
   color: var(--text);
   font-family: var(--chrome);
 }
-/* With a backdrop image set (applied inline on body by applyBackground), pane
- * gaps and the panes themselves let it through. The pane div keeps only a
- * light tint — the OPACITY pref lives in the xterm canvas (applyTheme), so
- * "pane opacity" maps to what the user sees instead of stacking two alphas.
- * has-winalpha is the desktop app's whole-window transparency: same plumbing,
- * but what's behind the panes is the desktop itself. */
+/* The see-through model (backdrop image or desktop-window transparency):
+ * - #term lets the background through (pane gaps show it),
+ * - the .pane SURFACE carries the effective opacity (--surface-alpha), so the
+ *   slider reads as "how solid the terminal surface is",
+ * - xterm's stock viewport (#000, "for the scrollbar") and element background
+ *   are forced transparent — they alone blocked every see-through, turning
+ *   alpha themes into mere shade shifts (reported bug),
+ * - the xterm canvas itself goes backgroundless (termThemeWithOpacity). */
 body.has-bgimage #term,
 body.has-winalpha #term {
   background: transparent;
 }
 body.has-bgimage .pane,
 body.has-winalpha .pane {
-  background: color-mix(in srgb, var(--pane-bg) 15%, transparent);
+  background: color-mix(in srgb, var(--pane-bg) calc(var(--surface-alpha, 1) * 100%), transparent);
+}
+body.has-bgimage .pane .xterm,
+body.has-bgimage .pane .xterm-viewport,
+body.has-winalpha .pane .xterm,
+body.has-winalpha .pane .xterm-viewport {
+  background-color: transparent !important;
 }
 body.has-winalpha {
   background: transparent;
+}
+/* The vscode-fork xterm wraps the viewport in a scrollable element with an
+ * INLINE black background (always, regardless of theme) — the real layer that
+ * blocked every see-through. Transparent always: below it sits the viewport,
+ * which stays #000 in opaque mode (today's look) and is forced transparent
+ * when see-through is on. */
+.pane .xterm-scrollable-element {
+  background-color: transparent !important;
+}
+/* The chrome follows the window alpha too — a see-through window with an
+ * opaque toolbar would look pasted on. */
+body.has-winalpha #bar,
+body.has-winalpha #hostbar {
+  background: color-mix(in srgb, var(--glass-bg-bar) calc(var(--win-alpha, 1) * 100%), transparent);
 }
 #app {
   display: flex;
