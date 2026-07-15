@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# build-daemon-bundle.sh — build the self-contained daemon bundle the APP
+# ships to hosts (zero-touch install / repair). Produces musl-static Linux
+# binaries, a VERSION file (exactly what `mymuxd --version` prints, so the app
+# can compare a host's probe against it), and SHA256SUMS, packed as
+#
+#   src-tauri/resources/daemon/linux-x86_64.tar.gz  (+ .version sidecar)
+#
+# which mymux-connect embeds at app build time (include_bytes!; build.rs there
+# tolerates the file being absent — the install path then errors clearly).
+# musl-static = no glibc-version skew on any distro. x86_64 only for now;
+# aarch64 needs an aarch64-musl cross toolchain.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TARGET="x86_64-unknown-linux-musl"
+OUT="$ROOT/src-tauri/resources/daemon"
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+
+command -v x86_64-linux-musl-gcc >/dev/null || {
+  echo "mymux: x86_64-linux-musl-gcc missing (apt install musl-tools)" >&2
+  exit 1
+}
+rustup target add "$TARGET" >/dev/null
+
+echo "mymux: building $TARGET release daemons…"
+( cd "$ROOT" && CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc \
+    cargo build --release --target "$TARGET" -p mymuxd -p mymux-ptyd -p mymux-pkg )
+
+B="$ROOT/target/$TARGET/release"
+for b in mymuxd mymux-ptyd mymux-pkg mymux-attach; do
+  [ -f "$B/$b" ] || { echo "mymux: $B/$b missing after the build" >&2; exit 1; }
+  # musl-strip if available, else plain strip (both read ELF); strip is
+  # best-effort — an unstripped binary still works.
+  ( x86_64-linux-musl-strip "$B/$b" 2>/dev/null || strip "$B/$b" 2>/dev/null || true )
+  install -m 0755 "$B/$b" "$STAGE/$b"
+done
+
+# VERSION must be byte-identical to the pushed mymuxd's own --version output.
+"$STAGE/mymuxd" --version > "$STAGE/VERSION"
+( cd "$STAGE" && sha256sum mymuxd mymux-ptyd mymux-pkg mymux-attach > SHA256SUMS )
+
+mkdir -p "$OUT"
+tar -czf "$OUT/linux-x86_64.tar.gz" -C "$STAGE" .
+cp "$STAGE/VERSION" "$OUT/linux-x86_64.version"
+echo "mymux: bundle → $OUT/linux-x86_64.tar.gz ($(du -h "$OUT/linux-x86_64.tar.gz" | cut -f1))"
+echo "mymux: version: $(cat "$STAGE/VERSION")"
+echo "mymux: sync it to your Mac before building the app there, e.g.:"
+echo "  rsync -av $OUT/ <mac>:Projects/mymux/src-tauri/resources/daemon/"

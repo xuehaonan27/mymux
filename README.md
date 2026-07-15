@@ -32,11 +32,12 @@ scripts/mymux-bootstrap.sh user@dev-box   # install/upgrade mymuxd, idempotent
 It lands the daemons in `~/.local/bin` (rsync'd prebuilts via `--bin-dir`, or a
 source build on the box — `--with-rustup` when the box has no cargo) and
 registers the systemd --user services when available. **The desktop app can
-skip even this**: connecting to a host whose mymuxd is missing pushes the same
-installer over its own SSH and retries — zero-touch. On the box itself, the
-equivalents are `scripts/mymux-install-remote.sh` (self-contained) and
-`scripts/install-systemd.sh` (the classic). Optional agent wiring:
-`install-claude-hooks.sh` / `install-codex-notify.sh` /
+skip even this**: connecting to a host whose mymuxd is missing or outdated
+pushes a self-contained daemon bundle (musl-static binaries — no toolchain or
+GitHub access needed on the box) and installs it over its own SSH — zero-touch.
+On the box itself, the equivalents are `scripts/mymux-install-remote.sh`
+(self-contained) and `scripts/install-systemd.sh` (the classic). Optional agent
+wiring: `install-claude-hooks.sh` / `install-codex-notify.sh` /
 `install-kimi-hooks.sh` / `install-opencode-plugin.sh` (see Agent status).
 
 **On your Mac:**
@@ -107,7 +108,16 @@ The native app (`src-tauri/`) bundles the UI, owns the SSH tunnel
 **in-process** (russh — no `ssh` binary, no ssh-agent, no config files to
 prepare), and unlocks the full iTerm2 keybindings a browser reserves
 (⌘T / ⌘W / ⌘1–9). Build it **on your Mac** — it can't build on the headless
-Linux box (no webkit2gtk, no display):
+Linux box (no webkit2gtk, no display). For zero-touch daemon installs, first
+sync the daemon bundle to the Mac (built on any Linux box with musl-tools):
+
+```sh
+scripts/build-daemon-bundle.sh   # on a Linux box → src-tauri/resources/daemon/
+rsync -av src-tauri/resources/daemon/ <mac>:Projects/mymux/src-tauri/resources/daemon/
+```
+
+Without the bundle the app still works — the zero-touch install just reports
+why it's unavailable instead of pushing.
 
 ```sh
 cargo install tauri-cli --version '^2'      # one-time; or: npm i -g @tauri-apps/cli
@@ -125,12 +135,13 @@ migrated automatically). Pick one, enter the key's passphrase, **Connect**:
   trust it (then records it in `~/.ssh/known_hosts`). A **changed** host key is
   refused outright — MITM protection.
 - The app starts `mymuxd` on the remote if needed (the systemd service, else a
-  detached fallback), and if the daemon isn't **installed** at all it first
-  pushes the self-contained installer (`scripts/mymux-install-remote.sh`) over
-  its own SSH and retries — zero-touch, no dev-box pre-setup (source build on
-  the box; a Mac-verify-pending path). It keeps a local forward with
-  auto-reconnect, and reveals the workspace. **Exiting the last pane ends the
-  session and returns you to the host manager.**
+  detached fallback), and if the daemon is missing or outdated it first pushes
+  a self-contained bundle (`scripts/build-daemon-bundle.sh` → musl-static
+  binaries, embedded at app build time; the box needs no toolchain, git or
+  network beyond the SSH you're on) and runs the installer — ptyd is never
+  restarted in the process, so persistent shells ride through. It keeps a
+  local forward with auto-reconnect, and reveals the workspace. **Exiting the
+  last pane ends the session and returns you to the host manager.**
 - **Several hosts at once**: connect more hosts from the manager (`host`
   button) — each gets its own tunnel port and workspace. Host chips appear in
   the bar (click or **⌘⇧1–9** to switch), the agent counter sums ⏳/✓ across

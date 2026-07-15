@@ -171,25 +171,38 @@ pub async fn exec_script(
     script: &str,
     limit: Duration,
 ) -> Result<String, Status> {
-    tokio::time::timeout(limit, exec_script_inner(cfg, passphrase, script))
-        .await
-        .map_err(|_| Status::Error(format!("script timed out after {}s", limit.as_secs())))?
+    exec_bytes(cfg, passphrase, "bash -s", script.as_bytes(), limit).await
 }
 
-async fn exec_script_inner(
+/// Run a remote command with a byte stream piped to its stdin (binary-safe —
+/// this is how the daemon bundle is uploaded).
+pub async fn exec_bytes(
     cfg: &HostConfig,
     passphrase: Option<&str>,
-    script: &str,
+    command: &str,
+    stdin: &[u8],
+    limit: Duration,
+) -> Result<String, Status> {
+    tokio::time::timeout(limit, exec_inner(cfg, passphrase, command, stdin))
+        .await
+        .map_err(|_| Status::Error(format!("command timed out after {}s", limit.as_secs())))?
+}
+
+async fn exec_inner(
+    cfg: &HostConfig,
+    passphrase: Option<&str>,
+    command: &str,
+    stdin: &[u8],
 ) -> Result<String, Status> {
     let handle = ssh_connect(cfg, passphrase).await?;
     let mut ch = handle
         .channel_open_session()
         .await
         .map_err(|e| Status::Error(format!("channel: {e:?}")))?;
-    ch.exec(false, b"bash -s")
+    ch.exec(false, command.as_bytes())
         .await
         .map_err(|e| Status::Error(format!("exec: {e:?}")))?;
-    ch.data(script.as_bytes())
+    ch.data(stdin)
         .await
         .map_err(|e| Status::Error(format!("stdin: {e:?}")))?;
     ch.eof()
@@ -318,25 +331,57 @@ async fn connect_and_serve(
 /// scripts/mymux-bootstrap.sh drives over ssh.
 const INSTALL_SCRIPT: &str = include_str!("../../../scripts/mymux-install-remote.sh");
 
-/// Daemon start failed: install mymuxd when it's simply absent. Ok(true) = the
-/// installer ran (the supervisor retries the connect); Ok(false) = a binary
-/// exists, so the failure is something else (report the original status).
+/// The self-contained daemon bundle shipped to hosts whose mymuxd is missing
+/// or outdated — musl-static linux binaries + manifest, produced by
+/// scripts/build-daemon-bundle.sh and embedded at app build time. Empty when
+/// the app was built without it (the install path then reports why).
+#[cfg(daemon_bundle)]
+static DAEMON_BUNDLE: &[u8] =
+    include_bytes!("../../../src-tauri/resources/daemon/linux-x86_64.tar.gz");
+#[cfg(not(daemon_bundle))]
+static DAEMON_BUNDLE: &[u8] = &[];
+
+/// Byte-identical to the bundled mymuxd's `--version` output; a host whose
+/// probe differs (or has no mymuxd at all) needs the push.
+#[cfg(daemon_bundle)]
+static BUNDLE_VERSION: &str =
+    include_str!("../../../src-tauri/resources/daemon/linux-x86_64.version");
+#[cfg(not(daemon_bundle))]
+static BUNDLE_VERSION: &str = "";
+
+/// Does the host need the bundle push, given its `mymuxd --version` probe
+/// (empty = not installed)? A mismatch can also mean a broken daemon — the
+/// push is the repair either way.
+fn needs_install(remote_version: &str) -> bool {
+    !DAEMON_BUNDLE.is_empty() && remote_version.trim() != BUNDLE_VERSION.trim()
+}
+
+/// Daemon start failed: when the host's mymuxd is missing or outdated, push
+/// the embedded bundle and run the installer. Ok(true) = install ran (the
+/// supervisor retries the connect); Ok(false) = the host is already current,
+/// so the failure is something else (report the original status).
 async fn maybe_install(
     cfg: &HostConfig,
     passphrase: Option<&str>,
     status: &mpsc::Sender<Status>,
 ) -> Result<bool, String> {
-    const PROBE: &str =
-        "if command -v mymuxd >/dev/null 2>&1 || [ -x ~/.local/bin/mymuxd ]; then echo present; fi";
+    const PROBE: &str = "(timeout 2 ~/.local/bin/mymuxd --version 2>/dev/null || timeout 2 mymuxd --version 2>/dev/null || true) | head -1";
     let probe = exec_script(cfg, passphrase, PROBE, Duration::from_secs(20))
         .await
         .map_err(|e| format!("probe failed: {e:?}"))?;
-    if probe.contains("present") {
-        return Ok(false);
+    if !needs_install(probe.trim()) {
+        if DAEMON_BUNDLE.is_empty() && probe.trim().is_empty() {
+            return Err("mymuxd is not installed on the host, and this app was built without the daemon bundle (run scripts/build-daemon-bundle.sh first)".into());
+        }
+        return Ok(false); // current — the start failure is something else
     }
     let _ = status.send(Status::Installing).await;
-    // A source build can take many minutes; surface the script's own notes.
-    let out = exec_script(cfg, passphrase, INSTALL_SCRIPT, Duration::from_secs(1200))
+    // Upload atomically (.new → rename), then run the box-side installer.
+    const PUT: &str = "mkdir -p ~/.local/share/mymux/dist && cat > ~/.local/share/mymux/dist/daemon.tgz.new && mv -f ~/.local/share/mymux/dist/daemon.tgz.new ~/.local/share/mymux/dist/daemon.tgz";
+    exec_bytes(cfg, passphrase, PUT, DAEMON_BUNDLE, Duration::from_secs(600))
+        .await
+        .map_err(|e| format!("bundle upload failed: {e:?}"))?;
+    let out = exec_script(cfg, passphrase, INSTALL_SCRIPT, Duration::from_secs(300))
         .await
         .map_err(|e| format!("installer failed: {e:?}"))?;
     for line in out.lines().take(12) {
@@ -392,5 +437,23 @@ pub async fn run_russh_tunnel(
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(max);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// needs_install: missing or mismatched remote versions trigger a push;
+    /// an exact match (or an app built without a bundle) does not.
+    #[test]
+    fn install_decision() {
+        if super::DAEMON_BUNDLE.is_empty() {
+            eprintln!("built without the daemon bundle — skipping");
+            return;
+        }
+        assert!(super::needs_install("")); // not installed
+        assert!(super::needs_install("mymuxd 0.1.0")); // pre-rev build
+        assert!(super::needs_install("mymuxd 0.1.0 (deadbeef)")); // other rev
+        assert!(!super::needs_install(super::BUNDLE_VERSION)); // current
+        assert!(!super::needs_install(&format!("{}\n", super::BUNDLE_VERSION)));
     }
 }

@@ -151,7 +151,21 @@ principle):
   status in the host manager, then retries the connect. Tauri path **Mac
   verify pending**; crate side covered here by
   crates/mymux-connect/tests/exec_script.rs (temp-keys + throwaway sshd in a
-  temp dir, never the user's real ssh setup).
+  temp dir, never the user's real ssh setup). **UPDATED 2026-07-15 — source
+  build → self-contained bundle** (triggered by a real failure: the box had
+  no GitHub access, `git clone` exit 128): `scripts/build-daemon-bundle.sh`
+  produces musl-static binaries + VERSION + SHA256SUMS
+  (`src-tauri/resources/daemon/linux-x86_64.tar.gz`, git-ignored, sync to the
+  Mac by hand), embedded via include_bytes! with a `daemon_bundle` cfg
+  fallback (app without it still works; install reports why). The app probes
+  the host's `mymuxd --version` (now carries the git rev via mymuxd/build.rs)
+  against the bundle's VERSION: missing/mismatch/broken → upload (atomic
+  `.new`→rename) → installer's bundle branch (sha256-verified, rename-over
+  binary swap; **a running ptyd is never restarted** — persistent shells
+  untouched, new ptyd code takes effect at its next manual restart). Source
+  build stays as the installer's fallback branch. Verified: musl binaries run
+  (static-pie), localhost bundle install (ptyd pid unchanged, idempotent),
+  1 MiB binary-stdin roundtrip in the sshd test, clippy/tests green.
 - Tauri `SSH_ASKPASS` passphrase dialog — a fallback for a passphrase-locked key
   when there's no agent (the agent path is preferred, so this is only a safety net).
 - Surface connection status + the "load your key" guidance *inside the app

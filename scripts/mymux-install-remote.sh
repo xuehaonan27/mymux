@@ -23,7 +23,26 @@ mkdir -p "$STATE" "$BINS" "$HOME/.config/systemd/user"
 note() { printf 'mymux: %s\n' "$*"; }
 
 # ---- 1. binaries -------------------------------------------------------------
-if [ -x "$BINS/mymuxd" ]; then
+DIST="$STATE/dist"
+if [ -f "$DIST/daemon.tgz" ]; then
+  # A self-contained bundle pushed by the app (zero-touch install/repair):
+  # extract, verify checksums, atomically swap into ~/.local/bin (rename-over,
+  # so a running process keeps its inode). ptyd's BINARY is updated on disk
+  # too, but a RUNNING ptyd is never restarted here — persistent shells hang
+  # off it; the new code takes effect at its next manual, idle-time restart.
+  note "installing from the shipped bundle…"
+  rm -rf "$DIST/new"
+  mkdir -p "$DIST/new"
+  tar -xzf "$DIST/daemon.tgz" -C "$DIST/new"
+  ( cd "$DIST/new" && sha256sum -c SHA256SUMS >/dev/null )
+  for b in mymuxd mymux-ptyd mymux-pkg mymux-attach; do
+    [ -f "$DIST/new/$b" ] || continue
+    install -m 0755 "$DIST/new/$b" "$BINS/.$b.new"
+    mv -f "$BINS/.$b.new" "$BINS/$b"
+  done
+  note "bundle installed: $(cat "$DIST/new/VERSION")"
+  rm -rf "$DIST/new" "$DIST/daemon.tgz"
+elif [ -x "$BINS/mymuxd" ]; then
   note "using the binaries already in ~/.local/bin"
 else
   if ! command -v cargo >/dev/null 2>&1; then
