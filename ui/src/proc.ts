@@ -50,7 +50,7 @@ export function initProcPanel(opts: { getApiBase: () => string }): ProcPanel {
   panel.id = 'proc';
   panel.className = 'proc-panel';
   panel.innerHTML = `
-    <div class="proc-hd"><span>processes</span><span class="proc-hint">✕ SIGTERM · ⇧✕ SIGKILL · esc / ⌘K t close</span></div>
+    <div class="proc-hd"><span>processes</span><span class="proc-hint">✕ SIGTERM · ⇧✕ SIGKILL · esc / ⌘K i close</span></div>
     <div class="proc-body" id="proc-body"></div>`;
   document.body.appendChild(panel);
   const body = panel.querySelector('#proc-body') as HTMLElement;

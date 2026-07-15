@@ -40,7 +40,7 @@ cargo tauri dev                             # or `cargo tauri build` for a .app/
 The app opens on the **host manager**: add your dev box (hostname, user,
 identity file), click it, type the key's passphrase, **Connect**. On first use
 it asks you to trust the server's host key; then you land in the workspace —
-⌘E code panel, ⌘K t processes, ⌘K s raw shells, agent badges, all live.
+⌘E code panel, ⌘K i processes, ⌘K n raw shells, agent badges, all live.
 
 ## Status
 
@@ -57,7 +57,7 @@ and the multiplexer core (M0/M1).
 | **M2** | Tauri desktop app + resilient SSH tunnel (auto-reconnect) | ✅ done |
 | **M3** | agent-status tab badges (hooks: Claude + Codex; heuristics) | ✅ done |
 | **M4** | ⌘E code panel: file tree, editor (edit/save), git diff | ✅ done |
-| **M5** | process tree (⌘K t) + ephemeral non-tmux shells (⌘K s) | ✅ done |
+| **M5** | process tree (⌘K i) + ephemeral non-tmux shells (⌘K n) | ✅ done |
 | **M6** | native host manager: in-process SSH (russh), in-app passphrase, TOFU host keys | ✅ done |
 | **M7** | multi-host: several hosts at once, host chips, cross-host agent counts | ✅ built · Mac verify pending |
 
@@ -204,7 +204,7 @@ the bell — and focusing a window clears its *done*.
 
 **The attention queue**: every window that needs a human (waiting for approval /
 input, or finished) is queued across **all** connected hosts, ordered by when it
-first needed you. Press **⌘J** (or ⌘K `a`, or click the ⏳/✓ summary) to jump to
+first needed you. Press **⌘J** (or ⌘K `j`, or click the ⏳/✓ summary) to jump to
 the oldest one — keyboard focus lands **directly on the agent's pane**. Deal
 with it and press again for the next. Entries clear themselves — answering flips
 *waiting* back to *running*, and focusing clears *done*. When nothing is pending
@@ -232,9 +232,9 @@ The daemon serves `/fs/*` and `/git/*` confined to a root (the pane's cwd, else
 `MYMUX_ROOT`/cwd) — rejecting path escapes, with a CORS allowlist so only the
 mymux UI can reach them.
 
-## Processes (⌘K t)
+## Processes (⌘K i)
 
-Press **⌘K t** (or the `ps` button) for a scoped mini-htop: every window → pane →
+Press **⌘K i** (or the `ps` button) for a scoped mini-htop: every window → pane →
 its process subtree (rooted at each pane's shell pid, including `⌁` shells), with
 live %CPU, memory and state. Hover a row and click **✕** to kill that process —
 **⇧✕** for SIGKILL. Kills are **scoped**: the daemon only signals a pid it can
@@ -242,9 +242,9 @@ prove is inside a pane's subtree (never by name), so the dashboard can't take
 down arbitrary processes. It reads `/proc` directly (Linux) and serves
 `/proc/tree` + `/proc/kill` behind the same CORS allowlist as the code panel.
 
-## Ephemeral shells (⌘K s)
+## Ephemeral shells (⌘K n)
 
-Not everything needs tmux. Press **⌘K s** (or the `+sh` button) for a raw,
+Not everything needs tmux. Press **⌘K n** for a raw,
 non-tmux shell in its own top-level tab (marked `⌁`, dashed) — ideal for quick
 throwaway commands without nesting inside a persistent agent session. Like all
 native panes it lives in mymux-ptyd: it inherits the focused pane's cwd (with
@@ -258,7 +258,7 @@ Close it like any pane.
 ## Persistent shells — the default window (⌘T / +win)
 
 **New windows are persistent native shells now.** Press **⌘T** (the `+win`
-button, or ⌘K c / ⌘K ⇧S) for a native shell that **survives mymuxd
+button, or ⌘K t) for a native shell that **survives mymuxd
 restarts**: its PTY and terminal grid are held by **mymux-ptyd**, a tiny
 companion daemon that changes rarely (installed and started by
 `scripts/install-systemd.sh`; mymuxd can also bootstrap it on demand). Deploy or
@@ -266,18 +266,18 @@ crash mymuxd all you like — on the next start it re-adopts these tabs, full
 screen state included. Tabs are marked `∞` (violet). The contract mirrors tmux's
 server: panes die only if **ptyd itself** stops, so the installer never restarts
 a live ptyd — do that yourself when idle. tmux windows remain available behind
-**⌘K w** — the tmux engine is kept, not retired; native is simply the default.
+**⌘K u** — the tmux engine is kept, not retired; native is simply the default.
 
 **Escape hatch**: from any plain SSH shell, `mymux-attach` lists persistent
 panes and `mymux-attach <id>` attaches — faithful snapshot first, then live
 bytes; `Ctrl-\` detaches, the pane keeps running. The equivalent of
 `tmux -L mymux attach` for the native engine, for the day the app is out of
-reach. Persistent panes also show up in the ⌘K t process tree (marked `∞`) with
+reach. Persistent panes also show up in the ⌘K i process tree (marked `∞`) with
 scoped kill.
 
-**Splits work too** (⌘D / ⌘⇧D), tmux-free, for `⌁` and `∞` tabs alike: mymuxd
+**Splits work too** (⌘D / ⌘R), tmux-free, for `⌁` and `∞` tabs alike: mymuxd
 is the layout engine — splits, collapse-on-close, ⌘⌥-arrow navigation, zoom
-(⌘K z), pane swap (⌘K { }) and break-out-to-window (⌘K !) are computed
+(⌘K m), pane swap (⌘K , / ⌘K .) and break-out-to-window (⌘K b) are computed
 natively, and the layout tree (zoom included) rides along in ptyd next to the
 panes it describes. Kill and restart mymuxd and a persistent window comes back
 whole: grouping, geometry, focused pane, every pane's scrollback.
@@ -285,7 +285,7 @@ whole: grouping, geometry, focused pane, every pane's scrollback.
 More daily-driver guardrails: an `⌁` shell you decide to keep promotes to `∞`
 in place with **⌘K k** (nothing restarts — the flag flips, the pid and
 `MYMUX_PANE` stay); closing a pane whose shell is running something (vim, an
-agent, a build) asks first instead of killing it blind; and **⌘K ?** shows
+agent, a build) asks first instead of killing it blind; and **⌘K /** shows
 the key map.
 
 **Unlimited history**: every native pane's raw output (colors included) is

@@ -184,7 +184,7 @@ function showDemoteConfirm(w: Workspace, id: number) {
   confirmEl.classList.add('show');
 }
 
-// New-window-in-directory prompt (⌘K ⇧C): spawn a shell elsewhere WITHOUT
+// New-window-in-directory prompt (⌘K o): spawn a shell elsewhere WITHOUT
 // cd-ing the current pane (its agent keeps running). Keys follow house rules
 // (Enter/Esc swallowed); creation is explicit via ✓-style buttons, and blur
 // CANCELS here — unlike rename's blur-saves, accidentally creating a window
