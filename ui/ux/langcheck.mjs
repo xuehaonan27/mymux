@@ -17,6 +17,14 @@ await page.goto(UI, { waitUntil: 'domcontentloaded' });
 await page.waitForSelector('.xterm', { timeout: 20000 });
 await page.waitForTimeout(1500);
 
+// The tree roots at the PANE's cwd, and panes are persistent — an earlier
+// check may have cd'd elsewhere. Re-anchor the shell at $HOME first (the
+// ux-lang-test tree material lives there).
+await page.click('.xterm');
+await page.keyboard.type('cd ~');
+await page.keyboard.press('Enter');
+await page.waitForTimeout(800);
+
 // Code panel, then open each file via the file TREE (⌘P quick-open is
 // git-repo-scoped and the test home dir is no repo).
 await page.keyboard.press('Control+e');

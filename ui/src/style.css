@@ -9,13 +9,15 @@
   --glass-bg: rgba(22, 27, 38, 0.66);
   --glass-bg-bar: rgba(21, 26, 36, 0.78);
   --glass-bg-strong: rgba(24, 29, 41, 0.82);
-  --glass-border: rgba(255, 255, 255, 0.09);
+  --glass-border: rgba(255, 255, 255, 0.17);
   --glass-hi: rgba(255, 255, 255, 0.06);
   --glass-blur: blur(22px) saturate(150%);
   --glass-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
-  --hairline: rgba(255, 255, 255, 0.07);
+  --hairline: rgba(255, 255, 255, 0.13);
   --accent: #409cff;
   --pane-bg: #0b0e14;
+  /* Shows through the 1-cell gaps tmux leaves between panes, as separators. */
+  --gap-bg: #242c3d;
   /* Semantic surface/diff colors (light presets override below). */
   --control-bg: rgba(255, 255, 255, 0.05);
   --control-bg-hover: rgba(255, 255, 255, 0.1);
@@ -25,8 +27,6 @@
   --diff-del-bg: rgba(248, 81, 73, 0.12);
   --diff-del-fg: #ffa198;
   --diff-hunk-fg: #79c0ff;
-  --bar-inset: 56px;
-  --bar-inset-hosts: 88px;
 }
 /* ---- theme presets (ui/src/theme.ts carries term/editor faces of the same
    palettes; these blocks are the chrome face). The default :root values are
@@ -76,11 +76,12 @@ body[data-theme='catppuccin-latte'] {
   --glass-bg: rgba(255, 255, 255, 0.55);
   --glass-bg-bar: rgba(255, 255, 255, 0.68);
   --glass-bg-strong: rgba(255, 255, 255, 0.78);
-  --glass-border: rgba(76, 79, 105, 0.16);
+  --glass-border: rgba(76, 79, 105, 0.24);
   --glass-hi: rgba(255, 255, 255, 0.5);
-  --hairline: rgba(76, 79, 105, 0.12);
+  --hairline: rgba(76, 79, 105, 0.18);
   --accent: #1e66f5;
   --pane-bg: #eff1f5;
+  --gap-bg: rgba(76, 79, 105, 0.14);
 }
 body[data-theme='gruvbox-dark'] {
   --bg: #282828;
@@ -147,11 +148,12 @@ body[data-theme='code-light-modern'] {
   --glass-bg: rgba(255, 255, 255, 0.55);
   --glass-bg-bar: rgba(255, 255, 255, 0.68);
   --glass-bg-strong: rgba(255, 255, 255, 0.8);
-  --glass-border: rgba(59, 59, 59, 0.14);
+  --glass-border: rgba(59, 59, 59, 0.22);
   --glass-hi: rgba(255, 255, 255, 0.5);
-  --hairline: rgba(59, 59, 59, 0.12);
+  --hairline: rgba(59, 59, 59, 0.17);
   --accent: #005fb8;
   --pane-bg: #f8f8f8;
+  --gap-bg: rgba(59, 59, 59, 0.1);
 }
 * {
   box-sizing: border-box;
@@ -169,39 +171,32 @@ body {
   flex-direction: column;
   height: 100vh;
 }
-/* The top bar floats over the terminal as a glass toolbar; the terminal grid
-   starts below it (#term padding), scrollback slides underneath. */
+/* The top bar is a real in-flow toolbar (full width, solid): nothing of the
+   terminal sits behind it. The glass language stays via the translucent
+   background + blur; overlays (code/proc/pkgs) remain floating sheets. */
 #bar {
-  position: fixed;
-  top: 8px;
-  left: 8px;
-  right: 8px;
-  z-index: 30;
+  position: relative; /* stacks above the overlay sheets so buttons stay clickable */
+  z-index: 26;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
-  font: 12px var(--chrome);
+  padding: 7px 12px;
+  font: 13px var(--chrome);
   color: var(--text-dim);
   background: var(--glass-bg-bar);
   -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
-  border: 1px solid var(--glass-border);
-  border-radius: 12px;
-  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
-}
-body.has-hostbar #bar {
-  top: 40px;
+  border-bottom: 1px solid var(--glass-border);
 }
 #bar .title {
-  font: 600 12px var(--chrome);
+  font: 600 13px var(--chrome);
   letter-spacing: 0.2px;
   color: var(--text);
 }
 #meta {
   margin-left: 8px;
   color: var(--text-dim);
-  font: 11px var(--mono);
+  font: 12px var(--mono);
 }
 #agents {
   cursor: pointer;
@@ -229,12 +224,12 @@ body.has-hostbar #bar {
   align-items: center;
 }
 .tab {
-  font: 11px var(--mono);
+  font: 12px var(--mono);
   color: var(--text);
   background: var(--control-bg);
   border: 1px solid var(--hairline);
   border-radius: 8px;
-  padding: 3px 9px;
+  padding: 4px 10px;
   cursor: pointer;
   transition: background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
 }
@@ -347,10 +342,10 @@ body.has-hostbar #bar {
   outline: none;
 }
 .cwd-input:focus {
-  border-color: #2f81f7;
+  border-color: var(--accent);
 }
 .tab.drop-target {
-  border-left: 2px solid #2f81f7;
+  border-left: 2px solid var(--accent);
 }
 
 /* Code-action menu (⌘. in the editor). */
@@ -367,7 +362,7 @@ body.has-hostbar #bar {
   background: var(--glass-bg-strong);
   -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
-  border: 1px solid rgba(64, 156, 255, 0.45);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
   border-radius: 10px;
   box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
   padding: 4px;
@@ -502,9 +497,9 @@ body.has-hostbar #bar {
   transition: background 0.12s ease, border-color 0.12s ease;
 }
 .pkgs-btn.primary {
-  border-color: rgba(64, 156, 255, 0.55);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
   color: var(--accent);
-  background: rgba(64, 156, 255, 0.14);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 .pkgs-btn:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.12);
@@ -530,7 +525,7 @@ body.has-hostbar #bar {
   transition: border-color 0.12s ease;
 }
 .pkgs-search-input:focus {
-  border-color: rgba(64, 156, 255, 0.6);
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
 }
 .pkgs-badge {
   font-size: 10px;
@@ -598,7 +593,7 @@ body.has-hostbar #bar {
 .help-card th {
   text-align: left;
   padding: 10px 0 4px;
-  color: #2f81f7;
+  color: var(--accent);
   font-weight: 600;
 }
 .help-card td {
@@ -613,35 +608,41 @@ body.has-hostbar #bar {
   white-space: nowrap;
 }
 .barbtn {
-  font: 11px var(--mono);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font: 12px var(--chrome);
   color: var(--text);
   background: var(--control-bg);
   border: 1px solid var(--hairline);
   border-radius: 8px;
-  padding: 3px 8px;
+  padding: 5px 8px;
   cursor: pointer;
   transition: background 0.12s ease, color 0.12s ease;
+}
+.barbtn svg {
+  width: 15px;
+  height: 15px;
 }
 .barbtn:hover {
   color: var(--text);
   background: var(--control-bg-hover);
-  border-color: rgba(255, 255, 255, 0.14);
+  border-color: var(--glass-border);
 }
-/* The notification bell: lit when armed, struck through when the OS/browser
-   has notifications blocked. */
+/* The notification bell: lit when armed, dimmed when the OS/browser has
+   notifications blocked. */
 #btn-notify.on {
   color: #d6a04c;
   border-color: #d6a04c;
 }
 #btn-notify.denied {
-  text-decoration: line-through;
-  opacity: 0.55;
+  opacity: 0.45;
 }
 
 /* Agent-status badges on window tabs + a glance summary in the bar. */
 #agents {
   margin-left: 0;
-  font: 600 11px var(--mono);
+  font: 600 12px var(--mono);
   color: #d6a04c;
 }
 .adot {
@@ -655,7 +656,7 @@ body.has-hostbar #bar {
 }
 .agent-running {
   background: var(--accent);
-  box-shadow: 0 0 6px rgba(64, 156, 255, 0.7);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent);
 }
 .agent-done {
   background: #3fb950;
@@ -835,11 +836,11 @@ body.has-hostbar #bar {
 }
 .diff-ctl-btn:hover {
   color: #c5cdd9;
-  border-color: #2f81f7;
+  border-color: var(--accent);
 }
 .diff-ctl-btn.on {
-  color: #2f81f7;
-  border-color: #2f81f7;
+  color: var(--accent);
+  border-color: var(--accent);
 }
 .code-root {
   display: flex;
@@ -864,7 +865,7 @@ body.has-hostbar #bar {
 }
 .code-root.switched .code-root-path,
 .code-root.switched #root-home {
-  color: #2f81f7;
+  color: var(--accent);
 }
 .code-root-path {
   overflow: hidden;
@@ -879,14 +880,8 @@ body.has-hostbar #bar {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  /* Panes start below the floating glass bar (see desiredSize); scrollback
-     slides underneath it. */
-  padding-top: var(--bar-inset);
   /* Shows through the 1-cell gaps tmux leaves between panes, as separators. */
-  background: #141a24;
-}
-body.has-hostbar #term {
-  padding-top: var(--bar-inset-hosts);
+  background: var(--gap-bg);
 }
 .pane {
   position: absolute;
@@ -894,8 +889,16 @@ body.has-hostbar #term {
   background: var(--pane-bg);
   border-radius: 5px;
 }
-.pane.active {
-  box-shadow: inset 0 0 0 1px #2f81f7;
+/* The active ring must be an overlay: an inset box-shadow on .pane would
+   paint UNDER the xterm canvas and disappear. */
+.pane.active::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--accent);
+  border-radius: 5px;
+  pointer-events: none;
+  z-index: 3;
 }
 /* Split dividers: draggable hit areas along layout boundaries. */
 .divider {
@@ -913,7 +916,7 @@ body.has-hostbar #term {
 }
 .divider:hover,
 .divider.drag {
-  background: rgba(47, 129, 247, 0.45);
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 .pane .xterm {
   width: 100%;
@@ -938,7 +941,7 @@ body.has-hostbar #term {
   background: var(--glass-bg-strong);
   -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
-  border: 1px solid rgba(64, 156, 255, 0.4);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
   border-radius: 999px;
   box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
   white-space: nowrap;
@@ -1216,27 +1219,22 @@ body.has-hostbar #term {
 
 /* Multi-host: one layer per workspace under #term; host chips get their own
    slim strip ABOVE the main bar (hosts > windows hierarchy), shown only when
-   more than one host is connected. */
+   more than one host is connected. Both strips are in-flow layout. */
 .workspace {
   position: absolute;
   inset: 0;
 }
 #hostbar {
   display: none; /* shown by the shell when ≥2 hosts are connected */
-  position: fixed;
-  top: 8px;
-  left: 8px;
-  right: 8px;
-  z-index: 31;
+  position: relative; /* above overlay sheets, like the main bar */
+  z-index: 26;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
+  padding: 5px 12px;
   background: var(--glass-bg);
   -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
-  border: 1px solid var(--glass-border);
-  border-radius: 10px;
-  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
+  border-bottom: 1px solid var(--hairline);
   /* Many hosts: scroll horizontally instead of wrapping/overflowing. */
   overflow-x: auto;
   scrollbar-width: thin;
@@ -1264,9 +1262,9 @@ body.has-hostbar #term {
 }
 .hostchip.active {
   color: #fff;
-  background: rgba(64, 156, 255, 0.28);
-  border-color: rgba(64, 156, 255, 0.6);
-  box-shadow: 0 0 8px rgba(64, 156, 255, 0.25);
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 25%, transparent);
 }
 .host-live {
   color: #3fb950;
@@ -1292,7 +1290,7 @@ body.has-hostbar #term {
   background: #30363d;
 }
 .host-reopen {
-  color: #2f81f7;
+  color: var(--accent);
   margin-left: 6px;
   font-size: 11px;
 }
@@ -1351,7 +1349,7 @@ body.has-hostbar #term {
   color: #c5cdd9;
 }
 .bufchip.active {
-  border-color: #2f81f7;
+  border-color: var(--accent);
   color: #e6edf3;
 }
 .bufchip.dirty {
@@ -1379,9 +1377,9 @@ body.has-hostbar #term {
 .code-lsphint button {
   padding: 2px 10px;
   border-radius: 4px;
-  border: 1px solid #2f81f7;
+  border: 1px solid var(--accent);
   background: transparent;
-  color: #2f81f7;
+  color: var(--accent);
   cursor: pointer;
   font: inherit;
 }
@@ -1524,7 +1522,7 @@ body.has-hostbar #term {
   background: var(--control-bg);
 }
 .qopen-row.sel {
-  background: rgba(64, 156, 255, 0.2);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
   color: #fff;
 }
 .qopen-empty {

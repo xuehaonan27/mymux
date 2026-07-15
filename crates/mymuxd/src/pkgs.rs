@@ -53,9 +53,8 @@ fn claim(name: &str) -> Option<InflightGuard> {
     Some(InflightGuard(name.to_string()))
 }
 
-/// `GET /pkgs/search?q=` — relay `mymux-pkg search` (curated + npm). The
-/// network calls run HERE, on the daemon host — the client side may have no
-/// route to the registries.
+/// `GET /pkgs/search?q=` — relay `mymux-pkg search` (curated index only).
+/// Runs on the daemon host, which owns the package dir being queried.
 pub async fn search(
     axum::extract::Query(q): axum::extract::Query<SearchQuery>,
 ) -> Json<serde_json::Value> {

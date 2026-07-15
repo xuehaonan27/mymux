@@ -1,9 +1,8 @@
-// The packages panel — mymux's own "marketplace", fed through the daemon
-// (`/pkgs/*`): the curated mymux-pkg catalog plus live npm search (queried
-// FROM the daemon host, which is the machine that can reach the registries).
-// Browse and install at YOUR initiative — mymux never nags about missing
-// packages. Ecosystem boundary (docs/PKG-SPEC.md): pinned upstream releases
-// and npm only; the VS Marketplace and MS proprietary extensions never.
+// The packages panel — mymux's own curated catalog, fed through the daemon
+// (`/pkgs/*`) from the mymux-pkg index. Browse and install at YOUR initiative
+// — mymux never nags about missing packages. Ecosystem boundary
+// (docs/PKG-SPEC.md): the catalog is the whole store; npm/github/go are
+// install *channels* for pinned entries, never browse sources.
 
 interface CatalogItem {
   name: string;
@@ -18,7 +17,7 @@ interface CatalogItem {
 }
 
 interface SearchHit {
-  source: string; // curated | npm
+  source: string; // always "curated" — the catalog is the only browse source
   spec: string; // what /pkgs/install accepts
   name: string;
   title?: string; // index title
@@ -77,13 +76,10 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
         const r = await fetch(
           `${opts.getApiBase()}/pkgs/search?q=${encodeURIComponent(query)}`,
         );
-        const res = (await r.json()) as { hits: SearchHit[]; warnings?: string[] };
-        rows = (res.warnings ?? []).map((w) => note(`⚠ ${w}`));
-        rows.push(
-          ...(res.hits.length
-            ? res.hits.map((h) => hitCard(h))
-            : [note(`nothing found for “${query}”`)]),
-        );
+        const res = (await r.json()) as { hits: SearchHit[] };
+        rows = res.hits.length
+          ? res.hits.map((h) => hitCard(h))
+          : [note(`nothing found for “${query}”`)];
       } else {
         const r = await fetch(`${opts.getApiBase()}/pkgs/catalog`);
         const items = (await r.json()) as CatalogItem[];
@@ -95,9 +91,7 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
       rows = [note('could not reach the daemon')];
     }
     if (!open || my !== seq) return;
-    rows.push(
-      note('sources: pinned upstream releases · npm — never the VS Marketplace'),
-    );
+    rows.push(note('the mymux catalog — curated, pinned upstream releases'));
     render(rows);
   }
 
@@ -118,7 +112,7 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
     row.className = 'pkgs-search';
     const input = document.createElement('input');
     input.className = 'pkgs-search-input';
-    input.placeholder = 'search npm + curated… (Enter)';
+    input.placeholder = 'search the catalog… (Enter)';
     input.value = query;
     // Enter-to-submit is fine here: the input lives in a panel, not over a
     // terminal, and search is idempotent. Esc stays unbound (agent discipline).
@@ -262,11 +256,6 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
       // Removal by spec works because the daemon maps a spec to its dir name.
       actionBtn(h.installed, h.spec),
     );
-    if (h.source === 'npm' && !h.installed) {
-      c.append(
-        note('after install, bind a server to file types: mymux-pkg lang <pkg> <lang…> -- <args>'),
-      );
-    }
     return c;
   }
 

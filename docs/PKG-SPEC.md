@@ -101,13 +101,13 @@ into the manifest, no separate binding step:
 
 **Dynamic installs** (user-initiated, anything not in the index):
 
-- `mymux-pkg search <query>` — merges the index with live results from the
-  npm registry. Network I/O happens on the machine running the command
-  (through the daemon: the mymuxd host — which is the box that can actually
-  reach the registry, not the browser).
+- `mymux-pkg search <query>` — searches the curated index only. The catalog
+  is mymux's whole package ecosystem: registries are install *channels* for
+  pinned entries, never browse sources in the UI.
 - `mymux-pkg install npm:pkg[@ver]` — npm-installs into the package dir; if
   the package declares a `bin` it becomes a runnable `lsp-server` (bind
-  languages below), else `npm-assets`.
+  languages below), else `npm-assets`. This explicit spec form is the
+  escape hatch for servers the index doesn't carry yet.
 - `mymux-pkg lang <pkg> <lang…> [-- <launch args…>]` — binds an installed
   package's executable to language ids (and its launch args). Needed only
   for dynamic installs; index entries come prewired.
@@ -147,8 +147,7 @@ wins:
 
 Network-class failures (resolve/connect/timeout/TLS) carry a hint: without a
 proxy configured they point at this file; with one they name the proxy in
-use. `search` degrades per-source and reports unreachable registries in a
-`warnings` array instead of failing silently.
+use.
 
 ## Consumers today
 
@@ -162,7 +161,7 @@ use. `search` degrades per-source and reports unreachable registries in a
   {name}`, `POST /pkgs/remove {name}`: relayed to the CLI; `name` accepts
   curated names and dynamic specs (charset-validated, `..` rejected). The
   UI's packages panel (⌘K g) fronts these: curated catalog by default, a
-  search box for the registries, install/remove per card. The daemon embeds
+  search box over the same catalog, install/remove per card. The daemon embeds
   no recipes or acquisition logic. Relayed CLI runs have hard deadlines
   (install 600s, remove 60s, search 45s, catalog 15s — timed-out children
   are killed), and install/remove are serialized PER PACKAGE NAME (a

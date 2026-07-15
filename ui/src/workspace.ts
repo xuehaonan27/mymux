@@ -448,8 +448,9 @@ export class Workspace {
   // We are the screen; the daemon is the authoritative sizer. Report the whole
   // container size in cells; it splits it and pushes back the per-pane layout.
   private desiredSize() {
-    // The terminal grid starts below the floating bar (#term's paddingTop);
-    // absolute-positioned panes already begin under the padding box.
+    // #term is an in-flow flex child below the toolbar, so clientHeight is
+    // already the pure grid height; paddingTop stays in the math in case a
+    // theme ever adds inner padding.
     const padTop = parseFloat(getComputedStyle(this.container).paddingTop) || 0;
     return {
       cols: Math.max(20, Math.floor(this.container.clientWidth / this.style.cellW)),

@@ -280,7 +280,7 @@ fn main() {
             eprintln!(
                 "usage: mymux-pkg install <name | npm:pkg[@ver]>\n\
                  \x20      mymux-pkg install --lang <lang>\n\
-                 \x20      mymux-pkg search <query>      (index + npm)\n\
+                 \x20      mymux-pkg search <query>      (curated index)\n\
                  \x20      mymux-pkg lang <pkg> <lang..> (bind an installed server to languages)\n\
                  \x20      mymux-pkg list | catalog | remove <pkg>\n\
                  index: {}",
@@ -683,8 +683,10 @@ fn detect_npm_bin(staging: &Path, pkg: &str) -> String {
     }
 }
 
-/// `search <query>` — the index + npm registry, merged as JSON.
-/// All network from wherever mymux-pkg runs (the daemon host).
+/// `search <query>` — the curated index only, as JSON. mymux's package
+/// ecosystem is its own catalog: the panel never lists registry odds and
+/// ends (npm remains an install *channel* for pinned entries and the
+/// explicit `npm:pkg` escape hatch, never a browse source).
 fn cmd_search(args: &[String]) -> i32 {
     let query = args.join(" ");
     if query.trim().is_empty() {
@@ -732,37 +734,7 @@ fn cmd_search(args: &[String]) -> i32 {
             });
         }
     }
-    // Registry failure must be VISIBLE (a proxy-blocked cluster would
-    // otherwise look like "nothing found") — collected as a warning, search
-    // degrades to whatever the registry answered.
-    let mut warnings: Vec<String> = Vec::new();
-    match http_json_t(
-        &format!(
-            "https://registry.npmjs.org/-/v1/search?text={}&size=10",
-            urlenc(&query)
-        ),
-        12,
-    ) {
-        Ok(v) => {
-            for o in v["objects"].as_array().unwrap_or(&vec![]) {
-                let p = &o["package"];
-                let Some(name) = p["name"].as_str() else {
-                    continue;
-                };
-                hits.push(Hit {
-                    source: "npm",
-                    spec: format!("npm:{name}"),
-                    name: name.to_string(),
-                    title: String::new(),
-                    version: p["version"].as_str().unwrap_or("?").to_string(),
-                    desc: p["description"].as_str().unwrap_or("").to_string(),
-                    installed: installed_dirs.contains(&safe_dir(name)),
-                });
-            }
-        }
-        Err(e) => warnings.push(format!("registry.npmjs.org: {e}")),
-    }
-    let out = serde_json::json!({ "hits": hits, "warnings": warnings });
+    let out = serde_json::json!({ "hits": hits });
     println!("{}", serde_json::to_string(&out).expect("hits serialize"));
     0
 }
