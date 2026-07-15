@@ -108,19 +108,26 @@ The native app (`src-tauri/`) bundles the UI, owns the SSH tunnel
 **in-process** (russh — no `ssh` binary, no ssh-agent, no config files to
 prepare), and unlocks the full iTerm2 keybindings a browser reserves
 (⌘T / ⌘W / ⌘1–9). Build it **on your Mac** — it can't build on the headless
-Linux box (no webkit2gtk, no display). For zero-touch daemon installs the app
-embeds the daemon bundle; produce it with one command from either side:
+Linux box (no webkit2gtk, no display).
+
+**The release build is one command** (on the Mac):
 
 ```sh
-scripts/build-daemon-bundle.sh
+scripts/build-release.sh
 ```
 
-On a Linux box with musl-tools it builds locally; **on a Mac it automatically
-delegates the build to a Linux host** (`$MYMUX_BUILD_HOST`, else
-`~/.config/mymux/build-host`) — rsyncs the working tree over, builds there,
-pulls the bundle back into `src-tauri/resources/daemon/`. Without the bundle
-the app still works — the zero-touch install just reports why it's
-unavailable instead of pushing.
+It produces the daemon bundle (delegating its build to
+`$MYMUX_BUILD_HOST`/`~/.config/mymux/build-host` when the local box has no
+musl toolchain — the Mac case; skipped entirely when the bundle already
+matches the commit), builds the UI, runs `cargo tauri build` (ad-hoc signed),
+and drops `mymux.dmg` into `dist/`. **That dmg is the whole product**: install
+it, open, add a host, type the passphrase — the app pushes and installs the
+daemon bundle itself, zero-touch. First launch of an ad-hoc-signed app needs
+one right-click → Open (or `xattr -dr com.apple.quarantine` on the .app).
+
+For just the bundle on its own: `scripts/build-daemon-bundle.sh` (same
+delegation). Without the bundle the app still works — the zero-touch install
+just reports why it's unavailable instead of pushing.
 
 ```sh
 cargo install tauri-cli --version '^2'      # one-time; or: npm i -g @tauri-apps/cli

@@ -197,8 +197,15 @@ principle):
   there's no local musl toolchain (macOS): it rsyncs the working tree to
   `$MYMUX_BUILD_HOST` (else `~/.config/mymux/build-host`), builds there, and
   pulls the bundle back — no Mac-side toolchain (was: manual two-step, which
-  bit immediately). Proper release packaging (CI-built bundle + signed app,
-  no user-side builds at all) remains the declared endgame.
+  bit immediately). **Release model DECIDED 2026-07-15 (user)**: VS Code
+  Remote style — the user downloads a finished .dmg, opens it, adds a host,
+  types the passphrase, done; no manual steps anywhere. For now it's built
+  LOCALLY, not via GitHub workflows (user's call): `scripts/build-release.sh`
+  on the Mac = one command → bundle (delegated build) → UI → `cargo tauri
+  build` (ad-hoc signed) → `dist/mymux.dmg`. First launch needs one
+  right-click→Open until a Developer ID + notarization happens. Still open:
+  a download/update channel for the dmg (GH releases vs self-hosted), and
+  Developer ID signing.
 - ~~Tauri `SSH_ASKPASS` passphrase dialog~~ — **SUPERSEDED by M6**: the russh
   host manager takes the key passphrase IN the app (no ssh-agent in the
   picture at all), which was the point of the askpass fallback. Nothing left.
