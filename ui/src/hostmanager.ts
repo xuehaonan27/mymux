@@ -29,6 +29,7 @@ type Status =
   | 'auth_failed'
   | 'host_key_mismatch'
   | 'daemon_unreachable'
+  | 'installing'
   | { host_key_unknown: { fingerprint: string } }
   | { error: string };
 
@@ -395,10 +396,15 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     else if (s === 'auth_failed') {
       setStatus('error', 'Authentication failed — wrong passphrase, or the key isn’t authorized.');
       settleAttempt();
+    } else if (s === 'installing') {
+      setStatus(
+        'info',
+        'mymuxd isn’t installed on that host — installing it now (a source build can take a few minutes)…',
+      );
     } else if (s === 'daemon_unreachable') {
       setStatus(
         'error',
-        'SSH works, but mymuxd isn’t running on that host. Install/start it there: scripts/install-systemd.sh',
+        'mymuxd is installed on that host but won’t start. Logs: journalctl --user -u mymuxd, or /tmp/mymuxd.log',
       );
       settleAttempt();
     } else if (s === 'host_key_mismatch') {

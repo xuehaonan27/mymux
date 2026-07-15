@@ -21,7 +21,7 @@ use tokio::process::{Child, Command};
 /// In-process SSH tunnel (russh) for the native host manager — the ssh-binary
 /// path below stays as a fallback until this is proven end-to-end.
 pub mod russh_tunnel;
-pub use russh_tunnel::{run_russh_tunnel, HostConfig, Status};
+pub use russh_tunnel::{exec_script, run_russh_tunnel, HostConfig, Status};
 pub mod hosts;
 pub use hosts::{config_dir, Host, HostStore};
 

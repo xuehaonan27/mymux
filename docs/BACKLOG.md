@@ -143,6 +143,15 @@ principle):
   (verified against localhost: idempotent, no-op runs leave the daemon alone).
   The box-side half, `scripts/mymux-install-remote.sh`, is self-contained
   (embedded units) so the app can reuse it — see the zero-touch entry below.
+- ~~Zero-touch daemon install from the app~~ — **DONE 2026-07-15**: the russh
+  supervisor runs the same `scripts/mymux-install-remote.sh` (embedded via
+  include_str!) over its own SSH when the daemon is missing (`exec_script` —
+  channel exec + stdin pipe + output capture; exit-status read AFTER eof,
+  which the throwaway-sshd integration test caught), surfaces an `installing`
+  status in the host manager, then retries the connect. Tauri path **Mac
+  verify pending**; crate side covered here by
+  crates/mymux-connect/tests/exec_script.rs (temp-keys + throwaway sshd in a
+  temp dir, never the user's real ssh setup).
 - Tauri `SSH_ASKPASS` passphrase dialog — a fallback for a passphrase-locked key
   when there's no agent (the agent path is preferred, so this is only a safety net).
 - Surface connection status + the "load your key" guidance *inside the app

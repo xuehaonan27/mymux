@@ -31,7 +31,9 @@ scripts/mymux-bootstrap.sh user@dev-box   # install/upgrade mymuxd, idempotent
 
 It lands the daemons in `~/.local/bin` (rsync'd prebuilts via `--bin-dir`, or a
 source build on the box — `--with-rustup` when the box has no cargo) and
-registers the systemd --user services when available. On the box itself, the
+registers the systemd --user services when available. **The desktop app can
+skip even this**: connecting to a host whose mymuxd is missing pushes the same
+installer over its own SSH and retries — zero-touch. On the box itself, the
 equivalents are `scripts/mymux-install-remote.sh` (self-contained) and
 `scripts/install-systemd.sh` (the classic). Optional agent wiring:
 `install-claude-hooks.sh` / `install-codex-notify.sh` /
@@ -123,9 +125,12 @@ migrated automatically). Pick one, enter the key's passphrase, **Connect**:
   trust it (then records it in `~/.ssh/known_hosts`). A **changed** host key is
   refused outright — MITM protection.
 - The app starts `mymuxd` on the remote if needed (the systemd service, else a
-  detached fallback), keeps a local forward with auto-reconnect, and reveals the
-  workspace. **Exiting the last pane ends the session and returns you to the
-  host manager.**
+  detached fallback), and if the daemon isn't **installed** at all it first
+  pushes the self-contained installer (`scripts/mymux-install-remote.sh`) over
+  its own SSH and retries — zero-touch, no dev-box pre-setup (source build on
+  the box; a Mac-verify-pending path). It keeps a local forward with
+  auto-reconnect, and reveals the workspace. **Exiting the last pane ends the
+  session and returns you to the host manager.**
 - **Several hosts at once**: connect more hosts from the manager (`host`
   button) — each gets its own tunnel port and workspace. Host chips appear in
   the bar (click or **⌘⇧1–9** to switch), the agent counter sums ⏳/✓ across
