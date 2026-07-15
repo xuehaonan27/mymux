@@ -314,7 +314,15 @@ async fn bootstrap_ptyd() {
         .map(|s| s.success())
         .unwrap_or(false);
     if via_systemd {
-        return;
+        // The unit serves the DEFAULT socket — a custom MYMUX_PTYD_SOCK (dev
+        // throwaway daemons) is NOT covered by it. Trust systemd only when
+        // OUR socket actually shows up; otherwise fall through to the sibling.
+        for _ in 0..10 {
+            if socket_path().exists() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
     let bin = std::env::current_exe()
         .ok()

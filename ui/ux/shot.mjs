@@ -34,6 +34,12 @@ const scenarios = {
   async boot(page) {
     tabs = await tabCount(page);
   },
+  // Boot against a daemon whose ptyd is unavailable: the daemon must REPORT
+  // the spawn failure (toast), not just show an empty workspace.
+  async bootbroken(page) {
+    await page.locator('.toast.show').waitFor({ timeout: 20000 });
+    tabs = await tabCount(page);
+  },
   // ⌘K n — new ⌁ ephemeral-shell tab.
   async newsh(page) {
     await leader(page, 'n');
@@ -105,7 +111,8 @@ page.on('console', (m) => {
 });
 
 await page.goto(UI, { waitUntil: 'domcontentloaded' });
-await page.waitForSelector('.xterm', { timeout: 20000 });
+// A working boot shows a terminal; a broken ptyd shows the error toast.
+await page.waitForSelector('.xterm, .toast.show', { timeout: 20000 });
 await page.waitForTimeout(2000);
 
 let i = 0;

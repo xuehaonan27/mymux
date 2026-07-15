@@ -1292,7 +1292,14 @@ impl Hub {
                 self.save_layout_blob();
                 self.emit(ServerEvent::State(self.state_json()));
             }
-            Err(e) => eprintln!("mymuxd: failed to spawn native shell: {e}"),
+            Err(e) => {
+                eprintln!("mymuxd: failed to spawn native shell: {e}");
+                let msg = serde_json::json!({
+                    "t": "error",
+                    "msg": format!("failed to spawn native shell: {e}"),
+                });
+                self.emit(ServerEvent::State(msg.to_string()));
+            }
         }
     }
 

@@ -39,6 +39,8 @@ interface StateMsg {
   // confirm_close payload
   pane?: number;
   cmd?: string;
+  // error payload
+  msg?: string;
 }
 
 export type WsState = 'connecting' | 'open' | 'closed';
@@ -61,6 +63,8 @@ export interface WorkspaceHooks {
   onSessionEnd(w: Workspace): void;
   /** The daemon wants the user to confirm closing a busy pane. */
   onConfirmClose(w: Workspace, pane: number, cmd: string): void;
+  /** The daemon reported an operational error (e.g. a spawn that failed). */
+  onError?(w: Workspace, msg: string): void;
   /** Open the host manager (banner escape hatch; absent in the browser). */
   onOpenHosts?(): void;
 }
@@ -238,6 +242,10 @@ export class Workspace {
     }
     if (msg.t === 'confirm_close') {
       if (msg.pane != null) this.hooks.onConfirmClose(this, msg.pane, msg.cmd ?? '');
+      return;
+    }
+    if (msg.t === 'error') {
+      this.hooks.onError?.(this, msg.msg ?? 'unknown daemon error');
       return;
     }
     if (msg.t !== 'state') return;

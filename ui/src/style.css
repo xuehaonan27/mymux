@@ -363,10 +363,12 @@ body {
   font-weight: 600;
 }
 .help-card td {
-  padding: 2px 0;
+  padding: 2px 22px 2px 0;
+}
+.help-card td:last-child {
+  padding-right: 0;
 }
 .help-card td:first-child {
-  padding-right: 22px;
   color: #9aa5b1;
   font-family: ui-monospace, Menlo, monospace;
   white-space: nowrap;

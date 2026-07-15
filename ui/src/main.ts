@@ -126,11 +126,11 @@ const toastEl = document.createElement('div');
 toastEl.className = 'toast';
 document.body.appendChild(toastEl);
 let toastTimer: number | undefined;
-function toast(msg: string) {
+function toast(msg: string, ms = 1800) {
   toastEl.textContent = msg;
   toastEl.classList.add('show');
   window.clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => toastEl.classList.remove('show'), 1800);
+  toastTimer = window.setTimeout(() => toastEl.classList.remove('show'), ms);
 }
 
 // Busy-pane close confirmation (the daemon refused a non-forced close).
@@ -245,7 +245,7 @@ helpEl.className = 'help-panel';
     s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const rows = helpRows()
     .map(
-      ([desc, app, leader]) =>
+      ([app, leader, desc]) =>
         `<tr><td>${esc(app)}</td><td>${esc(leader)}</td><td>${esc(desc)}</td></tr>`,
     )
     .join('');
@@ -303,6 +303,9 @@ function ensureWorkspace(id: string, label: string, port: number): Workspace {
       },
       onConfirmClose(w, pane, cmd) {
         showConfirmClose(w, pane, cmd);
+      },
+      onError(_w, msg) {
+        toast(msg, 6000); // errors the user must act on linger longer
       },
       onOpenHosts: isTauri ? () => hostManager?.open() : undefined,
     },
