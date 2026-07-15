@@ -8,16 +8,20 @@ const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
 const SHOTS = new URL('./shots/', import.meta.url).pathname;
 mkdirSync(SHOTS, { recursive: true });
 
+// [pane bg (terminal), editor bg (CodeMirror)] — they differ on the VS Code
+// presets (workbench panel bg ≠ editor bg).
 const EXPECT = {
-  'mymux-night': '#0b0e14',
-  'tokyo-night': '#1a1b26',
-  'tokyo-storm': '#24283b',
-  'catppuccin-mocha': '#1e1e2e',
-  'catppuccin-latte': '#eff1f5',
-  'gruvbox-dark': '#282828',
-  nord: '#2e3440',
-  dracula: '#282a36',
-  'one-dark': '#282c34',
+  'mymux-night': ['#0b0e14', '#0b0e14'],
+  'tokyo-night': ['#1a1b26', '#1a1b26'],
+  'tokyo-storm': ['#24283b', '#24283b'],
+  'catppuccin-mocha': ['#1e1e2e', '#1e1e2e'],
+  'catppuccin-latte': ['#eff1f5', '#eff1f5'],
+  'gruvbox-dark': ['#282828', '#282828'],
+  nord: ['#2e3440', '#2e3440'],
+  dracula: ['#282a36', '#282a36'],
+  'one-dark': ['#282c34', '#282c34'],
+  'code-dark-modern': ['#181818', '#1f1f1f'],
+  'code-light-modern': ['#f8f8f8', '#ffffff'],
 };
 
 const browser = await chromium.launch();
@@ -57,7 +61,7 @@ const rgb = (hex) => {
   return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
 };
 
-for (const [id, bg] of Object.entries(EXPECT)) {
+for (const [id, [paneWant, editorWant]] of Object.entries(EXPECT)) {
   // Live switch through the settings select (toggle the panel closed with the
   // same button — Esc would close the CODE panel first).
   await page.click('#btn-settings');
@@ -75,9 +79,9 @@ for (const [id, bg] of Object.entries(EXPECT)) {
     const el = document.querySelector('.cm-editor');
     return el ? getComputedStyle(el).backgroundColor : null;
   });
-  const ok = ds === id && paneBg === rgb(bg) && editorBg === rgb(bg);
+  const ok = ds === id && paneBg === rgb(paneWant) && editorBg === rgb(editorWant);
   console.log(
-    `${ok ? '✓' : '✗ FAIL'} ${id}: dataset=${ds} pane=${paneBg} editor=${editorBg} (want ${rgb(bg)})`,
+    `${ok ? '✓' : '✗ FAIL'} ${id}: dataset=${ds} pane=${paneBg} editor=${editorBg} (want ${rgb(paneWant)}/${rgb(editorWant)})`,
   );
   if (!ok) fails.push(id);
   await page.screenshot({ path: `${SHOTS}theme-${id}.png` });

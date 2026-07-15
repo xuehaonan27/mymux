@@ -21,6 +21,8 @@ export interface EditorPalette {
   cursor: string;
   activeLine: string;
   keyword: string;
+  /** Control-flow keyword when it differs from `keyword` (VS Code's split). */
+  control?: string;
   string: string;
   comment: string;
   number: string;
@@ -61,7 +63,8 @@ export function cmThemeFor(p: ThemePreset): Extension {
     ),
     syntaxHighlighting(
       HighlightStyle.define([
-        { tag: [t.keyword, t.controlKeyword, t.moduleKeyword, t.operatorKeyword], color: e.keyword },
+        { tag: [t.keyword, t.moduleKeyword, t.operatorKeyword], color: e.keyword },
+        { tag: t.controlKeyword, color: e.control ?? e.keyword },
         { tag: [t.string, t.special(t.string), t.regexp], color: e.string },
         { tag: [t.comment, t.blockComment, t.lineComment], color: e.comment, fontStyle: 'italic' },
         { tag: [t.number, t.bool, t.null], color: e.number },
@@ -474,6 +477,103 @@ const ONE_DARK: ThemePreset = {
   },
 };
 
+// Palettes from the VS Code repo (MIT — extensions/theme-defaults/themes/
+// {dark,light}_{modern,plus,vs}.json + terminalColorRegistry.ts), named
+// descriptively. Token split preserved: keyword vs control-flow keyword.
+const CODE_DARK: ThemePreset = {
+  id: 'code-dark-modern',
+  name: 'Code Dark Modern',
+  dark: true,
+  term: {
+    background: '#181818',
+    foreground: '#cccccc',
+    cursor: '#aeafad',
+    selectionBackground: '#264f78',
+    black: '#000000',
+    red: '#cd3131',
+    green: '#0dbc79',
+    yellow: '#e5e510',
+    blue: '#2472c8',
+    magenta: '#bc3fbc',
+    cyan: '#11a8cd',
+    white: '#e5e5e5',
+    brightBlack: '#666666',
+    brightRed: '#f14c4c',
+    brightGreen: '#23d18b',
+    brightYellow: '#f5f543',
+    brightBlue: '#3b8eea',
+    brightMagenta: '#d670d6',
+    brightCyan: '#29b8db',
+    brightWhite: '#e5e5e5',
+  },
+  editor: {
+    background: '#1f1f1f',
+    foreground: '#cccccc',
+    gutter: '#6e7681',
+    selection: '#264f78',
+    cursor: '#aeafad',
+    activeLine: '#2a2d2e',
+    keyword: '#569cd6',
+    control: '#c586c0',
+    string: '#ce9178',
+    comment: '#6a9955',
+    number: '#b5cea8',
+    function: '#dcdcaa',
+    type: '#4ec9b0',
+    operator: '#d4d4d4',
+    punctuation: '#cccccc',
+    property: '#9cdcfe',
+    variable: '#9cdcfe',
+  },
+};
+
+const CODE_LIGHT: ThemePreset = {
+  id: 'code-light-modern',
+  name: 'Code Light Modern',
+  dark: false,
+  term: {
+    background: '#f8f8f8',
+    foreground: '#3b3b3b',
+    cursor: '#3b3b3b',
+    selectionBackground: '#add6ff',
+    black: '#000000',
+    red: '#cd3131',
+    green: '#107c10',
+    yellow: '#949800',
+    blue: '#0451a5',
+    magenta: '#bc05bc',
+    cyan: '#0598bc',
+    white: '#555555',
+    brightBlack: '#666666',
+    brightRed: '#cd3131',
+    brightGreen: '#14ce14',
+    brightYellow: '#b5ba00',
+    brightBlue: '#0451a5',
+    brightMagenta: '#bc05bc',
+    brightCyan: '#0598bc',
+    brightWhite: '#a5a5a5',
+  },
+  editor: {
+    background: '#ffffff',
+    foreground: '#3b3b3b',
+    gutter: '#237893',
+    selection: '#add6ff',
+    cursor: '#3b3b3b',
+    activeLine: '#f3f3f3',
+    keyword: '#0000ff',
+    control: '#af00db',
+    string: '#a31515',
+    comment: '#008000',
+    number: '#098658',
+    function: '#795e26',
+    type: '#267f99',
+    operator: '#000000',
+    punctuation: '#3b3b3b',
+    property: '#e50000',
+    variable: '#001080',
+  },
+};
+
 export const PRESETS: ThemePreset[] = [
   MYMUX_NIGHT,
   TOKYO_NIGHT,
@@ -484,6 +584,8 @@ export const PRESETS: ThemePreset[] = [
   NORD,
   DRACULA,
   ONE_DARK,
+  CODE_DARK,
+  CODE_LIGHT,
 ];
 
 export function presetById(id: string | undefined): ThemePreset {
