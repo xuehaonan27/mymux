@@ -7,6 +7,22 @@ import { javascript } from '@codemirror/lang-javascript';
 import { python } from '@codemirror/lang-python';
 import { json } from '@codemirror/lang-json';
 import { markdown } from '@codemirror/lang-markdown';
+import { cpp } from '@codemirror/lang-cpp';
+import { yaml } from '@codemirror/lang-yaml';
+import { css } from '@codemirror/lang-css';
+import { html } from '@codemirror/lang-html';
+import { xml } from '@codemirror/lang-xml';
+import { sql } from '@codemirror/lang-sql';
+import { StreamLanguage } from '@codemirror/language';
+import { go } from '@codemirror/legacy-modes/mode/go';
+import { shell } from '@codemirror/legacy-modes/mode/shell';
+import { toml } from '@codemirror/legacy-modes/mode/toml';
+import { dockerFile } from '@codemirror/legacy-modes/mode/dockerfile';
+import { nginx } from '@codemirror/legacy-modes/mode/nginx';
+import { lua } from '@codemirror/legacy-modes/mode/lua';
+import { ruby } from '@codemirror/legacy-modes/mode/ruby';
+import { perl } from '@codemirror/legacy-modes/mode/perl';
+import { r } from '@codemirror/legacy-modes/mode/r';
 import { lspExtensionFor, notifySaved, setLspFileOpener, requestCodeActions } from './lsp';
 import { makeCtx, viewerFor } from './viewers';
 
@@ -66,8 +82,13 @@ async function gitFiles(pane: number | null): Promise<string[]> {
   return r.ok ? r.json() : [];
 }
 
+// Highlighting covers every language the package index installs a server
+// for (go, c/cpp, bash, yaml…) plus the daily config/web formats — official
+// @codemirror/lang-* packages where they exist, CM5 legacy-modes otherwise
+// (P2.5's ratified route: no TextMate pipeline, one language at a time).
 function langFor(path: string): Extension {
-  const ext = path.split('.').pop()?.toLowerCase() ?? '';
+  const name = path.split('/').pop()?.toLowerCase() ?? '';
+  const ext = name.split('.').pop() ?? '';
   switch (ext) {
     case 'rs':
       return rust();
@@ -86,6 +107,62 @@ function langFor(path: string): Extension {
     case 'md':
     case 'markdown':
       return markdown();
+    case 'c':
+    case 'h':
+    case 'cpp':
+    case 'cxx':
+    case 'cc':
+    case 'hpp':
+    case 'hxx':
+    case 'hh':
+      return cpp();
+    case 'go':
+      return StreamLanguage.define(go);
+    case 'sh':
+    case 'bash':
+    case 'zsh':
+      return StreamLanguage.define(shell);
+    case 'yaml':
+    case 'yml':
+      return yaml();
+    case 'toml':
+      return StreamLanguage.define(toml);
+    case 'css':
+      return css();
+    case 'html':
+    case 'htm':
+      return html();
+    case 'xml':
+    case 'svg':
+      return xml();
+    case 'sql':
+      return sql();
+    case 'lua':
+      return StreamLanguage.define(lua);
+    case 'rb':
+      return StreamLanguage.define(ruby);
+    case 'pl':
+    case 'pm':
+      return StreamLanguage.define(perl);
+    case 'r':
+      return StreamLanguage.define(r);
+    case 'dockerfile':
+      return StreamLanguage.define(dockerFile);
+    default:
+      break;
+  }
+  // Extension-less names that are languages in disguise.
+  switch (name) {
+    case 'dockerfile':
+    case 'containerfile':
+      return StreamLanguage.define(dockerFile);
+    case 'nginx.conf':
+      return StreamLanguage.define(nginx);
+    case '.bashrc':
+    case '.zshrc':
+    case '.bash_profile':
+    case '.bash_aliases':
+      return StreamLanguage.define(shell);
     default:
       return [];
   }
