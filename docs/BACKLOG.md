@@ -193,6 +193,12 @@ principle):
   build stays as the installer's fallback branch. Verified: musl binaries run
   (static-pie), localhost bundle install (ptyd pid unchanged, idempotent),
   1 MiB binary-stdin roundtrip in the sshd test, clippy/tests green.
+  **UPDATED 2026-07-15**: `build-daemon-bundle.sh` now self-delegates when
+  there's no local musl toolchain (macOS): it rsyncs the working tree to
+  `$MYMUX_BUILD_HOST` (else `~/.config/mymux/build-host`), builds there, and
+  pulls the bundle back — no Mac-side toolchain (was: manual two-step, which
+  bit immediately). Proper release packaging (CI-built bundle + signed app,
+  no user-side builds at all) remains the declared endgame.
 - ~~Tauri `SSH_ASKPASS` passphrase dialog~~ — **SUPERSEDED by M6**: the russh
   host manager takes the key passphrase IN the app (no ssh-agent in the
   picture at all), which was the point of the askpass fallback. Nothing left.

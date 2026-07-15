@@ -10,17 +10,45 @@
 # tolerates the file being absent — the install path then errors clearly).
 # musl-static = no glibc-version skew on any distro. x86_64 only for now;
 # aarch64 needs an aarch64-musl cross toolchain.
+#
+# Run it ANYWHERE: without a local musl toolchain (e.g. on a Mac) it delegates
+# the build to a Linux host — $MYMUX_BUILD_HOST, else
+# ~/.config/mymux/build-host — by rsyncing this working tree over, building
+# there, and pulling the bundle back. One command, no Mac-side toolchain.
 set -euo pipefail
+# Non-interactive contexts (ssh build delegation, CI) have a scrubbed PATH.
+export PATH="$HOME/.cargo/bin:$PATH"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="x86_64-unknown-linux-musl"
 OUT="$ROOT/src-tauri/resources/daemon"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
-command -v x86_64-linux-musl-gcc >/dev/null || {
-  echo "mymux: x86_64-linux-musl-gcc missing (apt install musl-tools)" >&2
-  exit 1
-}
+note() { printf 'mymux: %s\n' "$*"; }
+die() { printf 'mymux: %s\n' "$*" >&2; exit 1; }
+
+# ---- delegate when there's no local musl toolchain (macOS, minimal images) --
+if ! command -v x86_64-linux-musl-gcc >/dev/null 2>&1; then
+  BUILD_HOST="${MYMUX_BUILD_HOST:-}"
+  [ -n "$BUILD_HOST" ] || BUILD_HOST="$(cat "${MYMUX_CONFIG_DIR:-$HOME/.config/mymux}/build-host" 2>/dev/null || true)"
+  [ -n "$BUILD_HOST" ] || die "no musl-gcc here and no build host — set MYMUX_BUILD_HOST=user@linuxbox (or write it to ~/.config/mymux/build-host)"
+  REMOTE='~/.cache/mymux-bundle-build'
+  note "no musl-gcc here — delegating the build to $BUILD_HOST …"
+  ssh -o BatchMode=yes -o ConnectTimeout=8 "$BUILD_HOST" true 2>/dev/null || die "cannot reach $BUILD_HOST (check ssh access, or install musl-tools locally)"
+  ssh "$BUILD_HOST" "mkdir -p $REMOTE"
+  # The tree being bundled must match the app being built — sync it as-is
+  # (dirty worktree included), excluding build outputs and old bundles.
+  rsync -a --delete \
+    --exclude target --exclude node_modules \
+    --exclude 'src-tauri/resources/daemon' \
+    "$ROOT/" "$BUILD_HOST:$REMOTE/"
+  ssh "$BUILD_HOST" "cd $REMOTE && scripts/build-daemon-bundle.sh"
+  mkdir -p "$OUT"
+  rsync -av "$BUILD_HOST:$REMOTE/src-tauri/resources/daemon/" "$OUT/"
+  note "bundle pulled back → $OUT ($(du -h "$OUT/linux-x86_64.tar.gz" | cut -f1), $(cat "$OUT/linux-x86_64.version"))"
+  exit 0
+fi
+
 rustup target add "$TARGET" >/dev/null
 
 echo "mymux: building $TARGET release daemons…"
@@ -45,5 +73,3 @@ tar -czf "$OUT/linux-x86_64.tar.gz" -C "$STAGE" .
 cp "$STAGE/VERSION" "$OUT/linux-x86_64.version"
 echo "mymux: bundle → $OUT/linux-x86_64.tar.gz ($(du -h "$OUT/linux-x86_64.tar.gz" | cut -f1))"
 echo "mymux: version: $(cat "$STAGE/VERSION")"
-echo "mymux: sync it to your Mac before building the app there, e.g.:"
-echo "  rsync -av $OUT/ <mac>:Projects/mymux/src-tauri/resources/daemon/"

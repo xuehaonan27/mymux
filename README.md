@@ -108,16 +108,19 @@ The native app (`src-tauri/`) bundles the UI, owns the SSH tunnel
 **in-process** (russh — no `ssh` binary, no ssh-agent, no config files to
 prepare), and unlocks the full iTerm2 keybindings a browser reserves
 (⌘T / ⌘W / ⌘1–9). Build it **on your Mac** — it can't build on the headless
-Linux box (no webkit2gtk, no display). For zero-touch daemon installs, first
-sync the daemon bundle to the Mac (built on any Linux box with musl-tools):
+Linux box (no webkit2gtk, no display). For zero-touch daemon installs the app
+embeds the daemon bundle; produce it with one command from either side:
 
 ```sh
-scripts/build-daemon-bundle.sh   # on a Linux box → src-tauri/resources/daemon/
-rsync -av src-tauri/resources/daemon/ <mac>:Projects/mymux/src-tauri/resources/daemon/
+scripts/build-daemon-bundle.sh
 ```
 
-Without the bundle the app still works — the zero-touch install just reports
-why it's unavailable instead of pushing.
+On a Linux box with musl-tools it builds locally; **on a Mac it automatically
+delegates the build to a Linux host** (`$MYMUX_BUILD_HOST`, else
+`~/.config/mymux/build-host`) — rsyncs the working tree over, builds there,
+pulls the bundle back into `src-tauri/resources/daemon/`. Without the bundle
+the app still works — the zero-touch install just reports why it's
+unavailable instead of pushing.
 
 ```sh
 cargo install tauri-cli --version '^2'      # one-time; or: npm i -g @tauri-apps/cli
