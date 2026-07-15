@@ -316,13 +316,15 @@ async fn bootstrap_ptyd() {
     if via_systemd {
         // The unit serves the DEFAULT socket — a custom MYMUX_PTYD_SOCK (dev
         // throwaway daemons) is NOT covered by it. Trust systemd only when
-        // OUR socket actually shows up; otherwise fall through to the sibling.
+        // OUR socket actually ANSWERS; a stale socket file (dead ptyd) is not
+        // an answer — unlink it and fall through to the sibling binary.
         for _ in 0..10 {
-            if socket_path().exists() {
+            if tokio::net::UnixStream::connect(socket_path()).await.is_ok() {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+        let _ = std::fs::remove_file(socket_path()); // stale socket file
     }
     let bin = std::env::current_exe()
         .ok()
