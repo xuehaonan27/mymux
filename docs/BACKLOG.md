@@ -128,11 +128,20 @@ principle):
   `[[hooks]]` (UserPromptSubmit/PermissionRequest/Stop) and an Open Code
   plugin (permission.asked/session.idle) — both now report precisely instead
   of leaning on heuristics.
-- Codex `notify` snippet + a real end-to-end test.
-- Per-window "since" / last-activity, shown in a tooltip.
-- Native-pane heuristic nuance: `run_heuristics` takes its `active` set from
-  the tmux model, so native views have edge cases (a focused native pane can
-  badge in some contexts). No bite reported yet; revisit if it shows.
+- ~~Codex `notify` snippet + a real end-to-end test~~ — **DONE 2026-07-15**:
+  install-codex-notify.sh writes `notify = ["…/mymux-codex-notify.sh"]`
+  non-destructively; ui/ux/codexcheck.mjs drives the handler with a real
+  Codex turn-complete payload against a live daemon and asserts the done dot
+  lands on the tab (plus an unknown-type no-op case). One env lesson baked
+  into the test: the reporter resolves TMUX_PANE first, so out-of-pane
+  drivers must clear it.
+- ~~Per-window "since" / last-activity, shown in a tooltip~~ — **DONE
+  2026-07-15**: agent tabs' tooltips read `waiting|done for 3m · …` from the
+  daemon's agent_since.
+- ~~Native-pane heuristic nuance~~ — **FIXED 2026-07-15**: `run_heuristics`
+  took its `active` set from the tmux model only, so a focused NATIVE pane
+  could badge spuriously. The viewed set now spans engines (active native
+  window's `visible_panes_of`, zoom-aware; active tmux window's panes).
 
 ## Connectivity (M2)
 - ~~Zero dev-box pre-setup (stage 1)~~ — **DONE 2026-07-15**:
@@ -166,10 +175,13 @@ principle):
   build stays as the installer's fallback branch. Verified: musl binaries run
   (static-pie), localhost bundle install (ptyd pid unchanged, idempotent),
   1 MiB binary-stdin roundtrip in the sshd test, clippy/tests green.
-- Tauri `SSH_ASKPASS` passphrase dialog — a fallback for a passphrase-locked key
-  when there's no agent (the agent path is preferred, so this is only a safety net).
-- Surface connection status + the "load your key" guidance *inside the app
-  window*, not just on stderr (which a Finder-launched app hides).
+- ~~Tauri `SSH_ASKPASS` passphrase dialog~~ — **SUPERSEDED by M6**: the russh
+  host manager takes the key passphrase IN the app (no ssh-agent in the
+  picture at all), which was the point of the askpass fallback. Nothing left.
+- ~~Surface connection status inside the app window~~ — **SUPERSEDED**:
+  host-manager status lines (incl. `installing`), per-host reconnect banners,
+  and UI toasts for daemon-reported errors (2026-07-15) cover it; the "load
+  your key" guidance is moot — there is no agent to load keys into.
 - Optional: a dedicated persistent ControlMaster (separate from the forward) so a
   forward restart never re-auths even without an agent.
 

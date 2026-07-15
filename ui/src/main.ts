@@ -457,9 +457,21 @@ function renderTabs(w: Workspace | null) {
       const to = w.windowList.findIndex((x) => x.id === win.id);
       if (to >= 0) w.sendJson({ t: 'reorder_window', id: draggingTab, to });
     });
-    tab.title = 'double-click to rename · drag to reorder';
+    tab.title =
+      win.agent != null
+        ? `${win.agent}${win.agent_since != null ? ` for ${agoMs(win.agent_since)}` : ''} · double-click to rename · drag to reorder`
+        : 'double-click to rename · drag to reorder';
     tabsEl.appendChild(tab);
   }
+}
+
+/** Compact relative age for tooltips: 12s, 3m, 2h, 4d. */
+function agoMs(epochMs: number): string {
+  const s = Math.max(0, Math.round((Date.now() - epochMs) / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  if (s < 86400) return `${Math.round(s / 3600)}h`;
+  return `${Math.round(s / 86400)}d`;
 }
 
 // Inline tab rename (native dialogs are unreliable in the Tauri webview).

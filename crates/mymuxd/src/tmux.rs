@@ -961,14 +961,27 @@ impl Hub {
         const IDLE: Duration = Duration::from_secs(8);
         const BELL_WINDOW: Duration = Duration::from_secs(25);
         let now = Instant::now();
-        let active: BTreeSet<u32> = self
-            .model
-            .lock()
-            .unwrap()
-            .active_window_panes()
-            .iter()
-            .map(|p| p.0)
-            .collect();
+        // The "viewed" set spans engines: the active tmux window's panes, or
+        // the active native window's VISIBLE layout leaves (zoom-aware) —
+        // panes you're looking at get no badge. Before this read the tmux
+        // model only, a focused native pane could badge spuriously.
+        let active: BTreeSet<u32> = match *self.active_view.lock().unwrap() {
+            ActiveView::Native(id) => self
+                .natives
+                .lock()
+                .unwrap()
+                .visible_panes_of(id)
+                .into_iter()
+                .collect(),
+            ActiveView::Tmux => self
+                .model
+                .lock()
+                .unwrap()
+                .active_window_panes()
+                .iter()
+                .map(|p| p.0)
+                .collect(),
+        };
 
         let mut changed = false;
         {

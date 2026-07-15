@@ -1,0 +1,15 @@
+import { chromium } from 'playwright-core';
+const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+await page.goto(UI, { waitUntil: 'domcontentloaded' });
+await page.waitForSelector('.xterm', { timeout: 20000 });
+await page.waitForTimeout(1500);
+const pane = await page.evaluate(() => (document.getElementById('meta').textContent.match(/pane (\d+)/) || [])[1]);
+console.log('meta pane:', pane);
+await fetch(`http://127.0.0.1:8099/agent?pane=${pane}&state=done`);
+await page.waitForTimeout(1500);
+console.log('tabs html:', await page.evaluate(() => document.getElementById('tabs').innerHTML));
+console.log('meta:', await page.evaluate(() => document.getElementById('meta').textContent));
+console.log('agents:', await page.evaluate(() => document.getElementById('agents').textContent));
+await browser.close();

@@ -115,12 +115,13 @@ pub async fn diff(Query(q): Query<DiffQuery>) -> Result<String, StatusCode> {
     let mut diff = String::from_utf8_lossy(&out.stdout).into_owned();
 
     if diff.trim().is_empty() {
-        if let Some(abs) = abs {
+        if abs.is_some() {
+            // Untracked file: fake an all-added diff. Pass the RELATIVE path
+            // (validated above) so the header doesn't leak the absolute one.
             if let Ok(out) = Command::new("git")
                 .arg("-C")
                 .arg(&root)
-                .args(["diff", "--no-color", "--no-index", "--", "/dev/null"])
-                .arg(&abs)
+                .args(["diff", "--no-color", "--no-index", "--", "/dev/null", &q.path])
                 .output()
                 .await
             {
