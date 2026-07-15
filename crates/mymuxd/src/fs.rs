@@ -60,6 +60,28 @@ pub(crate) async fn root_for(pane: Option<u32>) -> PathBuf {
     pane_cwd(p).await.unwrap_or_else(default_root)
 }
 
+/// An explicit absolute root from the client (the code panel's root switcher)
+/// — honored only when it resolves to a real directory INSIDE the user's home.
+/// The origin guard is the security layer; this just keeps casual path games
+/// out. Anything else falls back to the pane root.
+fn override_root(param: &Option<String>) -> Option<PathBuf> {
+    let p = param.as_deref()?.trim();
+    if p.is_empty() {
+        return None;
+    }
+    let home = PathBuf::from(std::env::var_os("HOME")?).canonicalize().ok()?;
+    let abs = PathBuf::from(p).canonicalize().ok()?;
+    (abs.is_dir() && abs.starts_with(&home)).then_some(abs)
+}
+
+/// Effective root for a request carrying an optional `root` override.
+pub(crate) async fn root_for_req(pane: Option<u32>, root: &Option<String>) -> PathBuf {
+    match override_root(root) {
+        Some(r) => r,
+        None => root_for(pane).await,
+    }
+}
+
 /// Resolve a client path within `root`, rejecting anything that escapes it.
 /// `must_exist=false` (writes) allows a new file by checking its parent.
 pub(crate) fn safe_path(root: &Path, rel: &str, must_exist: bool) -> Option<PathBuf> {
@@ -86,19 +108,22 @@ pub struct PathQuery {
     #[serde(default)]
     path: String,
     pane: Option<u32>,
+    /// Optional absolute root override (the panel's root switcher).
+    root: Option<String>,
 }
 
-/// `GET /fs/root?pane=` — the absolute directory this pane's /fs and /lsp
-/// requests are rooted at (the code panel needs it to map LSP `file://` URIs
-/// back to panel-relative paths for cross-file goto).
+/// `GET /fs/root?pane=&root=` — the EFFECTIVE absolute directory this pane's
+/// /fs and /lsp requests are rooted at (the code panel needs it to map LSP
+/// `file://` URIs back to panel-relative paths, and the root switcher to show
+/// what it actually got after server-side validation).
 pub async fn root(Query(q): Query<PathQuery>) -> Json<serde_json::Value> {
-    let root = root_for(q.pane).await;
+    let root = root_for_req(q.pane, &q.root).await;
     Json(serde_json::json!({ "root": root.display().to_string() }))
 }
 
 /// `GET /fs/list?pane=<id>&path=<rel>` — directory entries (dirs first).
 pub async fn list(Query(q): Query<PathQuery>) -> Result<Json<Vec<Entry>>, StatusCode> {
-    let root = root_for(q.pane).await;
+    let root = root_for_req(q.pane, &q.root).await;
     let dir = safe_path(&root, &q.path, true).ok_or(StatusCode::FORBIDDEN)?;
     let rd = std::fs::read_dir(&dir).map_err(|_| StatusCode::NOT_FOUND)?;
     let mut entries: Vec<Entry> = rd
@@ -118,7 +143,7 @@ pub async fn list(Query(q): Query<PathQuery>) -> Result<Json<Vec<Entry>>, Status
 
 /// `GET /fs/read?pane=<id>&path=<rel>` — file contents (text, size-capped).
 pub async fn read(Query(q): Query<PathQuery>) -> Result<String, StatusCode> {
-    let root = root_for(q.pane).await;
+    let root = root_for_req(q.pane, &q.root).await;
     let file = safe_path(&root, &q.path, true).ok_or(StatusCode::FORBIDDEN)?;
     let md = std::fs::metadata(&file).map_err(|_| StatusCode::NOT_FOUND)?;
     if md.is_dir() || md.len() > MAX_READ {
@@ -133,6 +158,8 @@ pub struct RawQuery {
     #[serde(default)]
     path: String,
     pane: Option<u32>,
+    /// Optional absolute root override (the panel's root switcher).
+    root: Option<String>,
     /// Serve at most this many bytes (hex viewers only need a prefix).
     limit: Option<u64>,
 }
@@ -162,7 +189,7 @@ fn mime_for(path: &str) -> &'static str {
 pub async fn raw(
     Query(q): Query<RawQuery>,
 ) -> Result<([(axum::http::HeaderName, String); 2], Vec<u8>), StatusCode> {
-    let root = root_for(q.pane).await;
+    let root = root_for_req(q.pane, &q.root).await;
     let file = safe_path(&root, &q.path, true).ok_or(StatusCode::FORBIDDEN)?;
     let md = std::fs::metadata(&file).map_err(|_| StatusCode::NOT_FOUND)?;
     if md.is_dir() || md.len() > MAX_RAW {
@@ -192,11 +219,13 @@ pub struct WriteReq {
     path: String,
     content: String,
     pane: Option<u32>,
+    /// Optional absolute root override (the panel's root switcher).
+    root: Option<String>,
 }
 
-/// `POST /fs/write` `{path, content, pane?}` — save a file.
+/// `POST /fs/write` `{path, content, pane?, root?}` — save a file.
 pub async fn write(Json(req): Json<WriteReq>) -> StatusCode {
-    let root = root_for(req.pane).await;
+    let root = root_for_req(req.pane, &req.root).await;
     match safe_path(&root, &req.path, false) {
         Some(file) => match std::fs::write(&file, req.content) {
             Ok(_) => StatusCode::NO_CONTENT,

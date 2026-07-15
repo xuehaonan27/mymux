@@ -1,6 +1,7 @@
 import { EditorView, basicSetup } from 'codemirror';
+import { MergeView } from '@codemirror/merge';
 import { EditorState, type Extension } from '@codemirror/state';
-import { keymap } from '@codemirror/view';
+import { keymap, lineNumbers } from '@codemirror/view';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { rust } from '@codemirror/lang-rust';
 import { javascript } from '@codemirror/lang-javascript';
@@ -48,12 +49,20 @@ interface GitFile {
 
 const paneQ = (pane: number | null) => (pane != null ? `pane=${pane}&` : '');
 
-async function fsList(pane: number | null, path: string): Promise<FsEntry[]> {
-  const r = await fetch(`${apiBase()}/fs/list?${paneQ(pane)}path=${encodeURIComponent(path)}`);
+const rootQ = (root: string | null) => (root ? `root=${encodeURIComponent(root)}&` : '');
+
+async function fsList(
+  pane: number | null,
+  path: string,
+  root: string | null = null,
+): Promise<FsEntry[]> {
+  const r = await fetch(
+    `${apiBase()}/fs/list?${paneQ(pane)}${rootQ(root)}path=${encodeURIComponent(path)}`,
+  );
   return r.ok ? r.json() : [];
 }
-async function fsRead(pane: number | null, path: string): Promise<string> {
-  const r = await fetch(`${apiBase()}/fs/read?${paneQ(pane)}path=${encodeURIComponent(path)}`);
+async function fsRead(pane: number | null, path: string, root: string | null = null): Promise<string> {
+  const r = await fetch(`${apiBase()}/fs/read?${paneQ(pane)}${rootQ(root)}path=${encodeURIComponent(path)}`);
   if (!r.ok) {
     const err = new Error(`read ${path}: ${r.status}`) as Error & { status?: number };
     err.status = r.status;
@@ -61,25 +70,51 @@ async function fsRead(pane: number | null, path: string): Promise<string> {
   }
   return r.text();
 }
-async function fsWrite(pane: number | null, path: string, content: string): Promise<boolean> {
+async function fsWrite(
+  pane: number | null,
+  path: string,
+  content: string,
+  root: string | null = null,
+): Promise<boolean> {
   const r = await fetch(`${apiBase()}/fs/write`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ path, content, pane: pane ?? undefined }),
+    body: JSON.stringify({ path, content, pane: pane ?? undefined, root: root ?? undefined }),
   });
   return r.ok;
 }
-async function gitStatus(pane: number | null): Promise<GitFile[]> {
-  const r = await fetch(`${apiBase()}/git/status?${paneQ(pane)}`);
+async function gitStatus(pane: number | null, root: string | null = null): Promise<GitFile[]> {
+  const r = await fetch(`${apiBase()}/git/status?${paneQ(pane)}${rootQ(root)}`);
   return r.ok ? r.json() : [];
 }
-async function gitDiff(pane: number | null, path: string): Promise<string> {
-  const r = await fetch(`${apiBase()}/git/diff?${paneQ(pane)}path=${encodeURIComponent(path)}`);
+async function gitDiff(pane: number | null, path: string, staged = false, root: string | null = null): Promise<string> {
+  const r = await fetch(
+    `${apiBase()}/git/diff?${paneQ(pane)}${rootQ(root)}path=${encodeURIComponent(path)}${staged ? '&staged=true' : ''}`,
+  );
   return r.ok ? r.text() : '';
 }
-async function gitFiles(pane: number | null): Promise<string[]> {
-  const r = await fetch(`${apiBase()}/git/files?${paneQ(pane)}`);
+async function gitFiles(pane: number | null, root: string | null = null): Promise<string[]> {
+  const r = await fetch(`${apiBase()}/git/files?${paneQ(pane)}${rootQ(root)}`);
   return r.ok ? r.json() : [];
+}
+/** The repo root containing the effective root, or null outside a work tree. */
+async function gitToplevel(pane: number | null, root: string | null = null): Promise<string | null> {
+  const r = await fetch(`${apiBase()}/git/toplevel?${paneQ(pane)}${rootQ(root)}`);
+  if (!r.ok) return null;
+  const j = (await r.json()) as { toplevel?: string | null };
+  return j.toplevel ?? null;
+}
+/** The file's HEAD blob (staged=true → its index blob); null when absent. */
+async function gitBlob(
+  pane: number | null,
+  path: string,
+  staged: boolean,
+  root: string | null = null,
+): Promise<string | null> {
+  const r = await fetch(
+    `${apiBase()}/git/blob?${paneQ(pane)}${rootQ(root)}path=${encodeURIComponent(path)}${staged ? '&staged=true' : ''}`,
+  );
+  return r.ok ? r.text() : null;
 }
 
 // Highlighting covers every language the package index installs a server
@@ -195,10 +230,14 @@ type Buffer =
   | { kind: 'viewer' };
 interface Session {
   pane: number | null;
+  /** Root-switcher override (absolute); null = the pane's cwd. */
+  root: string | null;
   path: string | null; // buffer currently in the editor, or null
   buffers: Map<string, Buffer>;
-  /** Absolute root the panel's relative paths resolve against (for mapping
-   * LSP file:// URIs back — cross-file goto). Fetched lazily. */
+  /** The override the last fsRoot fetch was for (cache key for read-back). */
+  fsRootReq?: string | null;
+  /** Effective absolute root the daemon actually honored (LSP-URI mapping +
+   * root bar display). */
   fsRoot?: string;
 }
 
@@ -208,6 +247,8 @@ export interface CodePanelOpts {
   getApiBase: () => string;
   /** Scope key for per-pane sessions — pane ids collide across hosts. */
   getScope: () => string;
+  /** The default root before any manual switch: the pane's cwd or its repo. */
+  getDefaultRoot: () => 'pane' | 'repo';
 }
 
 /** The ⌘E code overlay, rooted at the focused pane's cwd. */
@@ -221,6 +262,12 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       <div class="code-side-hd">changes</div>
       <div class="code-changes" id="code-changes"></div>
       <div class="code-side-hd">files</div>
+      <div class="code-root" id="code-root">
+        <button id="root-up" title="up one level">↑</button>
+        <button id="root-home" title="back to the pane's cwd">⌂</button>
+        <button id="root-repo" title="git repo root">⎇</button>
+        <span id="code-root-path"></span>
+      </div>
       <div class="code-tree" id="code-tree"></div>
     </div>
     <div class="code-main">
@@ -235,6 +282,8 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
 
   const treeEl = panel.querySelector('#code-tree') as HTMLElement;
   const changesEl = panel.querySelector('#code-changes') as HTMLElement;
+  const rootEl = panel.querySelector('#code-root') as HTMLElement;
+  const rootPathEl = panel.querySelector('#code-root-path') as HTMLElement;
   const pathEl = panel.querySelector('#code-path') as HTMLElement;
   const bufsEl = panel.querySelector('#code-bufs') as HTMLElement;
   const editorParent = panel.querySelector('#code-editor') as HTMLElement;
@@ -243,17 +292,40 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   const phEl = panel.querySelector('#code-ph') as HTMLElement;
   diffEl.style.display = 'none';
 
+  panel.querySelector('#root-up')!.addEventListener('click', () => {
+    const s = current;
+    const abs = s?.root ?? s?.fsRoot;
+    if (!s || !abs) return;
+    const parent = abs.replace(/\/+$/, '').replace(/\/[^/]*$/, '') || '/';
+    if (parent !== abs) switchRoot(parent);
+  });
+  panel.querySelector('#root-home')!.addEventListener('click', () => switchRoot(null));
+  panel.querySelector('#root-repo')!.addEventListener('click', () => {
+    const s = current;
+    if (!s) return;
+    void gitToplevel(s.pane, s.root).then((top) => {
+      if (top) switchRoot(top);
+      else flashHint('not a git repo');
+    });
+  });
+
   let editor: EditorView | null = null;
   const sessions = new Map<string, Session>();
   let current: Session | null = null;
   let open = false;
 
-  const keyOf = (p: number | null) => `${opts.getScope()}:${p ?? -1}`;
-  function sessionFor(p: number | null): Session {
-    const k = keyOf(p);
+  const keyOf = (p: number | null, root: string | null) =>
+    `${opts.getScope()}:${p ?? -1}|${root ?? ''}`;
+  const paneKey = (p: number | null) => `${opts.getScope()}:${p ?? -1}`;
+  // Every root (pane cwd, repo root, a parent) gets its OWN session — buffers,
+  // tree and changes are per-root, so switching roots never strands edits or
+  // saves to the wrong place. The switcher remembers the last root per pane.
+  const lastRoot = new Map<string, string | null>();
+  function sessionFor(p: number | null, root: string | null): Session {
+    const k = keyOf(p, root);
     let s = sessions.get(k);
     if (!s) {
-      s = { pane: p, path: null, buffers: new Map() };
+      s = { pane: p, root, path: null, buffers: new Map() };
       sessions.set(k, s);
     }
     return s;
@@ -386,6 +458,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     else editor = new EditorView({ state, parent: editorParent });
     editorParent.style.display = '';
     diffEl.style.display = 'none';
+    destroyMerge();
     viewerEl.style.display = 'none';
     phEl.style.display = '';
   }
@@ -403,6 +476,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     void v.render(makeCtx(apiBase(), s.pane, path), viewerEl);
     editorParent.style.display = 'none';
     diffEl.style.display = 'none';
+    destroyMerge();
     phEl.style.display = '';
     viewerEl.style.display = 'flex';
   }
@@ -426,6 +500,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     );
     editorParent.style.display = 'none';
     diffEl.style.display = 'none';
+    destroyMerge();
     viewerEl.style.display = 'none';
     phEl.style.display = 'flex';
   }
@@ -436,7 +511,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     const b = curBuf();
     if (!b || b.kind !== 'text') return;
     const doc = editor.state.doc.toString();
-    const ok = await fsWrite(s.pane, s.path!, doc);
+    const ok = await fsWrite(s.pane, s.path!, doc, s.root);
     if (ok) {
       b.savedDoc = doc;
       b.dirty = false;
@@ -481,7 +556,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     // Clean (or new) buffers read the disk so agent-made edits show up.
     let content: string;
     try {
-      content = await fsRead(s.pane, path);
+      content = await fsRead(s.pane, path, s.root);
     } catch (e) {
       if (current !== s) return;
       const status = (e as { status?: number }).status;
@@ -523,30 +598,87 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
 
   // The diff is a transient view over the current pane; it leaves the editor
   // session untouched, so switching back restores the open file and its edits.
-  async function showDiff(path: string) {
+  // Two modes: the classic unified view, or a side-by-side MergeView
+  // (HEAD/index on the left, working tree on the right).
+  let mergeView: MergeView | null = null;
+  function destroyMerge() {
+    mergeView?.destroy();
+    mergeView = null;
+  }
+  async function showDiff(path: string, staged = false, mode: 'unified' | 'split' = 'unified') {
     if (!current) return;
     const s = current;
     pathEl.textContent = `diff · ${path}`;
     pathEl.style.color = '';
-    const text = (await gitDiff(s.pane, path)) || '(no textual diff)';
+    destroyMerge();
+    const text = (await gitDiff(s.pane, path, staged, s.root)) || '(no textual diff)';
     if (current !== s) return;
     diffEl.replaceChildren();
-    for (const line of text.split('\n')) {
-      const el = document.createElement('div');
-      const c = line[0];
-      el.className =
-        'dl ' +
-        (line.startsWith('@@')
-          ? 'dhunk'
-          : /^(diff |index |--- |\+\+\+ |new file|deleted )/.test(line)
-            ? 'dmeta'
-            : c === '+'
-              ? 'dadd'
-              : c === '-'
-                ? 'ddel'
-                : '');
-      el.textContent = line || ' ';
-      diffEl.appendChild(el);
+    // Controls: staged/unstaged toggle (hidden for new files), unified/split
+    // view modes, and a jump into the editor.
+    const ctl = document.createElement('div');
+    ctl.className = 'diff-ctl';
+    const isNew = text.includes('new file mode');
+    const mkBtn = (label: string, on: boolean, fn: () => void) => {
+      const b = document.createElement('button');
+      b.className = 'diff-ctl-btn' + (on ? ' on' : '');
+      b.textContent = label;
+      b.addEventListener('click', fn);
+      return b;
+    };
+    if (!isNew) {
+      ctl.append(
+        mkBtn('unstaged', !staged, () => void showDiff(path, false, mode)),
+        mkBtn('staged', staged, () => void showDiff(path, true, mode)),
+      );
+    }
+    ctl.append(
+      mkBtn('unified', mode === 'unified', () => void showDiff(path, staged, 'unified')),
+      mkBtn('split', mode === 'split', () => void showDiff(path, staged, 'split')),
+      mkBtn('open in editor', false, () => void openFile(path)),
+    );
+    diffEl.appendChild(ctl);
+    if (mode === 'split') {
+      // Left = HEAD; right = the index (staged) or the working tree (unstaged).
+      const aText = (await gitBlob(s.pane, path, false, s.root)) ?? '';
+      let bText = '';
+      if (staged) bText = (await gitBlob(s.pane, path, true, s.root)) ?? '';
+      else bText = await fsRead(s.pane, path, s.root).catch(() => '');
+      if (current !== s) return;
+      const ro = [
+        lineNumbers(),
+        EditorState.readOnly.of(true),
+        EditorView.editable.of(false),
+        oneDark,
+        editorTheme,
+        langFor(path),
+      ];
+      mergeView = new MergeView({
+        a: { doc: aText, extensions: ro },
+        b: { doc: bText, extensions: ro },
+        parent: diffEl,
+        gutter: true,
+        highlightChanges: true,
+        collapseUnchanged: { margin: 3, minSize: 4 },
+      });
+    } else {
+      for (const line of text.split('\n')) {
+        const el = document.createElement('div');
+        const c = line[0];
+        el.className =
+          'dl ' +
+          (line.startsWith('@@')
+            ? 'dhunk'
+            : /^(diff |index |--- |\+\+\+ |new file|deleted )/.test(line)
+              ? 'dmeta'
+              : c === '+'
+                ? 'dadd'
+                : c === '-'
+                  ? 'ddel'
+                  : '');
+        el.textContent = line || ' ';
+        diffEl.appendChild(el);
+      }
     }
     editorParent.style.display = 'none';
     diffEl.style.display = '';
@@ -575,7 +707,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
         kids.style.display = expanded ? '' : 'none';
         if (expanded && !loaded) {
           loaded = true;
-          for (const c of await fsList(current?.pane ?? null, path)) {
+          for (const c of await fsList(current?.pane ?? null, path, current?.root ?? null)) {
             kids.appendChild(treeItem(path ? `${path}/${c.name}` : c.name, c.name, c.dir, depth + 1));
           }
         }
@@ -592,14 +724,14 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   async function loadTree() {
     const s = current;
     treeEl.replaceChildren();
-    const items = await fsList(s?.pane ?? null, '');
+    const items = await fsList(s?.pane ?? null, '', s?.root ?? null);
     if (current !== s) return; // switched panes mid-fetch
     for (const c of items) treeEl.appendChild(treeItem(c.name, c.name, c.dir, 0));
   }
 
   async function loadChanges() {
     const s = current;
-    const files = await gitStatus(s?.pane ?? null);
+    const files = await gitStatus(s?.pane ?? null, s?.root ?? null);
     if (current !== s) return;
     changesEl.replaceChildren();
     if (!files.length) {
@@ -623,28 +755,64 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
 
   // Swap the whole view to a pane's session: snapshot the outgoing editor, then
   // restore (or create) the incoming one. This is the only place "which pane"
-  // changes, so there is nothing to reset by hand elsewhere.
-  function showSession(p: number | null) {
+  // changes, so there is nothing to reset by hand elsewhere. A root override
+  // selects the per-root session for that pane (see the root switcher).
+  function showSession(p: number | null, root?: string | null) {
     stash(); // snapshot outgoing edits into their buffer
-    current = sessionFor(p);
+    const pk = paneKey(p);
+    const fresh = !lastRoot.has(pk);
+    const eff = root !== undefined ? root : (lastRoot.get(pk) ?? null);
+    lastRoot.set(pk, eff);
+    current = sessionFor(p, eff);
     const b = curBuf();
     if (b?.kind === 'viewer' && current.path) showViewer(current.path);
     else mount(b?.kind === 'text' ? b.state : emptyState());
     renderHeader();
+    renderRootBar();
     void loadTree();
     void loadChanges();
     editor?.focus();
-    // Cache the absolute root for LSP-URI → panel-path mapping (goto).
+    // Pref "default root: repo": auto-jump once per pane unless the user has
+    // switched roots manually since (an explicit ⌂ back to cwd sticks).
+    if (fresh && root === undefined && opts.getDefaultRoot() === 'repo') {
+      void gitToplevel(p, null).then((top) => {
+        if (top && lastRoot.get(pk) == null && current?.pane === p) showSession(p, top);
+      });
+    }
+    // Cache the EFFECTIVE absolute root for LSP-URI → panel-path mapping and
+    // the root bar — the daemon may reject an override (outside $HOME), so
+    // always read back what it actually honored.
     const s = current;
-    if (!s.fsRoot) {
-      const paneQ = s.pane != null ? `?pane=${s.pane}` : '';
-      void fetch(`${apiBase()}/fs/root${paneQ}`)
+    if (!s.fsRoot || s.root !== (s.fsRootReq ?? null)) {
+      s.fsRootReq = s.root;
+      const paneQ = s.pane != null ? `pane=${s.pane}&` : '';
+      const rootQ = s.root ? `root=${encodeURIComponent(s.root)}&` : '';
+      void fetch(`${apiBase()}/fs/root?${paneQ}${rootQ}`)
         .then((r) => r.json())
         .then((j: { root?: string }) => {
-          if (j.root) s.fsRoot = j.root;
+          if (j.root && current === s) {
+            s.fsRoot = j.root;
+            renderRootBar();
+          }
         })
         .catch(() => {});
     }
+  }
+
+  // The root switcher: ↑ parent · ⌂ pane cwd · ⎇ repo root. The effective
+  // root is always confined to the user's home on the daemon side.
+  function renderRootBar() {
+    const s = current;
+    if (!s) return;
+    const abs = s.fsRoot ?? s.root ?? '';
+    rootEl.classList.toggle('switched', !!s.root);
+    rootPathEl.textContent = abs || 'pane cwd';
+    rootPathEl.title = abs;
+  }
+
+  function switchRoot(abs: string | null) {
+    if (!current) return;
+    showSession(current.pane, abs);
   }
 
   // Cross-file goto: the LSP seam hands us an absolute path; open it when it
@@ -776,7 +944,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     qoShown = [];
     renderQo();
     qoInput.focus();
-    qoAll = await gitFiles(current?.pane ?? null);
+    qoAll = await gitFiles(current?.pane ?? null, current?.root ?? null);
     if (!qoVisible) return;
     qoShown = fuzzy('', qoAll);
     renderQo();

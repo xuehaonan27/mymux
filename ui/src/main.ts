@@ -44,6 +44,8 @@ const isTauri = '__TAURI_INTERNALS__' in window || '__TAURI__' in window;
 interface Prefs {
   hostBarAlways?: boolean;
   notify?: boolean;
+  /** The code panel's default root before any manual switch. */
+  codeRoot?: 'pane' | 'repo';
 }
 function loadPrefs(): Prefs {
   try {
@@ -614,6 +616,7 @@ const codeOpts: CodePanelOpts = {
   getActivePane: () => active()?.activePane ?? null,
   getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
   getScope: () => active()?.id ?? 'local',
+  getDefaultRoot: () => (prefs.codeRoot === 'repo' ? 'repo' : 'pane'),
 };
 // CodeMirror is heavy, so the code panel loads on first use (vite splits the
 // chunk); the wrapper keeps the synchronous interface the shell expects.

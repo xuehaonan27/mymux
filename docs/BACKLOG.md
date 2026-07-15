@@ -110,12 +110,30 @@ principle):
 - **Editor ergonomics pass** — the user finds the editor "有点难用" (2026-07-03,
   deferred by their call); collect concrete complaints and address as a batch.
 - ~~Lazy-load CodeMirror~~ — DONE (QoL batch 2026-07-03; main bundle 365 KB).
-- Side-by-side (split) diff view, in addition to the unified one.
+- ~~Side-by-side (split) diff view~~ — **DONE 2026-07-15** via
+  `@codemirror/merge`: the diff controls now carry unified|split, the split
+  renders HEAD (or index, for staged) vs working tree in two side-by-side
+  editors (collapseUnchanged, dark-theme fit). Verified with content asserts
+  (the inserted line is visible, not just the structure).
 - ~~File-tree search / fuzzy open (⌘P)~~ — DONE (QoL batch 2026-07-03).
-- Navigate above the pane root; a root switcher (pane cwd / repo root / custom).
-- Configurable default root: pane cwd vs project/working dir (once agents expose their working dir).
-- Clean up the untracked-file diff header (currently shows an absolute path).
-- Staged vs unstaged diff toggle; jump from a diff to editing that file inline.
+- ~~Navigate above the pane root; a root switcher~~ — **DONE 2026-07-15**: the
+  side column has a root bar (↑ parent · ⌂ pane cwd · ⎇ repo root). The
+  daemon takes an absolute `root` override on /fs/* and /git/* confined to
+  $HOME, and `/fs/root` reads back what it actually honored (the bar never
+  shows a rejected root). Every root gets its OWN per-pane session (buffers,
+  tree, changes), so switching never strands edits or saves to the wrong
+  place. Also `GET /git/toplevel` for the ⎇ jump.
+- ~~Configurable default root~~ — **DONE 2026-07-15** (plumbing): the
+  `codeRoot` pref ('pane' | 'repo') auto-jumps a pane into its repo root once
+  per pane unless the user has switched manually (⌂ back sticks). The toggle
+  lands in the settings surface (next batch).
+- ~~Clean up the untracked-file diff header~~ — DONE 2026-07-15: the
+  --no-index fallback passes the repo-relative path (no absolute-path leak),
+  and it now fires ONLY for genuinely untracked files (an empty tracked or
+  staged diff is just empty — the harness caught both misfires).
+- ~~Staged vs unstaged diff toggle; jump from a diff to editing inline~~ —
+  **DONE 2026-07-15**: diff controls have unstaged|staged (daemon already had
+  the flag) and an "open in editor" jump that lands the file in a text buffer.
 
 ## Agents (M3)
 - ~~Agent attention notifications~~ — **DONE 2026-07-15**: a `bell` toggle in

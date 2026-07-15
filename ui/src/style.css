@@ -552,6 +552,63 @@ body {
 .dmeta {
   color: #5c6773;
 }
+.diff-ctl {
+  position: sticky;
+  top: 0;
+  display: flex;
+  gap: 6px;
+  padding: 6px 12px;
+  background: #0d1017;
+  border-bottom: 1px solid #232a38;
+}
+.diff-ctl-btn {
+  font: 10px ui-monospace, Menlo, monospace;
+  color: #9aa5b1;
+  background: #161b27;
+  border: 1px solid #232a38;
+  border-radius: 5px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+.diff-ctl-btn:hover {
+  color: #c5cdd9;
+  border-color: #2f81f7;
+}
+.diff-ctl-btn.on {
+  color: #2f81f7;
+  border-color: #2f81f7;
+}
+.code-root {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-bottom: 1px solid #232a38;
+  font: 10px ui-monospace, Menlo, monospace;
+  color: #5c6773;
+  overflow: hidden;
+}
+.code-root button {
+  font: 11px ui-monospace, Menlo, monospace;
+  color: #9aa5b1;
+  background: none;
+  border: none;
+  padding: 0 3px;
+  cursor: pointer;
+}
+.code-root button:hover {
+  color: #c5cdd9;
+}
+.code-root.switched .code-root-path,
+.code-root.switched #root-home {
+  color: #2f81f7;
+}
+.code-root-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* keep the tail (the meaningful part) visible */
+}
 
 /* Pane area: a positioning context; each pane is placed by exact cell geometry. */
 #term {
