@@ -30,6 +30,9 @@ const hintEl = document.getElementById('hint')!;
 
 const isMac = /Mac|iPhone|iPad/.test(navigator.userAgent);
 const mod = (e: KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey);
+// Dev knob: `?port=N` points the browser UI at a throwaway daemon started
+// with MYMUX_ADDR (instead of the main one on 8088) — safe UX iteration.
+const daemonPort = Number(new URLSearchParams(location.search).get('port')) || 8088;
 // In the Tauri app there is no browser reserving Cmd+T/W/1-9, so we bind the
 // full iTerm2 set there; in a browser those stay on the ⌘K leader.
 const isTauri = '__TAURI_INTERNALS__' in window || '__TAURI__' in window;
@@ -358,7 +361,7 @@ function endWorkspace(w: Workspace, disconnectTunnel: boolean) {
       hostManager?.open();
     } else {
       // Browser (no host manager): start a fresh session right away.
-      ensureWorkspace('local', 'local', 8088);
+      ensureWorkspace('local', 'local', daemonPort);
       switchTo('local');
     }
     return;
@@ -819,6 +822,6 @@ if (isTauri) {
     hostBtn.addEventListener('click', () => hostManager!.open());
   }
 } else {
-  ensureWorkspace('local', 'local', 8088);
+  ensureWorkspace('local', 'local', daemonPort);
   switchTo('local');
 }
