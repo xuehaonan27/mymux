@@ -92,7 +92,7 @@ fn window_agent(
     let mut best: Option<(AgentState, u32, Option<u64>)> = None;
     root.for_each_pane(&mut |pane, _| {
         if let Some(&(s, since)) = agents.get(&pane.0) {
-            if best.map_or(true, |(b, _, _)| s.priority() > b.priority()) {
+            if best.is_none_or(|(b, _, _)| s.priority() > b.priority()) {
                 best = Some((s, pane.0, since));
             }
         }
@@ -130,7 +130,7 @@ fn panes_agent(
     let mut best: Option<(AgentState, u32, Option<u64>)> = None;
     for &pane in panes {
         if let Some(&(s, since)) = agents.get(&pane) {
-            if best.map_or(true, |(b, _, _)| s.priority() > b.priority()) {
+            if best.is_none_or(|(b, _, _)| s.priority() > b.priority()) {
                 best = Some((s, pane, since));
             }
         }

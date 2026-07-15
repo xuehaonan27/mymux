@@ -6,8 +6,8 @@
 //! Recipes, channels and future package kinds evolve here without touching
 //! the daemon.
 //!
-//! Ecosystem boundary (docs/PKG-SPEC.md): upstream releases and Open VSX are
-//! fair game (pinned versions + sha256); the Visual Studio Marketplace and
+//! Ecosystem boundary (docs/PKG-SPEC.md): pinned upstream releases and the
+//! npm/go registries are fair game; the Visual Studio Marketplace and
 //! Microsoft's proprietary extensions are NEVER used.
 
 use std::io::Read;
@@ -31,8 +31,8 @@ struct PkgManifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     args: Vec<String>,
     source: String,
-    /// The install spec for dynamically-installed packages
-    /// (`openvsx:ns.name` / `npm:pkg`) — curated recipes omit it.
+    /// The install spec for dynamically-installed packages (`npm:pkg`) —
+    /// index entries omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     spec: Option<String>,
     /// sha256 of a dynamically-downloaded artifact, recorded at install time
@@ -41,109 +41,103 @@ struct PkgManifest {
     sha256: Option<String>,
 }
 
-struct Recipe {
-    name: &'static str,
-    version: &'static str,
-    kind: &'static str,
-    langs: &'static [&'static str],
-    /// Launch arguments the server needs (recorded into the manifest so the
-    /// daemon can spawn it without a hardcoded table).
-    args: &'static [&'static str],
-    desc: &'static str,
-    channel: Channel,
+// ---- the package index ------------------------------------------------------
+
+/// The index shipped with this build — `index/index.json` at the repo root,
+/// embedded at compile time so a bare binary works offline. The FILE is the
+/// source of truth (data, not code): version bumps and new entries are JSON
+/// edits, and community contributions arrive as PRs against it.
+const EMBEDDED_INDEX: &str = include_str!("../../../index/index.json");
+
+#[derive(Deserialize)]
+struct Index {
+    v: u32,
+    packages: std::collections::BTreeMap<String, IndexEntry>,
 }
 
-enum Channel {
-    /// Single gzipped binary from a pinned GitHub release.
+/// One index entry: a friendly, PREWIRED package — install it and the
+/// capability config (langs/args) lands in the manifest with no extra step.
+#[derive(Deserialize, Clone)]
+struct IndexEntry {
+    title: String,
+    #[serde(default)]
+    desc: String,
+    kind: String,
+    #[serde(default)]
+    langs: Vec<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    version: String,
+    channel: ChannelSpec,
+}
+
+/// How the bytes arrive. Pins (sha256 / versions) live HERE, in reviewed
+/// index data — the ecosystem boundary (no VS Marketplace, no MS-proprietary)
+/// is enforced by unit tests over the index file.
+#[derive(Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum ChannelSpec {
+    /// Single gzipped binary from a pinned release URL.
     GithubGz {
-        url: &'static str,
-        sha256: &'static str,
-        bin: &'static str,
+        url: String,
+        sha256: String,
+        bin: String,
     },
-    /// Zip archive from a pinned GitHub release, extracted whole (some
-    /// servers, e.g. clangd, need their resource dirs next to the binary).
+    /// Zip archive extracted whole (clangd needs its resource dirs).
     GithubZip {
-        url: &'static str,
-        sha256: &'static str,
-        bin: &'static str,
+        url: String,
+        sha256: String,
+        bin: String,
     },
-    /// `go install` a module (version pinning + verification via Go's
-    /// checksum database — the module transparency log).
-    GoInstall {
-        module: &'static str,
-        bin: &'static str,
+    /// A raw executable published as-is (marksman-style single binaries).
+    GithubBin {
+        url: String,
+        sha256: String,
+        bin: String,
     },
-    /// `npm install` a pinned package (integrity from the npm registry
-    /// metadata). `bin` is relative to the package dir.
+    /// `go install` — version pinning + verification via Go's checksum db.
+    Go { module: String, bin: String },
+    /// `npm install` at the entry's pinned version; `extras` are additional
+    /// argv specs installed alongside (e.g. typescript for its language
+    /// server). Empty `bin` = auto-detect from the package's bin field.
     Npm {
-        package: &'static str,
-        bin: &'static str,
-    },
-    /// A pinned extension from Open VSX (open-vsx.org — the OPEN registry;
-    /// the VS Marketplace is out of bounds, see PKG-SPEC). A .vsix is a zip;
-    /// extracted whole, `bin` points inside it.
-    #[allow(dead_code)]
-    OpenVsx {
-        publisher: &'static str,
-        ext: &'static str,
-        version: &'static str,
-        sha256: &'static str,
-        bin: &'static str,
+        package: String,
+        #[serde(default)]
+        extras: Vec<String>,
+        #[serde(default)]
+        bin: String,
     },
 }
 
-/// Pinned recipes. sha256 values are the GitHub release asset digests,
-/// recorded at pin time — any later re-upload of the asset fails the install.
-fn recipes() -> Vec<Recipe> {
-    vec![
-        Recipe {
-            name: "rust-analyzer",
-            version: "2026-06-29",
-            kind: "lsp-server",
-            langs: &["rust"],
-            args: &[],
-            desc: "Rust language server (hover, completion, diagnostics, cargo check on save)",
-            channel: Channel::GithubGz {
-                url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-06-29/rust-analyzer-x86_64-unknown-linux-gnu.gz",
-                sha256: "e278cbae972df49cbcead8851aea47478478fc5ef686e2c6a35b44911e3926cf",
-                bin: "bin/rust-analyzer",
-            },
-        },
-        Recipe {
-            name: "clangd",
-            version: "22.1.6",
-            kind: "lsp-server",
-            langs: &["c", "cpp"],
-            args: &[],
-            desc: "C/C++ language server from the LLVM project",
-            channel: Channel::GithubZip {
-                url: "https://github.com/clangd/clangd/releases/download/22.1.6/clangd-linux-22.1.6.zip",
-                sha256: "a9c77443af2e447ed467e84771848d3a6ac1c56f84bcfcde717e66318de77cfa",
-                bin: "clangd_22.1.6/bin/clangd",
-            },
-        },
-        Recipe {
-            name: "gopls",
-            version: "latest",
-            kind: "lsp-server",
-            langs: &["go"],
-            args: &[],
-            desc: "Go language server (needs the Go toolchain for install)",
-            channel: Channel::GoInstall { module: "golang.org/x/tools/gopls", bin: "bin/gopls" },
-        },
-        Recipe {
-            name: "pyright",
-            version: "1.1.411",
-            kind: "lsp-server",
-            langs: &["python"],
-            args: &["--stdio"],
-            desc: "Python language server — the open pyright, not Pylance (needs Node.js)",
-            channel: Channel::Npm {
-                package: "pyright",
-                bin: "node_modules/.bin/pyright-langserver",
-            },
-        },
-    ]
+/// The effective index: embedded snapshot + an optional user overlay
+/// (`$MYMUX_INDEX` path, else `<config>/index.json`) merged over it — overlay
+/// entries win on name collision, so users can pin different versions or add
+/// private entries without forking the base.
+fn index() -> std::collections::BTreeMap<String, IndexEntry> {
+    let mut map = match serde_json::from_str::<Index>(EMBEDDED_INDEX) {
+        Ok(i) if i.v == 1 => i.packages,
+        _ => {
+            eprintln!("mymux-pkg: embedded index is invalid (build problem)");
+            Default::default()
+        }
+    };
+    let overlay = std::env::var_os("MYMUX_INDEX")
+        .map(PathBuf::from)
+        .or_else(|| config_dir().map(|d| d.join("index.json")))
+        .filter(|p| p.is_file());
+    if let Some(path) = overlay {
+        match std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Index>(&s).ok())
+        {
+            Some(i) if i.v == 1 => map.extend(i.packages),
+            _ => eprintln!(
+                "mymux-pkg: ignoring invalid index overlay {}",
+                path.display()
+            ),
+        }
+    }
+    map
 }
 
 /// The contract directory: `$MYMUX_PKG_DIR` → `$XDG_DATA_HOME/mymux/pkgs` →
@@ -158,6 +152,13 @@ fn pkg_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/mymux/pkgs"))
 }
 
+/// `$MYMUX_CONFIG_DIR` → `~/.config/mymux` (shared convention with mymuxd).
+fn config_dir() -> Option<PathBuf> {
+    std::env::var_os("MYMUX_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/mymux")))
+}
+
 // ---- environment / proxy ---------------------------------------------------
 
 /// Load `$MYMUX_CONFIG_DIR|~/.config/mymux/env` as environment DEFAULTS —
@@ -167,10 +168,7 @@ fn pkg_dir() -> Option<PathBuf> {
 /// `EnvironmentFile=`, and mymux-pkg self-loads it so a bare invocation
 /// behaves identically. Call before spawning any thread.
 fn load_env_file() {
-    let dir = std::env::var_os("MYMUX_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/mymux")));
-    let Some(path) = dir.map(|d| d.join("env")) else {
+    let Some(path) = config_dir().map(|d| d.join("env")) else {
         return;
     };
     let Ok(s) = std::fs::read_to_string(path) else {
@@ -280,15 +278,15 @@ fn main() {
         Some("remove") | Some("rm") => cmd_remove(&args[1..]),
         _ => {
             eprintln!(
-                "usage: mymux-pkg install <name | openvsx:ns.name[@ver] | npm:pkg[@ver]>\n\
+                "usage: mymux-pkg install <name | npm:pkg[@ver]>\n\
                  \x20      mymux-pkg install --lang <lang>\n\
-                 \x20      mymux-pkg search <query>      (Open VSX + npm + curated)\n\
+                 \x20      mymux-pkg search <query>      (index + npm)\n\
                  \x20      mymux-pkg lang <pkg> <lang..> (bind an installed server to languages)\n\
                  \x20      mymux-pkg list | catalog | remove <pkg>\n\
-                 curated: {}",
-                recipes()
+                 index: {}",
+                index()
                     .iter()
-                    .map(|r| format!("{} ({})", r.name, r.langs.join(",")))
+                    .map(|(n, e)| format!("{n} ({})", e.langs.join(",")))
                     .collect::<Vec<_>>()
                     .join(", ")
             );
@@ -340,90 +338,87 @@ fn cmd_install(args: &[String]) -> i32 {
         eprintln!("mymux-pkg: cannot resolve the package dir (HOME unset?)");
         return 1;
     };
-    // Dynamic specs first: openvsx:ns.name[@ver] / npm:pkg[@ver].
+    // Dynamic specs first: npm:pkg[@ver].
     if let [spec] = args {
-        if let Some(rest) = spec.strip_prefix("openvsx:") {
-            return run_dynamic(install_openvsx(&base, rest));
-        }
         if let Some(rest) = spec.strip_prefix("npm:") {
             return run_dynamic(install_npm_dynamic(&base, rest));
         }
     }
-    let all = recipes();
-    let recipe = match args {
-        [flag, lang] if flag == "--lang" => all.iter().find(|r| r.langs.contains(&lang.as_str())),
-        [name] => all.iter().find(|r| r.name == name.as_str()),
+    let idx = index();
+    let found = match args {
+        [flag, lang] if flag == "--lang" => idx
+            .iter()
+            .find(|(_, e)| e.langs.iter().any(|l| l == lang))
+            .map(|(n, e)| (n.clone(), e.clone())),
+        [name] => idx.get(name.as_str()).map(|e| (name.clone(), e.clone())),
         _ => None,
     };
-    let Some(r) = recipe else {
-        eprintln!("mymux-pkg: no recipe for {args:?} (try `mymux-pkg` for the list)");
+    let Some((name, entry)) = found else {
+        eprintln!("mymux-pkg: {args:?} is not in the index (try `mymux-pkg` for the list)");
         return 2;
     };
-    if !cfg!(target_arch = "x86_64") {
-        // v1 pins x86_64-linux assets; other arches need recipe variants.
-        if matches!(
-            r.channel,
-            Channel::GithubGz { .. } | Channel::GithubZip { .. }
-        ) {
-            eprintln!("mymux-pkg: {} recipe only has x86_64 assets so far", r.name);
-            return 1;
-        }
-    }
-    let staging = match staging_for(&base, r.name) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("mymux-pkg: {e}");
-            return 1;
-        }
-    };
-    eprintln!("installing {} {} …", r.name, r.version);
-    let built = match &r.channel {
-        Channel::GithubGz { url, sha256, bin } => fetch_gz(url, sha256, &staging, bin),
-        Channel::GithubZip { url, sha256, bin } => {
-            fetch_zip(url, sha256, &staging, bin, "github-release")
-        }
-        Channel::GoInstall { module, bin } => go_install(module, r.version, &staging, bin),
-        Channel::Npm { package, bin } => npm_install(package, r.version, &staging, bin),
-        Channel::OpenVsx {
-            publisher,
-            ext,
-            version,
-            sha256,
-            bin,
-        } => {
-            let url = format!(
-                "https://open-vsx.org/api/{publisher}/{ext}/{version}/file/{publisher}.{ext}-{version}.vsix"
-            );
-            fetch_zip(&url, sha256, &staging, bin, "openvsx")
-        }
-    };
-    let (bin, source) = match built {
-        Ok(x) => x,
-        Err(e) => {
-            eprintln!("mymux-pkg: install {} failed: {e}", r.name);
-            let _ = std::fs::remove_dir_all(&staging);
-            return 1;
-        }
-    };
-    let manifest = PkgManifest {
-        v: 1,
-        name: r.name.to_string(),
-        version: r.version.to_string(),
-        kind: r.kind.to_string(),
-        langs: r.langs.iter().map(|s| s.to_string()).collect(),
-        args: r.args.iter().map(|s| s.to_string()).collect(),
-        bin: bin.clone(),
-        source,
-        spec: None,
-        sha256: None,
-    };
-    match activate(&base, &staging, r.name, &manifest) {
+    match install_from_index(&base, &name, &entry) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("mymux-pkg: {e}");
+            eprintln!("mymux-pkg: install {name} failed: {e}");
             1
         }
     }
+}
+
+/// Install an index entry: fetch via its channel, then write a manifest that
+/// carries the PREWIRED capability config (langs/args) — no separate binding
+/// step, which is the point of the index.
+fn install_from_index(base: &Path, name: &str, entry: &IndexEntry) -> Result<(), String> {
+    if !cfg!(target_arch = "x86_64") {
+        // v1 pins x86_64-linux assets; other arches need index variants.
+        if matches!(
+            entry.channel,
+            ChannelSpec::GithubGz { .. }
+                | ChannelSpec::GithubZip { .. }
+                | ChannelSpec::GithubBin { .. }
+        ) {
+            return Err(format!("the {name} entry only has x86_64 assets so far"));
+        }
+    }
+    let staging = staging_for(base, name)?;
+    eprintln!("installing {name} {} …", entry.version);
+    let built = match &entry.channel {
+        ChannelSpec::GithubGz { url, sha256, bin } => fetch_gz(url, sha256, &staging, bin),
+        ChannelSpec::GithubZip { url, sha256, bin } => {
+            fetch_zip(url, sha256, &staging, bin, "github-release")
+        }
+        ChannelSpec::GithubBin { url, sha256, bin } => fetch_raw_bin(url, sha256, &staging, bin),
+        ChannelSpec::Go { module, bin } => go_install(module, &entry.version, &staging, bin),
+        ChannelSpec::Npm {
+            package,
+            extras,
+            bin,
+        } => npm_install(package, &entry.version, extras, &staging, bin).map(|(b, s)| {
+            let b = if b.is_empty() {
+                detect_npm_bin(&staging, package)
+            } else {
+                b
+            };
+            (b, s)
+        }),
+    };
+    let (bin, source) = built.inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&staging);
+    })?;
+    let manifest = PkgManifest {
+        v: 1,
+        name: name.to_string(),
+        version: entry.version.clone(),
+        kind: entry.kind.clone(),
+        langs: entry.langs.clone(),
+        args: entry.args.clone(),
+        bin,
+        source,
+        spec: None,
+        sha256: None, // index installs are PINNED there; manifests record only unpinned digests
+    };
+    activate(base, &staging, name, &manifest)
 }
 
 fn run_dynamic(r: Result<(), String>) -> i32 {
@@ -443,6 +438,8 @@ fn cmd_catalog() -> i32 {
     #[derive(Serialize)]
     struct Item {
         name: String,
+        #[serde(skip_serializing_if = "String::is_empty")]
+        title: String,
         version: String,
         kind: String,
         langs: Vec<String>,
@@ -465,28 +462,30 @@ fn cmd_catalog() -> i32 {
                 .collect()
         })
         .unwrap_or_default();
-    let mut items: Vec<Item> = recipes()
+    let idx = index();
+    let mut items: Vec<Item> = idx
         .iter()
-        .map(|r| Item {
-            name: r.name.to_string(),
-            version: r.version.to_string(),
-            kind: r.kind.to_string(),
-            langs: r.langs.iter().map(|s| s.to_string()).collect(),
-            desc: r.desc.to_string(),
-            installed: installed.contains_key(r.name),
-            installed_version: installed.get(r.name).map(|m| m.version.clone()),
+        .map(|(n, e)| Item {
+            name: n.clone(),
+            title: e.title.clone(),
+            version: e.version.clone(),
+            kind: e.kind.clone(),
+            langs: e.langs.clone(),
+            desc: e.desc.clone(),
+            installed: installed.contains_key(n),
+            installed_version: installed.get(n).map(|m| m.version.clone()),
             spec: None,
         })
         .collect();
     // Dynamically-installed packages (search-driven) join the catalog too —
     // one place to see and manage everything.
-    let curated: std::collections::BTreeSet<&str> = recipes().iter().map(|r| r.name).collect();
     for (name, m) in &installed {
-        if curated.contains(name.as_str()) {
+        if idx.contains_key(name) {
             continue;
         }
         items.push(Item {
             name: name.clone(),
+            title: String::new(),
             version: m.version.clone(),
             kind: m.kind.clone(),
             langs: m.langs.clone(),
@@ -538,14 +537,14 @@ fn cmd_list() -> i32 {
 
 fn cmd_remove(args: &[String]) -> i32 {
     let [name] = args else {
-        eprintln!("usage: mymux-pkg remove <name | openvsx:… | npm:…>");
+        eprintln!("usage: mymux-pkg remove <name | npm:…>");
         return 2;
     };
     let Some(base) = pkg_dir() else { return 1 };
     // Accept the same specs `install` does, mapping them to the directory the
     // install created; safe_dir also keeps arbitrary input inside `base`.
     let dir_name = match name.split_once(':') {
-        Some(("openvsx" | "npm", rest)) => {
+        Some(("npm", rest)) => {
             let bare = match rest.rfind('@') {
                 Some(i) if i > 0 => &rest[..i],
                 _ => rest,
@@ -611,77 +610,6 @@ fn http_json_t(url: &str, max_secs: u32) -> Result<serde_json::Value, String> {
     serde_json::from_slice(&out.stdout).map_err(|e| format!("bad JSON from {url}: {e}"))
 }
 
-/// Download without a pre-pinned digest (dynamic sources); returns the bytes
-/// and their sha256 for the manifest's audit trail.
-fn download_unpinned(url: &str) -> Result<(Vec<u8>, String), String> {
-    eprintln!("  fetching {url}");
-    let tmp = std::env::temp_dir().join(format!("mymux-pkg-{}.dl", std::process::id()));
-    let st = curl_cmd()
-        .args(["-fsSL", "--max-time", "600", "-o"])
-        .arg(&tmp)
-        .arg(url)
-        .status()
-        .map_err(|_| "`curl` is not installed".to_string())?;
-    if !st.success() {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("download failed ({url}){}", net_hint(st.code())));
-    }
-    let data = std::fs::read(&tmp).map_err(|e| format!("read download: {e}"))?;
-    let _ = std::fs::remove_file(&tmp);
-    let sha = hex(&sha2::Sha256::digest(&data));
-    eprintln!(
-        "  sha256 {sha} ({} bytes, recorded in the manifest)",
-        data.len()
-    );
-    Ok((data, sha))
-}
-
-/// `install openvsx:ns.name[@ver]` — download a VSIX from Open VSX (the OPEN
-/// registry; the VS Marketplace is never used) and unpack it as an asset
-/// package. mymux cannot RUN VS Code extension code — this is for extensions
-/// whose value is in their FILES (grammars, themes, bundled binaries).
-fn install_openvsx(base: &Path, spec: &str) -> Result<(), String> {
-    let (id, ver) = match spec.split_once('@') {
-        Some((i, v)) => (i, Some(v.to_string())),
-        None => (spec, None),
-    };
-    let (ns, name) = id
-        .split_once('.')
-        .ok_or("openvsx spec must be namespace.name")?;
-    let version = match ver {
-        Some(v) => v,
-        None => http_json(&format!(
-            "https://open-vsx.org/api/{}/{}",
-            urlenc(ns),
-            urlenc(name)
-        ))?["version"]
-            .as_str()
-            .ok_or("could not resolve the latest version")?
-            .to_string(),
-    };
-    let dir = safe_dir(&format!("{ns}.{name}"));
-    let staging = staging_for(base, &dir)?;
-    eprintln!("installing openvsx:{ns}.{name} {version} …");
-    let url =
-        format!("https://open-vsx.org/api/{ns}/{name}/{version}/file/{ns}.{name}-{version}.vsix");
-    let (data, sha) = download_unpinned(&url)?;
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| e.to_string())?;
-    zip.extract(&staging).map_err(|e| format!("unzip: {e}"))?;
-    let manifest = PkgManifest {
-        v: 1,
-        name: dir.clone(),
-        version,
-        kind: "vsix-assets".into(),
-        langs: vec![],
-        args: vec![],
-        bin: String::new(),
-        source: "openvsx".into(),
-        spec: Some(format!("openvsx:{ns}.{name}")),
-        sha256: Some(sha),
-    };
-    activate(base, &staging, &dir, &manifest)
-}
-
 /// `install npm:pkg[@ver]` — install any npm package. When the package
 /// declares a `bin`, it's registered as a runnable server (bind languages
 /// with `mymux-pkg lang <pkg> <langs…>`); otherwise it's an asset package.
@@ -705,9 +633,8 @@ fn install_npm_dynamic(base: &Path, spec: &str) -> Result<(), String> {
     let dir = safe_dir(name);
     let staging = staging_for(base, &dir)?;
     eprintln!("installing npm:{name} {version} …");
-    let (bin, _) = npm_install(name, &version, &staging, "")
-        .map_err(|e| e)
-        .and_then(|_| Ok((detect_npm_bin(&staging, name), String::new())))?;
+    npm_install(name, &version, &[], &staging, "")?;
+    let bin = detect_npm_bin(&staging, name);
     let manifest = PkgManifest {
         v: 1,
         name: dir.clone(),
@@ -756,7 +683,7 @@ fn detect_npm_bin(staging: &Path, pkg: &str) -> String {
     }
 }
 
-/// `search <query>` — curated recipes + Open VSX + npm, merged as JSON.
+/// `search <query>` — the index + npm registry, merged as JSON.
 /// All network from wherever mymux-pkg runs (the daemon host).
 fn cmd_search(args: &[String]) -> i32 {
     let query = args.join(" ");
@@ -770,6 +697,9 @@ fn cmd_search(args: &[String]) -> i32 {
         /// What `install` accepts for this hit.
         spec: String,
         name: String,
+        /// Friendly display name (index title).
+        #[serde(skip_serializing_if = "String::is_empty")]
+        title: String,
         version: String,
         desc: String,
         installed: bool,
@@ -785,46 +715,27 @@ fn cmd_search(args: &[String]) -> i32 {
         .unwrap_or_default();
     let mut hits: Vec<Hit> = Vec::new();
     let q = query.to_lowercase();
-    for r in recipes() {
-        if r.name.contains(&q) || r.desc.to_lowercase().contains(&q) {
+    for (n, e) in index() {
+        if n.contains(&q)
+            || e.title.to_lowercase().contains(&q)
+            || e.desc.to_lowercase().contains(&q)
+            || e.langs.iter().any(|l| l == &q)
+        {
             hits.push(Hit {
                 source: "curated",
-                spec: r.name.to_string(),
-                name: r.name.to_string(),
-                version: r.version.to_string(),
-                desc: r.desc.to_string(),
-                installed: installed_dirs.contains(r.name),
+                spec: n.clone(),
+                name: n.clone(),
+                title: e.title.clone(),
+                version: e.version.clone(),
+                desc: e.desc.clone(),
+                installed: installed_dirs.contains(&n),
             });
         }
     }
-    // Registry failures must be VISIBLE (a proxy-blocked cluster would
-    // otherwise look like "nothing found") — collected as warnings, search
-    // degrades to whatever sources answered.
+    // Registry failure must be VISIBLE (a proxy-blocked cluster would
+    // otherwise look like "nothing found") — collected as a warning, search
+    // degrades to whatever the registry answered.
     let mut warnings: Vec<String> = Vec::new();
-    match http_json_t(
-        &format!(
-            "https://open-vsx.org/api/-/search?query={}&size=10",
-            urlenc(&query)
-        ),
-        12,
-    ) {
-        Ok(v) => {
-            for e in v["extensions"].as_array().unwrap_or(&vec![]) {
-                let (Some(ns), Some(name)) = (e["namespace"].as_str(), e["name"].as_str()) else {
-                    continue;
-                };
-                hits.push(Hit {
-                    source: "openvsx",
-                    spec: format!("openvsx:{ns}.{name}"),
-                    name: format!("{ns}.{name}"),
-                    version: e["version"].as_str().unwrap_or("?").to_string(),
-                    desc: e["description"].as_str().unwrap_or("").to_string(),
-                    installed: installed_dirs.contains(&safe_dir(&format!("{ns}.{name}"))),
-                });
-            }
-        }
-        Err(e) => warnings.push(format!("open-vsx.org: {e}")),
-    }
     match http_json_t(
         &format!(
             "https://registry.npmjs.org/-/v1/search?text={}&size=10",
@@ -842,6 +753,7 @@ fn cmd_search(args: &[String]) -> i32 {
                     source: "npm",
                     spec: format!("npm:{name}"),
                     name: name.to_string(),
+                    title: String::new(),
                     version: p["version"].as_str().unwrap_or("?").to_string(),
                     desc: p["description"].as_str().unwrap_or("").to_string(),
                     installed: installed_dirs.contains(&safe_dir(name)),
@@ -1035,6 +947,7 @@ fn go_install(
 fn npm_install(
     package: &str,
     version: &str,
+    extras: &[String],
     staging: &Path,
     bin: &str,
 ) -> Result<(String, String), String> {
@@ -1048,16 +961,35 @@ fn npm_install(
     cmd.args(["install", "--no-fund", "--no-audit", "--prefix"])
         .arg(staging)
         .arg(&target)
+        .args(extras) // companion packages, e.g. typescript for its server
         .env("PATH", format!("{}:{}", npm_dir.display(), path));
     proxy_env(&mut cmd);
     let st = cmd.status().map_err(|e| format!("run npm: {e}"))?;
     if !st.success() {
         return Err("npm install failed".into());
     }
-    if !staging.join(bin).exists() {
+    if !bin.is_empty() && !staging.join(bin).exists() {
         return Err(format!("{bin} missing after npm install"));
     }
     Ok((bin.to_string(), "npm".into()))
+}
+
+/// A raw executable published as a bare release asset (no archive) —
+/// verified, written to `bin`, chmod +x.
+fn fetch_raw_bin(
+    url: &str,
+    sha256: &str,
+    staging: &Path,
+    bin: &str,
+) -> Result<(String, String), String> {
+    let data = download_verified(url, sha256)?;
+    let path = staging.join(bin);
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, data).map_err(|e| e.to_string())?;
+    make_executable(&path)?;
+    Ok((bin.to_string(), "github-release".into()))
 }
 
 fn make_executable(path: &Path) -> Result<(), String> {
@@ -1095,14 +1027,68 @@ mod tests {
         assert!(old.args.is_empty() && old.spec.is_none());
     }
 
+    /// The embedded index is DATA reviewed by tests, not code reviewed by the
+    /// compiler — so validate every field a bad PR could break.
     #[test]
-    fn every_recipe_lang_is_unique() {
-        let rs = recipes();
-        let mut langs: Vec<&str> = rs.iter().flat_map(|r| r.langs.iter().copied()).collect();
-        let n = langs.len();
-        langs.sort();
-        langs.dedup();
-        assert_eq!(n, langs.len(), "two recipes claim the same language");
+    fn embedded_index_is_valid() {
+        let idx: Index = serde_json::from_str(EMBEDDED_INDEX).expect("index/index.json parses");
+        assert_eq!(idx.v, 1);
+        assert!(!idx.packages.is_empty());
+        let mut langs_seen: Vec<&str> = Vec::new();
+        for (name, e) in &idx.packages {
+            assert!(
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)),
+                "bad package name {name:?}"
+            );
+            assert!(!e.title.is_empty(), "{name}: title required");
+            assert!(!e.version.is_empty(), "{name}: version required");
+            if e.kind == "lsp-server" {
+                assert!(!e.langs.is_empty(), "{name}: lsp-server needs langs");
+            }
+            langs_seen.extend(e.langs.iter().map(String::as_str));
+            let (url, sha, bin) = match &e.channel {
+                ChannelSpec::GithubGz { url, sha256, bin }
+                | ChannelSpec::GithubZip { url, sha256, bin }
+                | ChannelSpec::GithubBin { url, sha256, bin } => (
+                    Some(url.as_str()),
+                    Some(sha256.as_str()),
+                    Some(bin.as_str()),
+                ),
+                ChannelSpec::Go { bin, .. } => (None, None, Some(bin.as_str())),
+                ChannelSpec::Npm { .. } => (None, None, None),
+            };
+            if let Some(u) = url {
+                // Ecosystem boundary: release assets come from GitHub only
+                // (npm / go have their own channel types).
+                assert!(
+                    u.starts_with("https://github.com/"),
+                    "{name}: url must be a github release ({u})"
+                );
+            }
+            if let Some(s) = sha {
+                assert!(
+                    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()),
+                    "{name}: sha256 must be 64 hex chars"
+                );
+            }
+            if let Some(b) = bin {
+                assert!(
+                    !b.is_empty() && !b.starts_with('/'),
+                    "{name}: bin must be relative"
+                );
+            }
+        }
+        let n = langs_seen.len();
+        langs_seen.sort();
+        langs_seen.dedup();
+        assert_eq!(
+            n,
+            langs_seen.len(),
+            "two index entries claim the same language"
+        );
     }
 
     #[test]
@@ -1164,17 +1150,33 @@ mod tests {
 
     #[test]
     fn no_forbidden_channels() {
-        // The ecosystem boundary: nothing may reference the VS Marketplace.
+        // The ecosystem boundary: nothing may reference the VS Marketplace,
+        // and the index must not carry MS-proprietary extensions (their
+        // EULAs bind them to official VS Code wherever the file came from).
         // (Needles are assembled from pieces so this test's own source
         // doesn't trip itself.)
-        let src = include_str!("main.rs");
         let needles = [
             ["marketplace", ".visualstudio", ".com"].concat(),
             ["vsassets", ".io"].concat(),
         ];
-        for needle in &needles {
-            let hits = src.matches(needle.as_str()).count();
-            assert_eq!(hits, 0, "forbidden channel {needle} referenced");
+        for haystack in [include_str!("main.rs"), EMBEDDED_INDEX] {
+            for needle in &needles {
+                let hits = haystack.matches(needle.as_str()).count();
+                assert_eq!(hits, 0, "forbidden channel {needle} referenced");
+            }
+        }
+        let proprietary = [
+            ["ms-", "python.python"].concat(),
+            ["ms-", "vscode.cpptools"].concat(),
+            ["ms-", "toolsai"].concat(),
+            ["github", ".copilot"].concat(),
+        ];
+        for needle in &proprietary {
+            assert_eq!(
+                EMBEDDED_INDEX.matches(needle.as_str()).count(),
+                0,
+                "MS-proprietary extension {needle} in the index"
+            );
         }
     }
 }

@@ -374,7 +374,7 @@ async fn handle(socket: WebSocket, q: LspQuery) {
         tokio::select! {
             msg = rx.next() => match msg {
                 Some(Ok(Message::Text(t))) => {
-                    let head = format!("Content-Length: {}\r\n\r\n", t.as_bytes().len());
+                    let head = format!("Content-Length: {}\r\n\r\n", t.len());
                     if stdin.write_all(head.as_bytes()).await.is_err()
                         || stdin.write_all(t.as_bytes()).await.is_err()
                         || stdin.flush().await.is_err()

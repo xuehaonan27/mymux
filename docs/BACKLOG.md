@@ -7,9 +7,16 @@ Strategy decided with the user: no general-purpose plugin platform up front
 (single-user product — no author ecosystem to serve, and "lightweight" is the
 identity); instead, REAL extension points behind a public on-disk contract
 (docs/PKG-SPEC.md), producer and consumers fully decoupled (zero shared code).
-Ecosystem boundary (user-ratified): **Open VSX usable in full; the VS
-Marketplace and Microsoft's proprietary extensions (Pylance, C/C++, Remote,
-Copilot) are NEVER touched** — enforced by a unit test in mymux-pkg.
+Ecosystem boundary (updated 2026-07-15): **the Visual Studio Marketplace and
+Microsoft's proprietary extensions (Pylance, C/C++, Remote, Copilot) are NEVER
+touched** — enforced by a unit test in mymux-pkg. **The Open VSX channel was
+REMOVED 2026-07-15** (user's call after a sober look at the fit): the boundary
+(never run VS Code extension-host code) capped the consumable surface at
+declarative assets — grammars/themes/snippets — the ecosystem's minority and
+least-maintained slice, while everything mymux actually wants (language
+servers) ships independently via GitHub releases / npm / go modules anyway.
+Dynamic installs keep the npm channel only. mymux's ecosystem is its own: the
+data index + the on-disk contract + mymux-native kinds (viewer, agent-adapter…).
 - ~~P1: managed language servers~~ — **DONE 2026-07-03**: `mymux-pkg` CLI
   (install/list/remove; channels: pinned GitHub releases + sha256 from the
   release digests, `go install` (Go sumdb), npm (registry integrity), and an
@@ -38,15 +45,39 @@ Copilot) are NEVER touched** — enforced by a unit test in mymux-pkg.
   managed LSP resolution for ANY bound language id + augmented spawn PATH
   (nvm node under systemd). Verified: real bash-language-server session
   (search → install → bind → hover) end-to-end through the daemon.
-- P2.5 (optional): TextMate grammars/themes from Open VSX for CodeMirror
-  highlighting of languages we don't bundle (vscode-textmate/shiki route).
+- ~~Index-ification (the ecosystem seed)~~ — **DONE 2026-07-05** (user
+  ratified the layered ecosystem model: channels → capability manifests →
+  data index → mymux-native extension points; no extension-host compat,
+  ever). `index/index.json` (repo root, embedded at build, `$MYMUX_INDEX` /
+  `<config>/index.json` overlay merged over it) replaces the hardcoded
+  recipe Vec entirely. Entries are PREWIRED: `install <name>` lands langs +
+  launch args in the manifest — no `mymux-pkg lang` step. Channel types
+  incl. new `github-bin` (raw release binary) and npm `extras` (companion
+  packages). Starter set: rust-analyzer, clangd, gopls, pyright,
+  bash-language-server, typescript-language-server(+typescript),
+  yaml-language-server, marksman — every entry live-verified (install +
+  LSP initialize probe). Unit tests validate the index and enforce the
+  ecosystem boundary over its content; catalog/search/UI show friendly
+  titles.
+- ~~Open VSX as an acquisition channel~~ — **REMOVED 2026-07-15** (user's
+  call; see the boundary note above). Deleted: the `openvsx:` install spec
+  and the `openvsx` index channel type, VSIX fetch/extract
+  (`install_openvsx`, `vsix_provides`, `download_unpinned`), the search
+  integration + verified badge + VSIX disclaimer in the panel, and the
+  `provides`/`runtime_code` manifest fields (old manifests still parse —
+  consumers are serde-lenient). Fallback for a hypothetical VSIX-only
+  server: an index entry pointing at its upstream GitHub/npm source instead.
+- P2.5 (demand-driven): syntax highlighting for languages CodeMirror doesn't
+  cover. DECIDED 2026-07-15: the TextMate-grammar-from-a-registry pipeline
+  (vscode-textmate/shiki + oniguruma WASM + a CM bridge) is REJECTED — too
+  much machinery and fidelity loss for a single-user product. Route instead:
+  `@codemirror/lang-*` official packages and `legacy-modes` from npm, added
+  one language at a time when a real file type actually shows up unhighlighted.
 - P3 (only if ever needed): third-party loading (JS/WASM). Revisit after P2;
   an `agent-adapter` kind is the uniquely-mymux extension point if an
   ecosystem ever happens.
-- **License choice for the repo is still open** (currently workspace says MIT
-  in Cargo.toml but no LICENSE file / conscious decision). If open-sourcing /
-  commercializing, decide BEFORE external contributors arrive (MIT/Apache +
-  hosted, BSL/FSL, AGPL dual — user to pick).
+- ~~License choice~~ — **DECIDED 2026-07-05: MIT** (LICENSE file at the repo
+  root; workspace Cargo.toml already declared MIT).
 
 
 ## LSP + editor adaptation batch (parked 2026-07-03 — mainline first, user's call)

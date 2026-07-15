@@ -47,18 +47,18 @@ manifest as data, never as shell.
     (launch arguments, e.g. pyright's `--stdio`, bash-language-server's
     `start`). Empty `args` on a built-in language falls back to the daemon's
     defaults (pre-`args` manifests keep working).
-  - `vsix-assets` / `npm-assets`: an extracted extension or npm package with
-    no runnable server (grammars, themes, snippets); consumed by later phases.
+  - `npm-assets`: an extracted npm package with no runnable server; consumed
+    by later phases.
   - `viewer` (reserved): the UI keeps a viewer registry (`ui/src/viewers.ts`)
     whose interface mirrors what a viewer package would provide — built-ins
     (image, hex) ship in the UI today; third-party loading is a later phase
     and will finalize this kind's manifest shape.
   - (future) `theme`, `grammar`, `agent-adapter` — added here first.
-- `source` — informational provenance (`github-release` | `openvsx` |
-  `go-install` | `npm` | `manual`).
+- `source` — informational provenance (`github-release` | `go-install` |
+  `npm` | `manual`).
 - `spec` — for dynamic installs, the exact spec `mymux-pkg install` accepts
-  (`openvsx:ns.name[@ver]`, `npm:pkg[@ver]`); lets the UI re-install/remove by
-  spec and records where the files came from.
+  (`npm:pkg[@ver]`); lets the UI re-install/remove by spec and records where
+  the files came from.
 - `sha256` — artifact digest. Curated recipes PIN it (install fails on
   mismatch); dynamic installs RECORD it (audit trail — there is no pin to
   compare against on first install). npm relies on the registry's own
@@ -68,32 +68,59 @@ manifest as data, never as shell.
 
 Two tiers, same boundary:
 
-**Curated recipes** (pinned in `mymux-pkg`): upstream releases (GitHub etc.)
-with pinned version + sha256; `go install` (checksum database); pinned npm.
+**The index** (`index/index.json` at the repo root — DATA, not code): the
+curated tier. Each entry maps a friendly name to a pinned source plus
+PREWIRED capability config, so `mymux-pkg install <name>` (or one panel
+click) lands a fully-working package — langs and launch args go straight
+into the manifest, no separate binding step:
 
-**Dynamic installs** (user-initiated, no recipe):
+```json
+"bash-language-server": {
+  "title": "Bash language server",
+  "kind": "lsp-server",
+  "langs": ["bash"],
+  "args": ["start"],
+  "version": "5.6.0",
+  "channel": { "type": "npm", "package": "bash-language-server",
+               "bin": "node_modules/.bin/bash-language-server" }
+}
+```
 
-- `mymux-pkg search <query>` — merges the curated catalog with live results
-  from the Open VSX API and the npm registry. Network I/O happens on the
-  machine running the command (through the daemon: the mymuxd host — which is
-  the box that can actually reach the registries, not the browser).
-- `mymux-pkg install openvsx:ns.name[@ver]` — resolves the version via the
-  Open VSX API, downloads the VSIX, extracts it (`vsix-assets`), records the
-  sha256.
+- Channel types: `github-gz` / `github-zip` / `github-bin` (pinned release
+  URL + sha256 + bin), `go` (module, checksum-db verified), `npm` (pinned
+  version; `extras` for companion packages — typescript-language-server
+  ships `typescript` alongside; empty `bin` = auto-detect).
+- The file is embedded into `mymux-pkg` at build time (works offline /
+  air-gapped). An optional overlay — `$MYMUX_INDEX` path, else
+  `<config>/index.json` — merges over it, overlay wins per name: users pin
+  different versions or add private entries without forking the base.
+- Unit tests validate every entry (parse, langs uniqueness, https
+  GitHub-only release URLs, 64-hex sha256, relative bins) and enforce the
+  ecosystem boundary over the index content. Community contributions are
+  PRs against this file; review + tests are the trust layer.
+
+**Dynamic installs** (user-initiated, anything not in the index):
+
+- `mymux-pkg search <query>` — merges the index with live results from the
+  npm registry. Network I/O happens on the machine running the command
+  (through the daemon: the mymuxd host — which is the box that can actually
+  reach the registry, not the browser).
 - `mymux-pkg install npm:pkg[@ver]` — npm-installs into the package dir; if
   the package declares a `bin` it becomes a runnable `lsp-server` (bind
   languages below), else `npm-assets`.
 - `mymux-pkg lang <pkg> <lang…> [-- <launch args…>]` — binds an installed
-  package's executable to language ids (and its launch args). This is what
-  makes a dynamic server reachable from the editor.
+  package's executable to language ids (and its launch args). Needed only
+  for dynamic installs; index entries come prewired.
 - `mymux-pkg remove <name | spec>` — specs map back to the install directory.
 
 **Never** the Visual Studio Marketplace (its ToS restricts extensions to
 Microsoft's own products) and **never** Microsoft's proprietary extensions
 (Pylance, C/C++, Remote, Copilot — their EULAs bind them to official VS Code
 regardless of where the file came from). Use the open equivalents (pyright,
-clangd). Open VSX is allowed in full; prefer verified publishers
-(supply-chain incident, 2026).
+clangd). Open VSX was a channel until 2026-07-15 — removed: the consumable
+surface (declarative assets only; extension-host code is never executed by
+design) was too small to justify the channel's cost, and npm covers the
+dynamic-install case.
 
 ## Proxies (clusters whose egress needs one)
 

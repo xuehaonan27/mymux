@@ -443,7 +443,7 @@ impl NativeWindows {
                 continue;
             }
             let key = (dist, -ov, *p);
-            if best.map_or(true, |b| key < b) {
+            if best.is_none_or(|b| key < b) {
                 best = Some(key);
             }
         }

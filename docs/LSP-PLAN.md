@@ -1,5 +1,10 @@
 # LSP plan — native LSP in mymux's panel (C-first)
 
+> **Status 2026-07-15**: the Open VSX acquisition channel referenced below was
+> REMOVED (see docs/BACKLOG.md) — mymux's package system now sources from
+> pinned upstream releases and the npm/go registries only (docs/PKG-SPEC.md is
+> the current truth). The rest of this document is kept as history.
+
 Goal (user, 2026-07-03): LSP in mymux, with the VS Code ecosystem's *artifacts*
 (install rust-analyzer from Open VSX) but **not** a stitched-in VS Code.
 **DECIDED 2026-07-03: C-first** — embedding openvscode-server (route A) was

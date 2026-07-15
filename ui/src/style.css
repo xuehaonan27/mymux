@@ -306,10 +306,6 @@ body {
   border: 1px solid #30363d;
   color: #9aa5b1;
 }
-.pkgs-badge-openvsx {
-  border-color: #a371f7;
-  color: #a371f7;
-}
 .pkgs-badge-npm {
   border-color: #d29922;
   color: #d29922;
@@ -317,6 +313,11 @@ body {
 .pkgs-badge-curated {
   border-color: #3fb950;
   color: #3fb950;
+}
+.pkgs-sub {
+  color: #5c6773;
+  font-size: 11px;
+  margin-left: 8px;
 }
 .pkgs-card-head .pkgs-ver {
   margin-left: auto;

@@ -226,7 +226,7 @@ hover docs, completion and signature help, with rename (F2) / go-to-definition
 rust-analyzer on the dev box (`rustup component add rust-analyzer`) and it's
 picked up; without it the editor simply opens plain. The daemon speaks raw LSP
 over `/lsp` on the existing port — see `docs/LSP-PLAN.md` for the roadmap
-(more languages + Open VSX-based server install are next).
+(more languages via the package index are next).
 
 The daemon serves `/fs/*` and `/git/*` confined to a root (the pane's cwd, else
 `MYMUX_ROOT`/cwd) — rejecting path escapes, with a CORS allowlist so only the

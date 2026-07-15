@@ -1,0 +1,95 @@
+{
+  "v": 1,
+  "//": "The mymux package index — DATA, not code (docs/PKG-SPEC.md). Friendly name → pinned source + prewired capability config (langs/args), so a panel install is fully wired in one click. Community additions arrive as PRs against this file. Ecosystem boundary applies: pinned upstream releases, npm and Go modules — never the VS Marketplace, never MS-proprietary extensions. sha256 pins are release-asset digests recorded at pin time (TOFU).",
+  "packages": {
+    "rust-analyzer": {
+      "title": "Rust language server",
+      "desc": "hover, completion, diagnostics, cargo check on save",
+      "kind": "lsp-server",
+      "langs": ["rust"],
+      "version": "2026-06-29",
+      "channel": {
+        "type": "github-gz",
+        "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-06-29/rust-analyzer-x86_64-unknown-linux-gnu.gz",
+        "sha256": "e278cbae972df49cbcead8851aea47478478fc5ef686e2c6a35b44911e3926cf",
+        "bin": "bin/rust-analyzer"
+      }
+    },
+    "clangd": {
+      "title": "C/C++ language server",
+      "desc": "from the LLVM project",
+      "kind": "lsp-server",
+      "langs": ["c", "cpp"],
+      "version": "22.1.6",
+      "channel": {
+        "type": "github-zip",
+        "url": "https://github.com/clangd/clangd/releases/download/22.1.6/clangd-linux-22.1.6.zip",
+        "sha256": "a9c77443af2e447ed467e84771848d3a6ac1c56f84bcfcde717e66318de77cfa",
+        "bin": "clangd_22.1.6/bin/clangd"
+      }
+    },
+    "gopls": {
+      "title": "Go language server",
+      "desc": "needs the Go toolchain for install (verified via the Go checksum database)",
+      "kind": "lsp-server",
+      "langs": ["go"],
+      "version": "latest",
+      "channel": { "type": "go", "module": "golang.org/x/tools/gopls", "bin": "bin/gopls" }
+    },
+    "pyright": {
+      "title": "Python language server",
+      "desc": "the open pyright, not Pylance (needs Node.js)",
+      "kind": "lsp-server",
+      "langs": ["python"],
+      "args": ["--stdio"],
+      "version": "1.1.411",
+      "channel": { "type": "npm", "package": "pyright", "bin": "node_modules/.bin/pyright-langserver" }
+    },
+    "bash-language-server": {
+      "title": "Bash language server",
+      "desc": "shell script hover, completion, diagnostics (needs Node.js)",
+      "kind": "lsp-server",
+      "langs": ["bash"],
+      "args": ["start"],
+      "version": "5.6.0",
+      "channel": { "type": "npm", "package": "bash-language-server", "bin": "node_modules/.bin/bash-language-server" }
+    },
+    "typescript-language-server": {
+      "title": "TypeScript / JavaScript language server",
+      "desc": "bundles the typescript compiler as a companion package (needs Node.js)",
+      "kind": "lsp-server",
+      "langs": ["typescript", "typescriptreact", "javascript", "javascriptreact"],
+      "args": ["--stdio"],
+      "version": "5.3.0",
+      "channel": {
+        "type": "npm",
+        "package": "typescript-language-server",
+        "extras": ["typescript@5.9.3"],
+        "bin": "node_modules/.bin/typescript-language-server"
+      }
+    },
+    "yaml-language-server": {
+      "title": "YAML language server",
+      "desc": "schema-aware completion and validation (needs Node.js)",
+      "kind": "lsp-server",
+      "langs": ["yaml"],
+      "args": ["--stdio"],
+      "version": "1.23.0",
+      "channel": { "type": "npm", "package": "yaml-language-server", "bin": "node_modules/.bin/yaml-language-server" }
+    },
+    "marksman": {
+      "title": "Markdown language server",
+      "desc": "wiki-links, references, ToC — a single static binary",
+      "kind": "lsp-server",
+      "langs": ["markdown"],
+      "args": ["server"],
+      "version": "2026-02-08",
+      "channel": {
+        "type": "github-bin",
+        "url": "https://github.com/artempyanykh/marksman/releases/download/2026-02-08/marksman-linux-x64",
+        "sha256": "be5098e8213219269c47fc0d916a66fa31ce0602ec967475c722260aabf26087",
+        "bin": "bin/marksman"
+      }
+    }
+  }
+}

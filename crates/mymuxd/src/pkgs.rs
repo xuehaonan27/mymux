@@ -21,8 +21,7 @@ fn pkg_cli() -> PathBuf {
 
 /// Package specs come from the UI: keep them boring before they hit argv
 /// (no shell involved, but names shouldn't smuggle path tricks either).
-/// Accepts curated names plus dynamic specs (`openvsx:ns.name@1.2`,
-/// `npm:@scope/pkg`).
+/// Accepts curated names plus dynamic npm specs (`npm:@scope/pkg`).
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
@@ -54,9 +53,9 @@ fn claim(name: &str) -> Option<InflightGuard> {
     Some(InflightGuard(name.to_string()))
 }
 
-/// `GET /pkgs/search?q=` — relay `mymux-pkg search` (curated + Open VSX +
-/// npm). The network calls run HERE, on the daemon host — the client side
-/// may have no route to the registries.
+/// `GET /pkgs/search?q=` — relay `mymux-pkg search` (curated + npm). The
+/// network calls run HERE, on the daemon host — the client side may have no
+/// route to the registries.
 pub async fn search(
     axum::extract::Query(q): axum::extract::Query<SearchQuery>,
 ) -> Json<serde_json::Value> {
