@@ -20,5 +20,13 @@ fn main() {
         rev,
         if dirty { "-dirty" } else { "" }
     );
+    // .git/HEAD content ("ref: refs/heads/main") doesn't change on commits —
+    // watch the ref it points AT, or build.rs never re-runs and the rev
+    // baked into the binary goes stale.
     println!("cargo:rerun-if-changed=../../.git/HEAD");
+    if let Ok(head) = std::fs::read_to_string("../../.git/HEAD") {
+        if let Some(refname) = head.trim().strip_prefix("ref: ") {
+            println!("cargo:rerun-if-changed=../../.git/{refname}");
+        }
+    }
 }
