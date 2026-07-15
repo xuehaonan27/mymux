@@ -311,9 +311,14 @@ tmux stays standalone.
 **Requirement to preserve when the native engine/protocol replaces tmux.**
 
 ## Settings / user profile (started minimally)
-- DONE: client-side prefs in localStorage (`mymux.prefs`), first setting "always
-  show the host bar" as a checkbox in the host manager.
-- Open: a proper persisted settings store + a real settings surface.
+- ~~DONE: client-side prefs in localStorage (`mymux.prefs`)~~.
+- ~~A proper persisted settings store + a real settings surface~~ — **DONE
+  2026-07-15**: `ui/src/prefs.ts` is the typed store (defaults + change
+  notifications; per-device by design); the settings panel (⚙ in the bar, or
+  ⌘K s) fronts it — hostBarAlways, notify (same switch as the bell, OS may
+  prompt), and the default code root (pane cwd | repo root). Consumers react
+  via onPrefsChange (bell lights, host bar re-renders, code panel auto-jumps
+  to the repo root once per pane). Harness: ui/ux/settingscheck.mjs.
 
 ## Misc
 - ~~Tighten the daemon's HTTP surface~~ — **DONE 2026-07-03** via an Origin

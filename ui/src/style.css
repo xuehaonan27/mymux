@@ -223,6 +223,36 @@ body {
 .pkgs-panel.show {
   display: flex;
 }
+.settings-panel {
+  display: none;
+  position: fixed;
+  inset: 40px 25% 40px 25%;
+  z-index: 22;
+  flex-direction: column;
+  gap: 4px;
+  overflow: auto;
+  background: #0d1017;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 16px 20px;
+  font-size: 12px;
+  color: #c5cdd9;
+}
+.settings-panel.show {
+  display: flex;
+}
+.settings-row {
+  padding: 6px 0;
+}
+.settings-row label {
+  cursor: pointer;
+  user-select: none;
+}
+.settings-hint {
+  color: #5c6773;
+  font-size: 11px;
+  margin-top: 2px;
+}
 .pkgs-title {
   font-size: 14px;
   font-weight: 600;

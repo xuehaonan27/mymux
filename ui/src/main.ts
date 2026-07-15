@@ -10,6 +10,8 @@ import { initHostManager } from './hostmanager';
 import { Workspace, WinInfo, WsState } from './workspace';
 import { ACTIONS, directAction, leaderAction, helpRows, KeyDeps } from './keymap';
 import { initNotify } from './notify';
+import { getPrefs, setPrefs, onPrefsChange } from './prefs';
+import { initSettingsPanel } from './settings';
 
 // The shell: a registry of per-host Workspaces (each owns its WS + panes; see
 // workspace.ts), the shared bar (host chips / window tabs / agent counts), the
@@ -38,28 +40,6 @@ const daemonPort = Number(new URLSearchParams(location.search).get('port')) || 8
 // In the Tauri app there is no browser reserving Cmd+T/W/1-9, so we bind the
 // full iTerm2 set there; in a browser those stay on the ⌘K leader.
 const isTauri = '__TAURI_INTERNALS__' in window || '__TAURI__' in window;
-
-// ---- user prefs (client-side; a fuller settings store is on the backlog) ----
-
-interface Prefs {
-  hostBarAlways?: boolean;
-  notify?: boolean;
-  /** The code panel's default root before any manual switch. */
-  codeRoot?: 'pane' | 'repo';
-}
-function loadPrefs(): Prefs {
-  try {
-    return JSON.parse(localStorage.getItem('mymux.prefs') ?? '{}');
-  } catch {
-    return {};
-  }
-}
-let prefs: Prefs = loadPrefs();
-function savePrefs(p: Prefs) {
-  prefs = p;
-  localStorage.setItem('mymux.prefs', JSON.stringify(p));
-  renderHosts();
-}
 
 // ---- attention queue --------------------------------------------------------
 // Windows whose agent needs a human (waiting for approval/input, or done),
@@ -545,7 +525,7 @@ function topAgent(windows: WinInfo[]): 'waiting' | 'done' | 'running' | undefine
 // than one connected host (always-show will become a profile setting).
 function renderHosts() {
   hostsEl.replaceChildren();
-  const show = workspaces.size >= 2 || (prefs.hostBarAlways === true && workspaces.size >= 1);
+  const show = workspaces.size >= 2 || (getPrefs().hostBarAlways && workspaces.size >= 1);
   hostsEl.style.display = show ? 'flex' : 'none';
   if (!show) return;
   let i = 0;
@@ -616,7 +596,7 @@ const codeOpts: CodePanelOpts = {
   getActivePane: () => active()?.activePane ?? null,
   getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
   getScope: () => active()?.id ?? 'local',
-  getDefaultRoot: () => (prefs.codeRoot === 'repo' ? 'repo' : 'pane'),
+  getDefaultRoot: () => getPrefs().codeRoot,
 };
 // CodeMirror is heavy, so the code panel loads on first use (vite splits the
 // chunk); the wrapper keeps the synchronous interface the shell expects.
@@ -672,8 +652,8 @@ const notifier = initNotify({
   isTauri,
   jumpTo,
   hostLabel: (id) => workspaces.get(id)?.label ?? id,
-  getEnabled: () => prefs.notify === true,
-  setEnabled: (v) => savePrefs({ ...prefs, notify: v }),
+  getEnabled: () => getPrefs().notify,
+  setEnabled: (v) => setPrefs({ notify: v }),
 });
 const notifyBtn = document.getElementById('btn-notify')!;
 function renderNotifyBtn() {
@@ -691,6 +671,15 @@ notifyBtn.addEventListener('click', () => {
   void notifier.toggle().then(renderNotifyBtn);
 });
 renderNotifyBtn();
+
+const settingsPanel = initSettingsPanel();
+document.getElementById('btn-settings')?.addEventListener('click', () => settingsPanel.toggle());
+// Prefs written anywhere (settings panel, bell, host manager) re-render the
+// surfaces they affect.
+onPrefsChange(() => {
+  renderHosts();
+  renderNotifyBtn();
+});
 
 // ---- keybindings — dispatch driven by the keymap tables (see keymap.ts) -------
 
@@ -737,6 +726,7 @@ const keyDeps: KeyDeps = {
   jumpAttention: () => jumpToAttention(),
   keepToggle,
   togglePlugins: () => togglePlugins(),
+  toggleSettings: () => settingsPanel.toggle(),
 };
 
 function handleLeaderKey(e: KeyboardEvent) {
@@ -796,6 +786,13 @@ document.addEventListener(
       if (e.key === 'Escape') {
         e.preventDefault();
         pkgsPanel.toggle();
+      }
+      return;
+    }
+    if (settingsPanel.isOpen()) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        settingsPanel.toggle();
       }
       return;
     }
@@ -873,8 +870,8 @@ if (isTauri) {
       if (w) endWorkspace(w, false); // tunnel already torn down by the manager
     },
     prefs: {
-      hostBarAlways: () => prefs.hostBarAlways === true,
-      setHostBarAlways: (v) => savePrefs({ ...prefs, hostBarAlways: v }),
+      hostBarAlways: () => getPrefs().hostBarAlways,
+      setHostBarAlways: (v) => setPrefs({ hostBarAlways: v }),
     },
   });
   const hostBtn = document.getElementById('btn-host');
