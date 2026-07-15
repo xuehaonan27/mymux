@@ -272,4 +272,10 @@ tmux stays standalone.
   otherwise); no Origin = local tool = pass. Verified: evil-origin HTTP 403 +
   WS rejected, allowlisted/absent Origin pass. A full per-session token adds
   nothing within this model — dropped deliberately.
-- M2.2: unify the `cargo tauri dev` vs `npm install` working directories.
+- ~~M2.2: unify the `cargo tauri dev` vs `npm install` working directories.~~ —
+  **DONE 2026-07-15** (root-caused on the Mac): the tauri CLI runs
+  `beforeDevCommand`/`beforeBuildCommand` with cwd = the **frontend dir**, so
+  `npm --prefix ui …` looked for `ui/ui/package.json`. The commands are now
+  `ScriptWithOptions` with an explicit `cwd: "../ui"` (resolved against
+  `dirs.tauri`, i.e. src-tauri) — deterministic no matter where `cargo tauri`
+  is invoked from.
