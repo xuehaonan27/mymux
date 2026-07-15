@@ -19,6 +19,9 @@ set -euo pipefail
 # Non-interactive contexts (ssh build delegation, CI) have a scrubbed PATH.
 export PATH="$HOME/.cargo/bin:$PATH"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# A script copied out of the repo resolves ROOT to somewhere else — building
+# (or worse, rsyncing) from there can be catastrophic. Refuse early.
+[ -f "$ROOT/Cargo.toml" ] || die "ROOT resolved to $ROOT (no Cargo.toml) — run this from inside the mymux repo"
 TARGET="x86_64-unknown-linux-musl"
 OUT="$ROOT/src-tauri/resources/daemon"
 STAGE="$(mktemp -d)"
