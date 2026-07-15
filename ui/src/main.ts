@@ -527,6 +527,7 @@ function renderHosts() {
   hostsEl.replaceChildren();
   const show = workspaces.size >= 2 || (getPrefs().hostBarAlways && workspaces.size >= 1);
   hostsEl.style.display = show ? 'flex' : 'none';
+  document.body.classList.toggle('has-hostbar', show);
   if (!show) return;
   let i = 0;
   for (const w of workspaces.values()) {

@@ -1,5 +1,22 @@
 :root {
   color-scheme: dark;
+  /* macOS glass tokens */
+  --chrome: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --bg: #080b10;
+  --text: #d5dde8;
+  --text-dim: #8b95a5;
+  --glass-bg: rgba(22, 27, 38, 0.66);
+  --glass-bg-bar: rgba(21, 26, 36, 0.78);
+  --glass-bg-strong: rgba(24, 29, 41, 0.82);
+  --glass-border: rgba(255, 255, 255, 0.09);
+  --glass-hi: rgba(255, 255, 255, 0.06);
+  --glass-blur: blur(22px) saturate(150%);
+  --glass-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
+  --hairline: rgba(255, 255, 255, 0.07);
+  --accent: #409cff;
+  --bar-inset: 56px;
+  --bar-inset-hosts: 88px;
 }
 * {
   box-sizing: border-box;
@@ -8,33 +25,52 @@ html,
 body {
   margin: 0;
   height: 100%;
-  background: #0b0e14;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--chrome);
 }
 #app {
   display: flex;
   flex-direction: column;
   height: 100vh;
 }
+/* The top bar floats over the terminal as a glass toolbar; the terminal grid
+   starts below it (#term padding), scrollback slides underneath. */
 #bar {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  z-index: 30;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
-  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: #9aa5b1;
-  background: #11151f;
-  border-bottom: 1px solid #1e2430;
+  padding: 6px 10px;
+  font: 12px var(--chrome);
+  color: var(--text-dim);
+  background: var(--glass-bg-bar);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
+}
+body.has-hostbar #bar {
+  top: 40px;
 }
 #bar .title {
-  font-weight: 600;
-  color: #c5cdd9;
+  font: 600 12px var(--chrome);
+  letter-spacing: 0.2px;
+  color: var(--text);
 }
 #meta {
-  margin-left: 12px;
-  color: #5c6773;
+  margin-left: 8px;
+  color: var(--text-dim);
+  font: 11px var(--mono);
 }
 #agents {
   cursor: pointer;
+  margin-left: auto;
 }
 .dot {
   width: 8px;
@@ -58,42 +94,44 @@ body {
   align-items: center;
 }
 .tab {
-  font: 11px ui-monospace, Menlo, monospace;
-  color: #9aa5b1;
-  background: #161b27;
-  border: 1px solid #232a38;
-  border-radius: 5px;
-  padding: 2px 8px;
+  font: 11px var(--mono);
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 3px 9px;
   cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
 }
 .tab:hover {
-  color: #c5cdd9;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.1);
 }
 .tab.active {
-  color: #0b0e14;
-  background: #3fb950;
-  border-color: #3fb950;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.17);
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.25), inset 0 1px 0 var(--glass-hi);
 }
 /* Ephemeral (raw, non-tmux) tabs: dashed + muted, to read as "throwaway". */
 .tab.ephemeral {
   border-style: dashed;
-  border-color: #6e7681;
+  border-color: rgba(255, 255, 255, 0.18);
   color: #adbac7;
 }
 .tab.ephemeral.active {
-  color: #0b0e14;
-  background: #adbac7;
-  border-color: #adbac7;
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.32);
 }
-/* Persistent native tabs (ptyd-held): solid violet accent. */
+/* Persistent native tabs (ptyd-held): violet accent. */
 .tab.persist {
-  border-color: #8957e5;
+  border-color: rgba(163, 113, 247, 0.45);
   color: #c0a7f5;
 }
 .tab.persist.active {
-  color: #0b0e14;
-  background: #a371f7;
+  color: #e6d9ff;
   border-color: #a371f7;
+  box-shadow: 0 0 10px rgba(163, 113, 247, 0.3), inset 0 1px 0 var(--glass-hi);
 }
 .tab-rename {
   width: 110px;
@@ -126,17 +164,20 @@ body {
 .confirm-bar {
   display: none;
   position: fixed;
-  top: 44px;
+  top: 64px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 40;
   align-items: center;
   gap: 10px;
   padding: 8px 14px;
-  background: #1c2128;
-  border: 1px solid #f85149;
-  border-radius: 6px;
-  color: #e6edf3;
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid rgba(248, 81, 73, 0.55);
+  border-radius: 10px;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
+  color: var(--text);
   font-size: 12px;
 }
 .confirm-bar.show {
@@ -186,9 +227,12 @@ body {
   max-width: 60%;
   max-height: 50%;
   overflow: auto;
-  background: #0d1017;
-  border: 1px solid #2f81f7;
-  border-radius: 6px;
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid rgba(64, 156, 255, 0.45);
+  border-radius: 10px;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
   padding: 4px;
   font-size: 12px;
 }
@@ -215,9 +259,12 @@ body {
   flex-direction: column;
   gap: 8px;
   overflow: auto;
-  background: #0d1017;
-  border: 1px solid #30363d;
-  border-radius: 8px;
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
   padding: 16px 20px;
 }
 .pkgs-panel.show {
@@ -231,12 +278,15 @@ body {
   flex-direction: column;
   gap: 4px;
   overflow: auto;
-  background: #0d1017;
-  border: 1px solid #30363d;
-  border-radius: 8px;
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
   padding: 16px 20px;
   font-size: 12px;
-  color: #c5cdd9;
+  color: var(--text);
 }
 .settings-panel.show {
   display: flex;
@@ -263,12 +313,13 @@ body {
   font-size: 11px;
 }
 .pkgs-card {
-  border: 1px solid #1e2430;
-  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
   gap: 6px;
+  background: rgba(255, 255, 255, 0.03);
 }
 .pkgs-card-head {
   display: flex;
@@ -290,21 +341,22 @@ body {
 .pkgs-btn {
   align-self: flex-start;
   padding: 3px 12px;
-  border-radius: 4px;
-  border: 1px solid #30363d;
-  background: #21262d;
-  color: #e6edf3;
+  border-radius: 8px;
+  border: 1px solid var(--hairline);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
   cursor: pointer;
   font: inherit;
   font-size: 12px;
+  transition: background 0.12s ease, border-color 0.12s ease;
 }
 .pkgs-btn.primary {
-  border-color: #2f81f7;
-  color: #2f81f7;
-  background: transparent;
+  border-color: rgba(64, 156, 255, 0.55);
+  color: var(--accent);
+  background: rgba(64, 156, 255, 0.14);
 }
 .pkgs-btn:hover:not(:disabled) {
-  background: #30363d;
+  background: rgba(255, 255, 255, 0.12);
 }
 .pkgs-btn:disabled {
   opacity: 0.6;
@@ -316,17 +368,18 @@ body {
 }
 .pkgs-search-input {
   flex: 1;
-  padding: 5px 10px;
-  border-radius: 4px;
-  border: 1px solid #30363d;
-  background: #161b22;
-  color: #e6edf3;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--hairline);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
   font: inherit;
   font-size: 12px;
   outline: none;
+  transition: border-color 0.12s ease;
 }
 .pkgs-search-input:focus {
-  border-color: #2f81f7;
+  border-color: rgba(64, 156, 255, 0.6);
 }
 .pkgs-badge {
   font-size: 10px;
@@ -360,7 +413,9 @@ body {
   position: fixed;
   inset: 0;
   z-index: 50;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(4, 6, 10, 0.5);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
   align-items: center;
   justify-content: center;
   cursor: pointer;
@@ -369,14 +424,17 @@ body {
   display: flex;
 }
 .help-card {
-  background: #0d1017;
-  border: 1px solid #30363d;
-  border-radius: 8px;
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
   padding: 18px 24px;
   max-height: 80vh;
   overflow: auto;
   font-size: 12px;
-  color: #e6edf3;
+  color: var(--text);
 }
 .help-card h2 {
   margin: 0 0 10px;
@@ -404,17 +462,19 @@ body {
   white-space: nowrap;
 }
 .barbtn {
-  font: 11px ui-monospace, Menlo, monospace;
-  color: #9aa5b1;
-  background: #161b27;
-  border: 1px solid #232a38;
-  border-radius: 5px;
-  padding: 2px 7px;
+  font: 11px var(--mono);
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 3px 8px;
   cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 .barbtn:hover {
-  color: #c5cdd9;
-  border-color: #2f81f7;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.14);
 }
 /* The notification bell: lit when armed, struck through when the OS/browser
    has notifications blocked. */
@@ -429,28 +489,30 @@ body {
 
 /* Agent-status badges on window tabs + a glance summary in the bar. */
 #agents {
-  margin-left: auto;
-  font: 11px ui-monospace, Menlo, monospace;
-  font-weight: 600;
+  margin-left: 0;
+  font: 600 11px var(--mono);
   color: #d6a04c;
 }
 .adot {
   display: inline-block;
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  margin-right: 6px;
+  margin-right: 5px;
   vertical-align: middle;
   background: #5c6773;
 }
 .agent-running {
-  background: #2f81f7;
+  background: var(--accent);
+  box-shadow: 0 0 6px rgba(64, 156, 255, 0.7);
 }
 .agent-done {
   background: #3fb950;
+  box-shadow: 0 0 6px rgba(63, 185, 80, 0.55);
 }
 .agent-waiting {
   background: #d6a04c;
+  box-shadow: 0 0 6px rgba(214, 160, 76, 0.65);
   animation: mymux-pulse 1.2s ease-in-out infinite;
 }
 @keyframes mymux-pulse {
@@ -463,13 +525,19 @@ body {
   }
 }
 
-/* ⌘E code overlay: file tree + CodeMirror editor. */
+/* ⌘E code overlay: file tree + CodeMirror editor, as a glass sheet. */
 .code-panel {
   position: fixed;
-  inset: 0;
+  inset: 48px 4% 28px;
   z-index: 20;
   display: none;
-  background: #0b0e14;
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
+  overflow: hidden;
 }
 .code-panel.show {
   display: flex;
@@ -477,8 +545,8 @@ body {
 .code-side {
   flex: 0 0 260px;
   overflow: auto;
-  background: #0d1017;
-  border-right: 1px solid #1e2430;
+  background: rgba(255, 255, 255, 0.02);
+  border-right: 1px solid var(--hairline);
 }
 .code-side-hd,
 .code-hd {
@@ -486,15 +554,32 @@ body {
   justify-content: space-between;
   gap: 12px;
   padding: 8px 12px;
-  font: 11px ui-monospace, Menlo, monospace;
-  color: #9aa5b1;
-  border-bottom: 1px solid #1e2430;
+  font: 11px var(--mono);
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--hairline);
 }
 .code-main {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+.code-main .code-editor {
+  background: rgba(5, 8, 12, 0.72);
+}
+#code-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+#code-hint {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #5c6773;
 }
 /* Bounded parent; the editor's own theme sets `.cm-editor { height: 100% }`
    and `.cm-scroller { overflow: auto }`, which is what actually enables
@@ -519,9 +604,6 @@ body {
 }
 #code-path {
   color: #c5cdd9;
-}
-#code-hint {
-  color: #5c6773;
 }
 
 /* Git changes list + unified diff view. */
@@ -646,13 +728,20 @@ body {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  /* Panes start below the floating glass bar (see desiredSize); scrollback
+     slides underneath it. */
+  padding-top: var(--bar-inset);
   /* Shows through the 1-cell gaps tmux leaves between panes, as separators. */
-  background: #1c2330;
+  background: #141a24;
+}
+body.has-hostbar #term {
+  padding-top: var(--bar-inset-hosts);
 }
 .pane {
   position: absolute;
   overflow: hidden;
   background: #0b0e14;
+  border-radius: 5px;
 }
 .pane.active {
   box-shadow: inset 0 0 0 1px #2f81f7;
@@ -693,12 +782,14 @@ body {
   transform: translateX(-50%);
   display: none;
   padding: 6px 12px;
-  font: 11px ui-monospace, Menlo, monospace;
-  color: #c5cdd9;
-  background: #161b27;
-  border: 1px solid #2f81f7;
-  border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  font: 11px var(--mono);
+  color: var(--text);
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid rgba(64, 156, 255, 0.4);
+  border-radius: 999px;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
   white-space: nowrap;
   z-index: 10;
 }
@@ -706,17 +797,23 @@ body {
   display: block;
 }
 .hint b {
-  color: #2f81f7;
+  color: var(--accent);
 }
 
 /* Process-tree overlay (mini-htop): window → pane → indented process rows. */
 .proc-panel {
   position: fixed;
-  inset: 0;
+  inset: 56px 6% 40px;
   z-index: 21;
   display: none;
   flex-direction: column;
-  background: #0b0e14;
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
+  overflow: hidden;
 }
 .proc-panel.show {
   display: flex;
@@ -725,9 +822,9 @@ body {
   display: flex;
   justify-content: space-between;
   padding: 8px 12px;
-  font: 11px ui-monospace, Menlo, monospace;
-  color: #9aa5b1;
-  border-bottom: 1px solid #1e2430;
+  font: 11px var(--mono);
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--hairline);
 }
 .proc-hint {
   color: #5c6773;
@@ -823,7 +920,9 @@ body {
   display: none;
   align-items: center;
   justify-content: center;
-  background: #0b0e14;
+  background: rgba(4, 6, 10, 0.5);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
 }
 .host-panel.show {
   display: flex;
@@ -831,6 +930,12 @@ body {
 .host-inner {
   width: 420px;
   max-width: 90vw;
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -967,11 +1072,20 @@ body {
 }
 #hostbar {
   display: none; /* shown by the shell when ≥2 hosts are connected */
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  z-index: 31;
   align-items: center;
   gap: 6px;
-  padding: 5px 12px;
-  background: #0d1119;
-  border-bottom: 1px solid #1e2430;
+  padding: 4px 10px;
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
   /* Many hosts: scroll horizontally instead of wrapping/overflowing. */
   overflow-x: auto;
   scrollbar-width: thin;
@@ -985,20 +1099,23 @@ body {
   align-items: center;
   gap: 5px;
   padding: 2px 9px;
-  font: 11px ui-monospace, Menlo, monospace;
+  font: 11px var(--mono);
   color: #adbac7;
-  background: #11151d;
-  border: 1px solid #2f3947;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--hairline);
   border-radius: 999px;
   cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 .hostchip:hover {
-  border-color: #3f4b5b;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.1);
 }
 .hostchip.active {
-  color: #0b0e14;
-  background: #2f81f7;
-  border-color: #2f81f7;
+  color: #fff;
+  background: rgba(64, 156, 255, 0.28);
+  border-color: rgba(64, 156, 255, 0.6);
+  box-shadow: 0 0 8px rgba(64, 156, 255, 0.25);
 }
 .host-live {
   color: #3fb950;
@@ -1174,11 +1291,14 @@ body {
   bottom: 42px;
   transform: translateX(-50%) translateY(6px);
   padding: 8px 14px;
-  font: 12px ui-monospace, Menlo, monospace;
-  color: #c5cdd9;
-  background: #161b27;
-  border: 1px solid #2f3947;
-  border-radius: 8px;
+  font: 12px var(--mono);
+  color: var(--text);
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s ease, transform 0.15s ease;
@@ -1197,10 +1317,14 @@ body {
   transform: translateX(-50%);
   z-index: 5;
   padding: 4px 12px;
-  font: 11px ui-monospace, Menlo, monospace;
-  color: #0b0e14;
-  background: #d6a04c;
-  border-radius: 6px;
+  font: 11px var(--mono);
+  color: #ffe9c4;
+  background: rgba(214, 160, 76, 0.32);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(214, 160, 76, 0.5);
+  border-radius: 999px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
   pointer-events: none;
 }
 
@@ -1214,26 +1338,28 @@ body {
   max-width: 80vw;
   display: flex;
   flex-direction: column;
-  background: #11151d;
-  border: 1px solid #2f3947;
-  border-radius: 8px;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-hi);
   overflow: hidden;
   z-index: 5;
 }
 .qopen-input {
   padding: 10px 12px;
-  background: #0d1017;
+  background: transparent;
   border: 0;
-  border-bottom: 1px solid #1e2430;
-  color: #e6edf3;
-  font: 13px ui-monospace, Menlo, monospace;
+  border-bottom: 1px solid var(--hairline);
+  color: var(--text);
+  font: 13px var(--mono);
   outline: none;
 }
 .qopen-list {
   max-height: 320px;
   overflow: auto;
-  font: 12px/1.7 ui-monospace, Menlo, monospace;
+  font: 12px/1.7 var(--mono);
 }
 .qopen-row {
   padding: 2px 12px;
@@ -1244,11 +1370,11 @@ body {
   text-overflow: ellipsis;
 }
 .qopen-row:hover {
-  background: #161b27;
+  background: rgba(255, 255, 255, 0.05);
 }
 .qopen-row.sel {
-  background: #1c2433;
-  color: #e6edf3;
+  background: rgba(64, 156, 255, 0.2);
+  color: #fff;
 }
 .qopen-empty {
   padding: 10px 12px;

@@ -271,7 +271,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       <div class="code-tree" id="code-tree"></div>
     </div>
     <div class="code-main">
-      <div class="code-hd"><span id="code-path">no file open</span><span id="code-hint">⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close</span></div>
+      <div class="code-hd"><span id="code-path">no file open</span><span id="code-hint" title="⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close">⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close</span></div>
       <div class="code-bufs" id="code-bufs"></div>
       <div class="code-editor" id="code-editor"></div>
       <div class="code-diff" id="code-diff"></div>
