@@ -1,6 +1,7 @@
 import '@xterm/xterm/css/xterm.css';
 import './style.css';
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { measureCell } from './metrics';
 import type { CodePanel, CodePanelOpts } from './code';
 import { initProcPanel } from './proc';
@@ -8,6 +9,7 @@ import { initPkgsPanel } from './pkgs';
 import { initHostManager } from './hostmanager';
 import { Workspace, WinInfo, WsState } from './workspace';
 import { ACTIONS, directAction, leaderAction, helpRows, KeyDeps } from './keymap';
+import { initNotify } from './notify';
 
 // The shell: a registry of per-host Workspaces (each owns its WS + panes; see
 // workspace.ts), the shared bar (host chips / window tabs / agent counts), the
@@ -41,6 +43,7 @@ const isTauri = '__TAURI_INTERNALS__' in window || '__TAURI__' in window;
 
 interface Prefs {
   hostBarAlways?: boolean;
+  notify?: boolean;
 }
 function loadPrefs(): Prefs {
   try {
@@ -99,6 +102,21 @@ function updateQueue(w: Workspace) {
   attentionQueue.sort((a, b) => a.since - b.since);
 }
 
+// Bring the user to a specific window on a specific host: app focus (app
+// only), host switch, window select, and keyboard focus on the target pane.
+function jumpTo(t: { hostId: string; windowId: number; paneId?: number }) {
+  // Lazy: getCurrentWindow() reads Tauri internals that don't exist in a
+  // plain browser, so it must only run in the app.
+  if (isTauri) void getCurrentWindow().setFocus();
+  const w = workspaces.get(t.hostId);
+  if (!w) return;
+  if (w !== activeWs) switchTo(w.id);
+  w.sendJson({ t: 'select_window', id: t.windowId });
+  // Land keyboard focus on the agent's pane (no manual click). The daemon
+  // orders this after the window switch; the resulting state focuses locally.
+  if (t.paneId != null) w.sendJson({ t: 'focus', pane: t.paneId });
+}
+
 // Jump to the oldest item that isn't the window you're already looking at.
 function jumpToAttention() {
   attentionQueue = attentionQueue.filter((e) => workspaces.has(e.hostId));
@@ -113,12 +131,7 @@ function jumpToAttention() {
     );
     return;
   }
-  const w = workspaces.get(entry.hostId)!;
-  if (w !== activeWs) switchTo(w.id);
-  w.sendJson({ t: 'select_window', id: entry.windowId });
-  // Land keyboard focus on the agent's pane (no manual click). The daemon
-  // orders this after the window switch; the resulting state focuses locally.
-  if (entry.paneId != null) w.sendJson({ t: 'focus', pane: entry.paneId });
+  jumpTo(entry);
 }
 
 // Transient notice (bottom center, auto-fades).
@@ -288,6 +301,7 @@ function ensureWorkspace(id: string, label: string, port: number): Workspace {
     hooks: {
       onUpdate(w) {
         updateQueue(w);
+        notifier.watch(w);
         if (w === activeWs) {
           renderTabs(w);
           updateMeta();
@@ -344,6 +358,7 @@ function endWorkspace(w: Workspace, disconnectTunnel: boolean) {
   workspaces.delete(w.id);
   saveOpenHosts();
   attentionQueue = attentionQueue.filter((e) => e.hostId !== w.id);
+  notifier.forget(w.id);
   w.destroy();
   if (disconnectTunnel && isTauri) {
     void invoke('disconnect', { host_id: w.id }).catch(() => {});
@@ -633,6 +648,34 @@ function togglePlugins() {
 document.getElementById('btn-code')?.addEventListener('click', toggleCode);
 document.getElementById('btn-proc')?.addEventListener('click', toggleProc);
 document.getElementById('btn-pkgs')?.addEventListener('click', togglePlugins);
+
+// Agent attention notifications (see notify.ts): the bell arms a system-level
+// alert for agents that enter waiting/done while the app is unfocused. Off by
+// default — enabling asks the OS/browser for permission (which needs this
+// user gesture anyway).
+const notifier = initNotify({
+  isTauri,
+  jumpTo,
+  hostLabel: (id) => workspaces.get(id)?.label ?? id,
+  getEnabled: () => prefs.notify === true,
+  setEnabled: (v) => savePrefs({ ...prefs, notify: v }),
+});
+const notifyBtn = document.getElementById('btn-notify')!;
+function renderNotifyBtn() {
+  const s = notifier.state();
+  notifyBtn.classList.toggle('on', s === 'on');
+  notifyBtn.classList.toggle('denied', s === 'denied');
+  notifyBtn.title =
+    s === 'on'
+      ? 'Agent notifications ON — waiting/done agents alert you while unfocused (click to mute)'
+      : s === 'denied'
+        ? 'Notifications are blocked — allow them in the browser/OS site settings first'
+        : 'Agent notifications OFF — click to get alerted when an agent needs you';
+}
+notifyBtn.addEventListener('click', () => {
+  void notifier.toggle().then(renderNotifyBtn);
+});
+renderNotifyBtn();
 
 // ---- keybindings — dispatch driven by the keymap tables (see keymap.ts) -------
 

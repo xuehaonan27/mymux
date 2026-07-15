@@ -188,15 +188,19 @@ Window tabs are badged by each agent's state, so you glance instead of polling:
 Wire your agents to report state (one-time, on the dev box where they run):
 
 ```sh
-scripts/install-claude-hooks.sh     # Claude Code: merges hooks non-destructively
-scripts/install-codex-notify.sh     # Codex: points `notify` at the reporter
+scripts/install-claude-hooks.sh      # Claude Code: merges hooks non-destructively
+scripts/install-codex-notify.sh      # Codex: points `notify` at the reporter
+scripts/install-kimi-hooks.sh        # Kimi Code: appends [[hooks]] to config.toml
+scripts/install-opencode-plugin.sh   # Open Code: drops a plugin in ~/.config/opencode
 ```
 
 Under the hood the hooks run `scripts/mymux-agent-report.sh <state>`, which `GET`s
 `/agent?pane=…&state=…`, resolving the pane from `$TMUX_PANE` (tmux) or `$MYMUX_PANE`
 (a raw `⌁` shell) — so agents in **either** pane type badge their tab. Codex's
 `notify` only fires on turn-complete, so it reports *done* and leaves *running* to
-the heuristic (a stale *done* clears the moment the pane emits output again).
+the heuristic (a stale *done* clears the moment the pane emits output again). Kimi
+Code reports precisely (`UserPromptSubmit` / `PermissionRequest` / `Stop`), as does
+the Open Code plugin (`permission.asked` / `session.idle`).
 
 Panes **without** hooks fall back to output heuristics: a backgrounded full-screen
 app badges *running* while active, *done* when it goes quiet, *waiting* if it rang
@@ -209,6 +213,19 @@ the oldest one — keyboard focus lands **directly on the agent's pane**. Deal
 with it and press again for the next. Entries clear themselves — answering flips
 *waiting* back to *running*, and focusing clears *done*. When nothing is pending
 you get a small "All clear — no agent needs you right now."
+
+**Notifications (the `bell` button)**: click `bell` in the bar once to arm
+system-level alerts. From then on, when an agent window enters *waiting* (needs
+your decision) or *done* while mymux is **unfocused**, you get a real
+notification — in the desktop app via the **Mac Notification Center** (Tauri
+plugin; macOS asks for permission once), in a browser via the Notification API
+(which macOS browsers route through Notification Center too). Clicking it
+focuses mymux and lands you on the agent's pane, like ⌘J. Alerts fire only on
+state **transitions** (no repeat nagging while a state persists) and only while
+unfocused — when you're looking at mymux, the badges and the attention queue
+already say it. The app (or browser tab) must be running: a closed app can't
+notify. The button shows a struck-through bell if the OS/browser has
+notifications blocked — allow them in the site/app settings first.
 
 ## Code & git (⌘E)
 

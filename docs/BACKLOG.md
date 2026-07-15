@@ -118,8 +118,21 @@ principle):
 - Staged vs unstaged diff toggle; jump from a diff to editing that file inline.
 
 ## Agents (M3)
+- ~~Agent attention notifications~~ — **DONE 2026-07-15**: a `bell` toggle in
+  the bar arms system-level alerts on TRANSITIONS into waiting/done while the
+  app is unfocused (Tauri notification plugin in the desktop app — **Mac
+  verify pending**; browser Notification API otherwise, which macOS browsers
+  route through Notification Center). Click focuses mymux and lands on the
+  agent's pane. Verified headless: transition/dedup/focus-suppression against
+  a live daemon. Wiring shipped for the other two agents too: Kimi Code
+  `[[hooks]]` (UserPromptSubmit/PermissionRequest/Stop) and an Open Code
+  plugin (permission.asked/session.idle) — both now report precisely instead
+  of leaning on heuristics.
 - Codex `notify` snippet + a real end-to-end test.
 - Per-window "since" / last-activity, shown in a tooltip.
+- Native-pane heuristic nuance: `run_heuristics` takes its `active` set from
+  the tmux model, so native views have edge cases (a focused native pane can
+  badge in some contexts). No bite reported yet; revisit if it shows.
 
 ## Connectivity (M2)
 - Tauri `SSH_ASKPASS` passphrase dialog — a fallback for a passphrase-locked key

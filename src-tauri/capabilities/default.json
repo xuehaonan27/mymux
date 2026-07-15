@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Core permissions for the mymux window.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "notification:default"]
 }

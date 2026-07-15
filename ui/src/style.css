@@ -386,6 +386,16 @@ body {
   color: #c5cdd9;
   border-color: #2f81f7;
 }
+/* The notification bell: lit when armed, struck through when the OS/browser
+   has notifications blocked. */
+#btn-notify.on {
+  color: #d6a04c;
+  border-color: #d6a04c;
+}
+#btn-notify.denied {
+  text-decoration: line-through;
+  opacity: 0.55;
+}
 
 /* Agent-status badges on window tabs + a glance summary in the bar. */
 #agents {
