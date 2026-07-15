@@ -206,6 +206,27 @@ principle):
   right-click→Open until a Developer ID + notarization happens. Still open:
   a download/update channel for the dmg (GH releases vs self-hosted), and
   Developer ID signing.
+- ~~Remote uninstall from the app~~ — **DONE 2026-07-15**: the host manager
+  gains a ⌫ action per host: `scripts/mymux-uninstall-remote.sh` (embedded,
+  driven over the same russh exec channel) runs `--probe` first — a read-only,
+  TAB-row report of live work (tmux panes with foreground commands, ptyd
+  persistent shells with pids via `mymux-attach ls`), unit states, daemons,
+  and every on-disk artifact — which the UI shows as the confirmation page
+  (live shells called out in red: "uninstalling KILLS them"); only then does
+  `--yes` stop/disable the services, kill the tmux server and stray
+  processes, and remove binaries, units, `~/.local/share/mymux` (state,
+  bundle dist, pkgs), `~/.local/state/mymux` (history), `~/.local/src/mymux`,
+  logs and sockets — keeping `~/.config/mymux/env` and the linger flag
+  (both reported). Tauri commands `probe_remote`/`uninstall_remote`; a live
+  tunnel is torn down after a successful uninstall. Hardening found by the
+  docker e2e: unit files are removed even without systemd --user, `$USER`
+  falls back to `id -un`, zombies no longer count as live processes (the
+  installer's pgrep guards got the same `alive` fix, plus a startup wait for
+  the setsid race). Verified: full install→work→probe→--yes→clean cycle in a
+  ubuntu:24.04 container, probe + tmux/ptyd rows on this dev box, and a real
+  reinstall leaving ptyd pid 201 (7 days up, holding pane 3907076) untouched
+  while the new mymuxd.service re-adopted the pane. **Tauri path Mac verify
+  pending.**
 - ~~Tauri `SSH_ASKPASS` passphrase dialog~~ — **SUPERSEDED by M6**: the russh
   host manager takes the key passphrase IN the app (no ssh-agent in the
   picture at all), which was the point of the askpass fallback. Nothing left.

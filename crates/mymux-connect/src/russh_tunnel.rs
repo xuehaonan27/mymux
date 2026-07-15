@@ -331,6 +331,61 @@ async fn connect_and_serve(
 /// scripts/mymux-bootstrap.sh drives over ssh.
 const INSTALL_SCRIPT: &str = include_str!("../../../scripts/mymux-install-remote.sh");
 
+/// The box-side UNinstaller, embedded at build time. Driven two ways (see
+/// scripts/mymux-uninstall-remote.sh): `--probe` is a read-only work/artifact
+/// report that becomes the UI's "work is running" warning; `--yes` performs
+/// the removal after the user confirms.
+pub const UNINSTALL_SCRIPT: &str = include_str!("../../../scripts/mymux-uninstall-remote.sh");
+
+/// The probe report, digested for the UI: what WORK dies on uninstall, what
+/// FILES get removed, what is deliberately kept.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WorkReport {
+    /// Human-readable live work lines, e.g. "tmux main:1.0 — zsh (window: code)".
+    pub work: Vec<String>,
+    /// "mymuxd.service: active" — unit states on the host.
+    pub services: Vec<String>,
+    /// Paths the uninstall removes (binaries, units, state, history…).
+    pub artifacts: Vec<String>,
+    /// Paths deliberately left behind (env config, linger).
+    pub keeps: Vec<String>,
+}
+
+impl WorkReport {
+    pub fn has_work(&self) -> bool {
+        !self.work.is_empty()
+    }
+}
+
+/// Parse the TAB-row output of `mymux-uninstall-remote.sh --probe`. Unknown
+/// row kinds are ignored so an older app can read a newer script's report.
+pub fn parse_probe(out: &str) -> WorkReport {
+    let mut r = WorkReport::default();
+    for line in out.lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        match f.as_slice() {
+            ["pane", "tmux", ref_, cmd, win] => {
+                r.work.push(format!("tmux {ref_} — {cmd} (window: {win})"));
+            }
+            ["pane", "ptyd", short, kind, name, pid] => {
+                let label = if *kind == "∞" { "persistent shell" } else { "shell" };
+                let name = if *name == "-" { "unnamed" } else { name };
+                r.work.push(format!("{label} “{name}” ({pid}, id {short})"));
+            }
+            ["svc", unit, state] => r.services.push(format!("{unit}: {state}")),
+            ["proc", name, n] if *n != "0" => {
+                r.services.push(format!("{name}: {n} process(es) running"));
+            }
+            ["bin", p] | ["unit", p] | ["dir", p] | ["file", p] => {
+                r.artifacts.push((*p).to_string());
+            }
+            ["keep", p] => r.keeps.push((*p).to_string()),
+            _ => {}
+        }
+    }
+    r
+}
+
 /// The self-contained daemon bundle shipped to hosts whose mymuxd is missing
 /// or outdated — musl-static linux binaries + manifest, produced by
 /// scripts/build-daemon-bundle.sh and embedded at app build time. Empty when
@@ -455,5 +510,42 @@ mod tests {
         assert!(super::needs_install("mymuxd 0.1.0 (deadbeef)")); // other rev
         assert!(!super::needs_install(super::BUNDLE_VERSION)); // current
         assert!(!super::needs_install(&format!("{}\n", super::BUNDLE_VERSION)));
+    }
+
+    /// parse_probe digests the box-side script's TAB rows into UI strings,
+    /// skips noise (zero process counts) and ignores unknown row kinds.
+    #[test]
+    fn probe_parsing() {
+        let out = "pane\ttmux\tmain:1.0\tzsh\tcode\n\
+                   pane\tptyd\t1\t∞\t-\tpid 3907076\n\
+                   pane\tptyd\t7\t⌁\tbuild\tpid 42\n\
+                   svc\tmymuxd.service\tactive\n\
+                   svc\tmymux-ptyd.service\tinactive\n\
+                   proc\tmymuxd\t1\n\
+                   proc\tmymux-ptyd\t0\n\
+                   bin\t/home/u/.local/bin/mymuxd\n\
+                   dir\t/home/u/.local/share/mymux\n\
+                   keep\t/home/u/.config/mymux/env (your env/proxy settings)\n\
+                   future-row\twhatever\n";
+        let r = super::parse_probe(out);
+        assert!(r.has_work());
+        assert_eq!(r.work.len(), 3);
+        assert_eq!(r.work[0], "tmux main:1.0 — zsh (window: code)");
+        assert!(r.work[1].contains("persistent shell"));
+        assert!(r.work[1].contains("unnamed"));
+        assert!(r.work[2].contains("shell “build”"));
+        assert_eq!(r.services.len(), 3); // 2 units + 1 nonzero proc
+        assert!(!r.services.iter().any(|s| s.contains("mymux-ptyd: 0")));
+        assert_eq!(r.artifacts.len(), 2);
+        assert_eq!(r.keeps.len(), 1);
+    }
+
+    /// An empty host (nothing installed) parses to an empty report.
+    #[test]
+    fn probe_empty() {
+        let r = super::parse_probe("svc\tmymuxd.service\tnot-installed\n");
+        assert!(!r.has_work());
+        assert!(r.artifacts.is_empty());
+        assert_eq!(r.services, vec!["mymuxd.service: not-installed"]);
     }
 }

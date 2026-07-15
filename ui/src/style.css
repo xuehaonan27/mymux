@@ -1175,6 +1175,50 @@ body {
   cursor: pointer;
   font: inherit;
 }
+.host-btn.danger {
+  border-color: #f85149;
+  color: #f85149;
+  background: rgba(248, 81, 73, 0.1);
+}
+.host-btn.danger:hover:not(:disabled) {
+  background: rgba(248, 81, 73, 0.22);
+}
+.host-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+/* Remote-uninstall report: the probe's work/artifact listing. */
+.host-report {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 40vh;
+  overflow: auto;
+}
+.host-report:empty {
+  display: none;
+}
+.host-report-sec {
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--side-bg);
+}
+.host-report-h {
+  color: #e6edf3;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.host-report-h.warn {
+  color: #f85149;
+  font-weight: 600;
+}
+.host-report-line {
+  color: #9aa5b1;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 .host-btn:hover {
   border-color: #3f4b5b;
 }

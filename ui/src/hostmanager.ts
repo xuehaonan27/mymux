@@ -203,6 +203,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
       };
       const open = el('button', 'host-btn small', 'Open');
       open.onclick = main.onclick as () => void;
+      const un = uninstallBtn(h);
       const dis = el('button', 'host-icon', '⏻');
       dis.title = 'Disconnect';
       dis.onclick = async (e) => {
@@ -211,7 +212,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
         hooks.onDisconnected(h.id);
         void showList();
       };
-      card.append(open, dis);
+      card.append(open, un, dis);
     } else if (conn) {
       // A background tunnel is still trying (connecting/reconnecting): the
       // only sensible action is to stop it.
@@ -230,6 +231,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
         e.stopPropagation();
         showForm(h);
       };
+      const un = uninstallBtn(h);
       const del = el('button', 'host-icon', '✕');
       del.title = 'Delete';
       del.onclick = async (e) => {
@@ -239,9 +241,137 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
           void showList();
         }
       };
-      card.append(edit, del);
+      card.append(edit, un, del);
     }
     return card;
+  }
+
+  // ---- remote uninstall (probe → warn → --yes) ----
+  interface WorkReport {
+    work: string[];
+    services: string[];
+    artifacts: string[];
+    keeps: string[];
+  }
+
+  function uninstallBtn(h: Host): HTMLElement {
+    const un = el('button', 'host-icon', '⌫');
+    un.title = 'Uninstall mymux from this host (removes daemons, binaries and data)';
+    un.onclick = (e) => {
+      e.stopPropagation();
+      showUninstall(h);
+    };
+    return un;
+  }
+
+  function showUninstall(h: Host) {
+    statusEl = null;
+    let probed = false;
+    let busy = false;
+    const root = el('div', 'host-inner');
+    const back = el('button', 'host-back', '← hosts');
+    back.onclick = () => showList();
+    root.append(
+      back,
+      el('div', 'host-title', `Uninstall from ${h.label || h.hostname}`),
+      el('div', 'host-card-sub', `${h.user}@${h.hostname}:${h.port}`),
+    );
+    const pass = el('input', 'host-input') as HTMLInputElement;
+    pass.type = 'password';
+    pass.placeholder = 'Key passphrase';
+    const scan = el('button', 'host-btn primary', 'Scan host');
+    const unBtn = el('button', 'host-btn danger', 'Uninstall') as HTMLButtonElement;
+    unBtn.disabled = true;
+    unBtn.title = 'Scan first — you confirm after seeing what runs and what goes';
+    statusEl = el('div', 'host-status');
+    const reportBox = el('div', 'host-report');
+    root.append(pass, scan, unBtn, statusEl, reportBox);
+    panel.replaceChildren(root);
+    pass.focus();
+
+    const section = (title: string, lines: string[], warn = false): HTMLElement => {
+      const box = el('div', 'host-report-sec');
+      box.appendChild(el('div', warn ? 'host-report-h warn' : 'host-report-h', title));
+      for (const line of lines) box.appendChild(el('div', 'host-report-line', line));
+      return box;
+    };
+
+    const doScan = async () => {
+      if (busy) return;
+      busy = true;
+      probed = false;
+      unBtn.disabled = true;
+      reportBox.replaceChildren();
+      setStatus('info', 'Scanning the host (read-only)…');
+      try {
+        const r = await invoke<WorkReport>('probe_remote', {
+          host_id: h.id,
+          passphrase: pass.value,
+        });
+        probed = true;
+        unBtn.disabled = false;
+        if (r.work.length) {
+          reportBox.appendChild(
+            section(`⚠ ${r.work.length} live shell(s)/pane(s) — uninstalling KILLS them:`, r.work, true),
+          );
+        } else {
+          reportBox.appendChild(section('No live shells or panes on this host.', []));
+        }
+        if (r.services.length) reportBox.appendChild(section('Services / processes:', r.services));
+        if (r.artifacts.length) reportBox.appendChild(section('Will be removed:', r.artifacts));
+        if (r.keeps.length) reportBox.appendChild(section('Will be kept:', r.keeps));
+        if (!r.work.length && !r.artifacts.length) {
+          setStatus('info', 'mymux does not appear to be installed on this host.');
+          unBtn.disabled = true;
+        } else {
+          setStatus(
+            r.work.length ? 'warn' : 'info',
+            r.work.length
+              ? 'Review the work above — Uninstall terminates it all.'
+              : 'Safe to uninstall — nothing is running.',
+          );
+        }
+      } catch (e) {
+        setStatus('error', String(e));
+      }
+      busy = false;
+    };
+
+    const doUninstall = async () => {
+      if (busy || !probed) return;
+      busy = true;
+      unBtn.disabled = true;
+      scan.setAttribute('disabled', '');
+      setStatus('warn', 'Uninstalling — killing daemons and removing files…');
+      try {
+        const log = await invoke<string>('uninstall_remote', {
+          host_id: h.id,
+          passphrase: pass.value,
+        });
+        reportBox.replaceChildren(section('Done:', log.trim().split('\n')));
+        setStatus('info', 'Uninstalled. The host entry is kept locally — delete it with ✕ if you’re done with it.');
+        // A live tunnel to this host just lost its daemon: drop it cleanly.
+        const conns = await loadConns();
+        if (conns.has(h.id)) {
+          await invoke('disconnect', { host_id: h.id }).catch(() => {});
+          hooks.onDisconnected(h.id);
+        }
+        pass.remove();
+        scan.remove();
+        unBtn.remove();
+      } catch (e) {
+        setStatus('error', String(e));
+        unBtn.disabled = false;
+        scan.removeAttribute('disabled');
+      }
+      busy = false;
+    };
+
+    scan.onclick = doScan;
+    unBtn.onclick = doUninstall;
+    pass.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') (probed ? doUninstall : doScan)();
+    });
   }
 
   function showConnect(h: Host) {

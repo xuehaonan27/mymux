@@ -22,6 +22,18 @@ BINS="$HOME/.local/bin"
 mkdir -p "$STATE" "$BINS" "$HOME/.config/systemd/user"
 note() { printf 'mymux: %s\n' "$*"; }
 
+# Any LIVE process named $1? Prints its pid. pgrep also matches <defunct>
+# zombies (an un-reaped setsid orphan would suppress the fallback launch).
+alive() {
+  for pid in $(pgrep -x "$1" 2>/dev/null); do
+    if ! grep -q ') Z' "/proc/$pid/stat" 2>/dev/null; then
+      echo "$pid"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # ---- 1. binaries -------------------------------------------------------------
 DIST="$STATE/dist"
 if [ -f "$DIST/daemon.tgz" ]; then
@@ -142,8 +154,10 @@ if systemctl --user show-environment >/dev/null 2>&1; then
     note "mymuxd already current — left running"
   fi
 else
-  pgrep -x mymuxd >/dev/null 2>&1 || { setsid mymuxd >/tmp/mymuxd.log 2>&1 </dev/null & }
+  alive mymuxd || { setsid mymuxd >/tmp/mymuxd.log 2>&1 </dev/null & }
   note "no systemd --user — mymuxd runs detached (dies at logout)"
 fi
 echo "$NEWSHA" > "$STATE/.state-sha"
-pgrep -x mymuxd >/dev/null && note "mymuxd running (pid $(pgrep -x mymuxd | head -1))" || { echo "mymux: mymuxd is NOT running — see /tmp/mymuxd.log or journalctl --user -u mymuxd" >&2; exit 1; }
+# The setsid fallback can take a beat to fork — give the final check a moment.
+for _ in $(seq 20); do alive mymuxd >/dev/null && break; sleep 0.2; done
+alive mymuxd && note "mymuxd running (pid $(alive mymuxd))" || { echo "mymux: mymuxd is NOT running — see /tmp/mymuxd.log or journalctl --user -u mymuxd" >&2; exit 1; }

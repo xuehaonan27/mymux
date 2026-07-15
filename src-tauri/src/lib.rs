@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use mymux_connect::{config_dir, run_russh_tunnel, Host, HostStore, Status};
+use mymux_connect::{config_dir, exec_bytes, parse_probe, run_russh_tunnel, Host, HostStore, Status, WorkReport, UNINSTALL_SCRIPT};
 use serde::Serialize;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, State};
@@ -130,6 +130,63 @@ async fn disconnect(state: State<'_, ConnState>, host_id: String) -> Result<(), 
     Ok(())
 }
 
+/// Run the box-side uninstall script over a fresh SSH connection (independent
+/// of any live tunnel). `args` is "--probe" (read-only work report) or "--yes"
+/// (the destructive run, only after the UI showed the report and the user
+/// confirmed).
+async fn run_remote_uninstall(
+    host_id: &str,
+    passphrase: Option<String>,
+    args: &str,
+    limit: std::time::Duration,
+) -> Result<String, String> {
+    let host = HostStore::load(&config_dir())
+        .get(host_id)
+        .cloned()
+        .ok_or_else(|| format!("no such host: {host_id}"))?;
+    // Ports/daemon-cmd are irrelevant for a one-shot exec; host key is verified
+    // against known_hosts as usual (unknown → error tells the UI to connect
+    // once first).
+    let cfg = host.to_tunnel_config(0, 0, String::new(), false);
+    let out = exec_bytes(
+        &cfg,
+        passphrase.as_deref(),
+        &format!("bash -s -- {args}"),
+        UNINSTALL_SCRIPT.as_bytes(),
+        limit,
+    )
+    .await
+    .map_err(|s| match s {
+        Status::Error(e) => e,
+        Status::HostKeyUnknown { .. } => {
+            "host key not in known_hosts — connect to this host once (trusting its key) before uninstalling"
+                .into()
+        }
+        Status::AuthFailed => {
+            "authentication failed — wrong passphrase, or the key isn't authorized".into()
+        }
+        other => format!("remote command failed: {other:?}"),
+    })?;
+    Ok(out)
+}
+
+/// `probe_remote` — what work is running on the host and what an uninstall
+/// would remove. Read-only; the UI shows this as the confirmation page.
+#[tauri::command(rename_all = "snake_case")]
+async fn probe_remote(host_id: String, passphrase: Option<String>) -> Result<WorkReport, String> {
+    let out =
+        run_remote_uninstall(&host_id, passphrase, "--probe", std::time::Duration::from_secs(60))
+            .await?;
+    Ok(parse_probe(&out))
+}
+
+/// `uninstall_remote` — the destructive run (--yes), returning the script's
+/// own log lines for the UI to display.
+#[tauri::command(rename_all = "snake_case")]
+async fn uninstall_remote(host_id: String, passphrase: Option<String>) -> Result<String, String> {
+    run_remote_uninstall(&host_id, passphrase, "--yes", std::time::Duration::from_secs(120)).await
+}
+
 /// Connect (or re-drive: retry passphrase / trust host key) one host's tunnel.
 /// Other hosts' tunnels are untouched. Returns the local forward port — the UI
 /// points that host's workspace at `ws://127.0.0.1:<port>/ws`.
@@ -184,7 +241,9 @@ pub fn run() {
             connect,
             disconnect,
             conn_status,
-            conns_list
+            conns_list,
+            probe_remote,
+            uninstall_remote
         ])
         .run(tauri::generate_context!())
         .expect("error while running the mymux app");
