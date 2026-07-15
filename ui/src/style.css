@@ -185,6 +185,40 @@ body.has-winalpha .pane {
 body.has-winalpha {
   background: transparent;
 }
+/* Its own compositing layer, so disappearing content (shell exits, pane
+ * closes) repaints the region instead of leaving ghost pixels in the macOS
+ * transparent webview's shared backing store. */
+body.has-winalpha #term {
+  transform: translateZ(0);
+}
+
+/* The empty state: every session ended and the host picker was dismissed. */
+#empty {
+  display: none;
+  position: absolute;
+  inset: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--text-dim);
+}
+#empty.show {
+  display: flex;
+}
+.empty-title {
+  font: 600 16px var(--chrome);
+  color: var(--text);
+}
+.empty-sub {
+  font: 12px var(--chrome);
+}
+/* .pkgs-btn is align-self:flex-start (marketplace cards); center it here. */
+#empty .pkgs-btn {
+  align-self: center;
+  padding: 8px 18px;
+  font-size: 13px;
+}
 /* The vscode-fork xterm wraps the viewport in a scrollable element with an
  * INLINE black background (always, regardless of theme), and the stock
  * viewport itself carries #000 in xterm.css — the layers that blocked every

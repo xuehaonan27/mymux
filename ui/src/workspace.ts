@@ -274,6 +274,7 @@ export class Workspace {
   private applyLayout(root: LayoutNode) {
     const { cellW, cellH } = this.style;
     const seen = new Set<number>();
+    const countBefore = this.panes.size;
     const place = (n: LayoutNode) => {
       if (n.kind === 'leaf' && n.pane != null) {
         const p = this.panes.get(n.pane) ?? this.makePane(n.pane);
@@ -297,6 +298,14 @@ export class Workspace {
         p.el.remove();
         this.panes.delete(pid);
       }
+    }
+    // Transparent-window ghost buster (see main.ts forceRepaint): a removed
+    // pane's pixels can linger in the macOS compositor otherwise.
+    if (seen.size < countBefore && document.body.classList.contains('has-winalpha')) {
+      const el = this.root;
+      el.style.opacity = '0.999';
+      void el.offsetHeight;
+      el.style.opacity = '';
     }
     // The active-pane ring exists to tell SPLIT panes apart — around a single
     // full-window pane it's just an ugly frame.

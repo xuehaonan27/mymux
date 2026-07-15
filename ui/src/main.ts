@@ -110,6 +110,37 @@ const metaEl = document.getElementById('meta')!;
 const agentsEl = document.getElementById('agents')!;
 const hintEl = document.getElementById('hint')!;
 
+// The empty state: shown when every session has ended and the host picker was
+// dismissed without connecting — instead of a void window (reported bug).
+const emptyEl = document.createElement('div');
+emptyEl.id = 'empty';
+{
+  const t = document.createElement('div');
+  t.className = 'empty-title';
+  t.textContent = 'No windows';
+  const s = document.createElement('div');
+  s.className = 'empty-sub';
+  s.textContent = 'All sessions ended.';
+  const b = document.createElement('button');
+  b.className = 'pkgs-btn primary';
+  b.textContent = 'Connect to a host…';
+  b.addEventListener('click', () => hostManager?.open());
+  emptyEl.append(t, s, b);
+  termArea.appendChild(emptyEl);
+}
+function renderEmpty() {
+  emptyEl.classList.toggle('show', workspaces.size === 0);
+}
+
+/** macOS transparent-webview ghost buster: when content disappears in a
+ * translucent window, the compositor can keep the last frame (dead terminal
+ * text lingers). Nudge the layer so the region actually repaints. */
+function forceRepaint(el: HTMLElement) {
+  el.style.opacity = '0.999';
+  void el.offsetHeight; // reflow: the sub-1 opacity flip re-composites
+  el.style.opacity = '';
+}
+
 const isMac = /Mac|iPhone|iPad/.test(navigator.userAgent);
 const mod = (e: KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey);
 // Dev knob: `?port=N` points the browser UI at a throwaway daemon started
@@ -389,6 +420,7 @@ let hostManager: HostManager | null = null;
 function ensureWorkspace(id: string, label: string, port: number): Workspace {
   const existing = workspaces.get(id);
   if (existing) return existing;
+  renderEmpty(); // a workspace arriving hides the empty state
   const w = new Workspace({
     id,
     label,
@@ -459,6 +491,7 @@ function endWorkspace(w: Workspace, disconnectTunnel: boolean) {
   attentionQueue = attentionQueue.filter((e) => e.hostId !== w.id);
   notifier.forget(w.id);
   w.destroy();
+  if (document.body.classList.contains('has-winalpha')) forceRepaint(termArea);
   if (disconnectTunnel && isTauri) {
     void invoke('disconnect', { host_id: w.id }).catch(() => {});
   }
@@ -481,10 +514,12 @@ function endWorkspace(w: Workspace, disconnectTunnel: boolean) {
       ensureWorkspace('local', 'local', daemonPort);
       switchTo('local');
     }
+    renderEmpty();
     return;
   }
   renderHosts();
   renderAgents();
+  renderEmpty();
 }
 
 // ---- shared bar rendering ----------------------------------------------------
@@ -847,6 +882,7 @@ onPrefsChange(() => {
 });
 applyTheme(getPrefs().theme); // boot: dataset + (no workspaces yet, but code panel later reads prefs)
 applyBackground();
+renderEmpty(); // boot with no workspace (Tauri gate) shows the empty state
 
 // ---- keybindings — dispatch driven by the keymap tables (see keymap.ts) -------
 
