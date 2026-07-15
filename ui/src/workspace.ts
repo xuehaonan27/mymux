@@ -297,6 +297,82 @@ export class Workspace {
         this.panes.delete(pid);
       }
     }
+    this.renderDividers(root);
+  }
+
+  // Split dividers: hit areas along every internal layout boundary. Dragging
+  // one shows a ghost line and sends ONE resize on release — the daemon
+  // rebroadcasts the new layout, which is what actually moves the panes.
+  private dividerDrag: { start: number; delta: number } | null = null;
+
+  private renderDividers(root: LayoutNode) {
+    if (this.dividerDrag) return; // a drag owns its ghost right now
+    this.root.querySelectorAll('.divider').forEach((d) => d.remove());
+    if (this.zoomed) return; // a zoomed window shows a single pane
+    const { cellW, cellH } = this.style;
+    // The resize target for a boundary: the leaf flush against its left/top
+    // side (the deepest leaf of the left/top subtree in that direction).
+    const edgeLeaf = (n: LayoutNode): number | null => {
+      if (n.kind === 'leaf') return n.pane ?? null;
+      const kids = n.children ?? [];
+      return kids.length ? edgeLeaf(kids[kids.length - 1]) : null;
+    };
+    const walk = (n: LayoutNode) => {
+      if (!n.children) return;
+      const cols = n.kind === 'cols';
+      const rows = n.kind === 'rows';
+      if ((cols || rows) && n.children.length > 1) {
+        const dir = cols ? 'right' : 'down';
+        for (let i = 0; i + 1 < n.children.length; i++) {
+          const c = n.children[i];
+          const pane = edgeLeaf(c);
+          if (pane == null) continue;
+          const d = document.createElement('div');
+          d.className = cols ? 'divider divider-v' : 'divider divider-h';
+          if (cols) {
+            d.style.left = `${(c.x + c.w) * cellW - 2}px`;
+            d.style.top = `${c.y * cellH}px`;
+            d.style.height = `${c.h * cellH}px`;
+          } else {
+            d.style.left = `${c.x * cellW}px`;
+            d.style.top = `${(c.y + c.h) * cellH - 2}px`;
+            d.style.width = `${c.w * cellW}px`;
+          }
+          d.addEventListener('pointerdown', (e) => this.startDividerDrag(e, d, dir, pane));
+          this.root.appendChild(d);
+        }
+      }
+      n.children.forEach(walk);
+    };
+    walk(root);
+  }
+
+  private startDividerDrag(e: PointerEvent, el: HTMLDivElement, dir: 'right' | 'down', pane: number) {
+    if (e.button !== 0) return;
+    e.preventDefault(); // no text selection while dragging
+    el.setPointerCapture(e.pointerId);
+    const start = dir === 'right' ? e.clientX : e.clientY;
+    const drag = { start, delta: 0 };
+    this.dividerDrag = drag;
+    el.classList.add('drag');
+    const move = (ev: PointerEvent) => {
+      drag.delta = (dir === 'right' ? ev.clientX : ev.clientY) - start;
+      el.style.transform = dir === 'right' ? `translateX(${drag.delta}px)` : `translateY(${drag.delta}px)`;
+    };
+    const up = (ev: PointerEvent) => {
+      move(ev);
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+      const { cellW, cellH } = this.style;
+      const cells = Math.round(drag.delta / (dir === 'right' ? cellW : cellH));
+      this.dividerDrag = null;
+      el.classList.remove('drag');
+      if (cells !== 0) this.sendJson({ t: 'resize_pane', pane, dir, cells });
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
   }
 
   private makePane(id: number): Pane {

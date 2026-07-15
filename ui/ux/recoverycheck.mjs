@@ -1,0 +1,12 @@
+import { chromium } from 'playwright-core';
+const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+await page.goto(UI, { waitUntil: 'domcontentloaded' });
+await page.waitForSelector('.xterm', { timeout: 25000 });
+await page.waitForTimeout(2000);
+const meta = await page.evaluate(() => document.getElementById('meta').textContent);
+const wins = Number((meta.match(/(\d+) win/) || [])[1]);
+console.log(`${wins === 1 ? '✓' : '✗ FAIL'} after ptyd death: re-bootstrap + re-boot (meta: ${meta})`);
+await browser.close();
+process.exit(wins === 1 ? 0 : 1);

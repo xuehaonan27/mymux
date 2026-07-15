@@ -79,6 +79,11 @@ enum ClientMsg {
         id: u32,
         to: usize,
     },
+    ResizePane {
+        pane: u32,
+        dir: String,
+        cells: i32,
+    },
 }
 
 /// Prepend the pane id as a 4-byte LE header to a payload.
@@ -187,6 +192,9 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
                             ClientMsg::DemoteWindow { id } => hub.demote_window(id).await,
                             ClientMsg::ReorderWindow { id, to } => {
                                 hub.reorder_window(id, to).await
+                            }
+                            ClientMsg::ResizePane { pane, dir, cells } => {
+                                hub.resize_pane(pane, dir, cells).await
                             }
                         }
                     }

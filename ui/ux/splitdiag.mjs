@@ -1,0 +1,15 @@
+import { chromium } from 'playwright-core';
+const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+page.on('pageerror', (e) => console.error('[pageerror]', e.message));
+await page.goto(UI, { waitUntil: 'domcontentloaded' });
+await page.waitForSelector('.xterm', { timeout: 20000 });
+await page.waitForTimeout(1500);
+console.log('before:', await page.evaluate(() => document.getElementById('meta').textContent));
+await page.keyboard.press('Control+d');
+await page.waitForTimeout(2000);
+console.log('after ⌘D:', await page.evaluate(() => document.getElementById('meta').textContent));
+console.log('panes:', await page.evaluate(() => document.querySelectorAll('.pane').length));
+console.log('dividers:', await page.evaluate(() => document.querySelectorAll('.divider').length));
+await browser.close();

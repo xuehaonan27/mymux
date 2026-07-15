@@ -112,6 +112,51 @@ fn w_or_h_sum(children: &[LayoutCell], cols: bool) -> u32 {
         .sum()
 }
 
+fn contains_pane(cell: &LayoutCell, target: u32) -> bool {
+    match &cell.kind {
+        CellKind::Leaf(p) => p.0 == target,
+        CellKind::Cols(c) | CellKind::Rows(c) => c.iter().any(|x| contains_pane(x, target)),
+    }
+}
+
+/// Shift the split boundary nearest to `target` in direction `dir`
+/// ('right' | 'down') by `cells` cells (positive grows the target's side;
+/// the divider drag always targets the boundary's left/top leaf). Space is
+/// preserved: the delta is taken from the next sibling, both stay ≥ 1 cell.
+fn resize_boundary(cell: &mut LayoutCell, target: u32, dir: &str, cells: i32) -> bool {
+    let horizontal = dir == "right";
+    let (cols_kind, children) = match &mut cell.kind {
+        CellKind::Leaf(_) => return false,
+        CellKind::Cols(c) => (true, c),
+        CellKind::Rows(c) => (false, c),
+    };
+    let Some(i) = children.iter().position(|c| contains_pane(c, target)) else {
+        return false;
+    };
+    if cols_kind == horizontal && i + 1 < children.len() {
+        let (iw, nw) = if horizontal {
+            (children[i].w as i32, children[i + 1].w as i32)
+        } else {
+            (children[i].h as i32, children[i + 1].h as i32)
+        };
+        let d = cells.clamp(-(iw - 1), nw - 1);
+        if d != 0 {
+            let (rx, ry, rw, rh) = (cell.x, cell.y, cell.w, cell.h);
+            if horizontal {
+                children[i].w = (iw + d) as u16;
+                children[i + 1].w = (nw - d) as u16;
+            } else {
+                children[i].h = (iw + d) as u16;
+                children[i + 1].h = (nw - d) as u16;
+            }
+            // Weights unchanged in total → the boundary moves by exactly d.
+            scale_to(cell, rx, ry, rw, rh);
+        }
+        return true;
+    }
+    resize_boundary(&mut children[i], target, dir, cells)
+}
+
 /// Replace the target leaf with a split of [old, new]. When the enclosing
 /// container already runs in the same direction, splice instead of nesting
 /// (tmux-style flattening).
@@ -405,6 +450,23 @@ impl NativeWindows {
             .into_iter()
             .map(|(p, c)| (p, c.w, c.h))
             .collect()
+    }
+
+    /// Drag a divider: shift the split boundary adjacent to `pane` in `dir`
+    /// by `cells`; returns every pane's new size so the caller can push them
+    /// to ptyd. None when the pane (or a suitable boundary) doesn't exist.
+    pub fn resize_pane(&mut self, pane: u32, dir: &str, cells: i32) -> Option<Vec<(u32, u16, u16)>> {
+        let win = self.window_of(pane)?;
+        let w = self.wins.get_mut(&win)?;
+        if !resize_boundary(&mut w.root, pane, dir, cells) {
+            return None;
+        }
+        Some(
+            leaves_of(&w.root)
+                .into_iter()
+                .map(|(p, c)| (p, c.w, c.h))
+                .collect(),
+        )
     }
 
     /// Geometric pane navigation: nearest neighbour with edge overlap.
@@ -822,5 +884,37 @@ mod tests {
         let mut solo = NativeWindows::default();
         solo.add_single(P1, String::new(), 80, 24);
         assert!(solo.swap(P1, true).is_none());
+    }
+
+    #[test]
+    fn resize_pane_shifts_the_boundary_and_preserves_totals() {
+        let mut nw = NativeWindows::default();
+        nw.add_single(P1, String::new(), 80, 24);
+        nw.split(P1, true, P2); // cols: P1 left (40), P2 right (40)
+        nw.split(P2, false, P3); // P2 splits vertically into P2/P3 rows
+        let before = rects(&nw, P1);
+        let (w1, w2, h2, h3) = (before[&P1].2, before[&P2].2, before[&P2].3, before[&P3].3);
+        assert_eq!(w1 + w2, 80);
+
+        // Grow P1 right by 5 cells: P2's side shrinks; totals preserved.
+        nw.resize_pane(P1, "right", 5).unwrap();
+        let after = rects(&nw, P1);
+        assert_eq!(after[&P1].2, w1 + 5);
+        assert_eq!(after[&P2].2 + after[&P1].2, 80, "width total preserved");
+        // Clamp: can't shrink the neighbour below 1 cell.
+        nw.resize_pane(P1, "right", 1000).unwrap();
+        let clamped = rects(&nw, P1);
+        assert_eq!(clamped[&P2].2 + clamped[&P1].2, 80, "still exact after clamp");
+        assert!(clamped[&P2].2 >= 1);
+        // Vertical: grow P2 down by 2.
+        nw.resize_pane(P2, "down", 2).unwrap();
+        let v = rects(&nw, P1); // the window holding P2/P3 is P1
+        assert_eq!(v[&P2].3, h2 + 2);
+        assert_eq!(v[&P2].3 + v[&P3].3, h2 + h3, "height total preserved");
+        // Unknown pane / no boundary: None.
+        assert!(nw.resize_pane(999_999, "right", 1).is_none());
+        let mut solo = NativeWindows::default();
+        solo.add_single(P1, String::new(), 80, 24);
+        assert!(solo.resize_pane(P1, "right", 1).is_none());
     }
 }

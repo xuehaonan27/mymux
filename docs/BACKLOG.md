@@ -268,7 +268,14 @@ Native ∞ windows are the default; keep closing the gap to a great daily driver
   `reorder_window`, the daemon owns one global `tab_order` for both engines
   and rides it in the ptyd blob. Harness check (ui/ux/dragcheck.mjs): drag
   reorders the DOM and the order survives a page reload.
-- Drag the split divider to resize panes (UI + a `resize_leaf` verb).
+- ~~Drag the split divider to resize panes~~ — **DONE 2026-07-15**: every
+  layout boundary gets a 5px hit area (col/row cursors); dragging shows a
+  ghost line and releases ONE `resize_pane` (left/top leaf + dir + signed
+  cells). Native: `resize_boundary` edits the tree with exact totals
+  preserved (unit test), ptyd gets the new sizes, the blob persists it;
+  tmux: `resize-pane -R/-L/-D/-U` passthrough. Zoomed windows render no
+  dividers. Harness (ui/ux/resizecheck.mjs): col and row drags change the
+  daemon-driven rects, rounding stays within a cell.
 - ~~Unlimited history~~ — **DONE 2026-07-03** via raw per-pane output logs in
   ptyd (`$XDG_STATE_HOME/mymux/history/<short>-<pid>.log`, ANSI included,
   64 MB cap + one rotation, `MYMUX_HISTORY=0` opt-out, `MYMUX_HISTORY_CAP`
