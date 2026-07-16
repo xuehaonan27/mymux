@@ -22,6 +22,8 @@ use tokio::sync::{broadcast, mpsc};
 enum Ev {
     Output { id: u32, data: Vec<u8> },
     Exit { id: u32 },
+    /// The pane's grid flipped into/out of the alternate screen.
+    Alt { id: u32, on: bool },
 }
 
 struct Pane {
@@ -199,6 +201,18 @@ fn handle_req(req: Req, store: &Arc<Store>, out: &mpsc::UnboundedSender<(u8, Vec
                                 break;
                             }
                         }
+                        Ok(Ev::Alt { id, on }) => {
+                            let ev = Event {
+                                ev: if on { "alt_on".into() } else { "alt_off".into() },
+                                id,
+                            };
+                            if out
+                                .send((KIND_JSON, serde_json::to_vec(&ev).unwrap_or_default()))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
@@ -307,6 +321,7 @@ fn handle_req(req: Req, store: &Arc<Store>, out: &mpsc::UnboundedSender<(u8, Vec
                         cols,
                         rows,
                         ephemeral: Some(p.ephemeral.load(std::sync::atomic::Ordering::Relaxed)),
+                        alt: Some(p.grid.lock().unwrap().alt_screen()),
                     }
                 })
                 .collect();
@@ -382,19 +397,28 @@ fn spawn_pane(
     });
     store.panes.lock().unwrap().insert(id, pane);
 
-    // Reader thread: pty → grid + broadcast + raw history log; on EOF drop
-    // the pane and announce.
+    // Reader thread: pty → grid (+ alt flips) → broadcast + raw history log;
+    // on EOF drop the pane and announce.
     let store2 = store.clone();
     let mut hist = HistLog::open(id, pid);
     std::thread::spawn(move || {
         let mut reader = reader;
         let mut buf = [0u8; 8192];
+        let mut last_alt = false;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     let chunk = &buf[..n];
-                    grid.lock().unwrap().feed(chunk);
+                    let on = {
+                        let mut g = grid.lock().unwrap();
+                        g.feed(chunk);
+                        g.alt_screen()
+                    };
+                    if on != last_alt {
+                        last_alt = on;
+                        let _ = store2.events.send(Ev::Alt { id, on });
+                    }
                     if let Some(h) = hist.as_mut() {
                         h.write(chunk);
                     }

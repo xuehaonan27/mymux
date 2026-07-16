@@ -158,6 +158,14 @@ impl Persist {
                             );
                         }
                     }
+                    // A daemon-down alt flip is lost by nature; the adopt fixes
+                    // the heuristics' view (an old ptyd reports `alt: None`,
+                    // leaving the byte-scan as the only lane — same as before).
+                    for p in &panes {
+                        if let Some(on) = p.alt {
+                            hub.note_alt(p.id, on);
+                        }
+                    }
                     {
                         let mut n = self.next.lock().unwrap();
                         let max_low = panes.iter().map(|p| p.id & 0x3fff_ffff).max().unwrap_or(0);
@@ -292,6 +300,11 @@ async fn pump(hub: Arc<Hub>, mut events: mpsc::UnboundedReceiver<PtydEvent>) {
             }
             PtydEvent::Exit { id } => {
                 hub.clone().native_exited(id).await;
+            }
+            PtydEvent::Alt { id, on } => {
+                // Authoritative alt state (chunk-split safe, 1047/1048 also
+                // covered) — complements the note_output byte-scan.
+                hub.note_alt(id, on);
             }
             PtydEvent::Closed => {
                 hub.persist_disconnected().await;

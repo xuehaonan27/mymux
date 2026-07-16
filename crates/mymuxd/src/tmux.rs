@@ -65,6 +65,37 @@ struct PaneHeur {
     alt: bool,
     last_activity: Instant,
     last_bell: Option<Instant>,
+    /// Bell scanning state: inside an OSC (`ESC ] … BEL|ST`)? OSC payload
+    /// BELs are the TITLE STRING's terminator, not an attention bell — a
+    /// fancy shell prompt would otherwise "ring" on every redraw.
+    in_osc: bool,
+}
+
+/// Scan one output chunk for an ATTENTION bell: a 0x07 outside any OSC
+/// (split-tolerant via the entry's in_osc carry).
+fn scan_bell(in_osc: &mut bool, mut rest: &[u8]) -> bool {
+    loop {
+        if *in_osc {
+            if let Some(i) = rest.windows(2).position(|w| w == b"\x1b\\") {
+                *in_osc = false; // ST terminates the OSC
+                rest = &rest[i + 2..];
+                continue;
+            }
+            match rest.iter().position(|&b| b == 0x07) {
+                // BEL inside OSC (usually the terminator) — consumed, not a bell.
+                Some(i) => {
+                    *in_osc = false;
+                    rest = &rest[i + 1..];
+                }
+                None => return false,
+            }
+        } else if let Some(i) = rest.windows(2).position(|w| w == b"\x1b]") {
+            *in_osc = true;
+            rest = &rest[i..];
+        } else {
+            return rest.contains(&0x07);
+        }
+    }
 }
 
 /// Agent badges (hook + heuristic) plus the raw signals heuristics use.
@@ -940,21 +971,36 @@ impl Hub {
         self.emit(ServerEvent::State(self.state_json()));
     }
 
+    /// ptyd's authoritative alt-screen report (chunk-split safe, covers the
+    /// 1047/1048 flavors the note_output byte-scan doesn't). Just updates the
+    /// heuristic signal; the 2s sweep turns it into badges.
+    pub(crate) fn note_alt(&self, pane: u32, on: bool) {
+        let mut agents = self.agents.lock().unwrap();
+        agents.heur.entry(pane).or_insert(PaneHeur {
+            alt: false,
+            last_activity: Instant::now(),
+            last_bell: None,
+            in_osc: false,
+        }).alt = on;
+    }
+
     /// Fold a pane's output into the heuristic signals (alt-screen, activity, bell).
     pub(crate) fn note_output(&self, pane: u32, data: &[u8]) {
         let now = Instant::now();
         let alt_on = contains(data, b"\x1b[?1049h");
         let alt_off = contains(data, b"\x1b[?1049l");
-        let bell = data.contains(&0x07);
         let cleared_done;
+        let bell;
         {
             let mut agents = self.agents.lock().unwrap();
             let h = agents.heur.entry(pane).or_insert(PaneHeur {
                 alt: false,
                 last_activity: now,
                 last_bell: None,
+                in_osc: false,
             });
             h.last_activity = now;
+            bell = scan_bell(&mut h.in_osc, data);
             if alt_on {
                 h.alt = true;
             }
@@ -1549,5 +1595,44 @@ async fn writer_loop(mut stdin: ChildStdin, mut cmd_rx: mpsc::Receiver<String>) 
         {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scan_bell;
+
+    #[test]
+    fn plain_bell_counts() {
+        let mut osc = false;
+        assert!(scan_bell(&mut osc, b"hello\x07world"));
+        assert!(!osc);
+    }
+
+    #[test]
+    fn osc_title_bel_is_not_a_bell() {
+        let mut osc = false;
+        // A fancy prompt: OSC window-title terminated by BEL, plus its own content.
+        assert!(!scan_bell(&mut osc, b"\x1b]0;user@host: ~/mymux\x07$ "));
+        assert!(!osc);
+        // …and a REAL bell after the title still counts.
+        assert!(scan_bell(&mut osc, b"\x1b]0;t\x07$ \x07"));
+    }
+
+    #[test]
+    fn st_terminated_osc_is_not_a_bell() {
+        let mut osc = false;
+        assert!(!scan_bell(&mut osc, b"\x1b]8;http://x\x1b\\text"));
+        assert!(!osc);
+    }
+
+    #[test]
+    fn osc_split_across_chunks_carries() {
+        let mut osc = false;
+        assert!(!scan_bell(&mut osc, b"prompt \x1b]0;part"));
+        assert!(osc); // unterminated OSC: the state carries over
+        assert!(!scan_bell(&mut osc, b"two\x07"));
+        assert!(!osc); // the BEL in this chunk was the title terminator
+        assert!(scan_bell(&mut osc, b"\x07")); // a later real bell counts
     }
 }

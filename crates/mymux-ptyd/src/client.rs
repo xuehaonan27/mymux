@@ -26,6 +26,11 @@ pub enum PtydEvent {
     Exit {
         id: u32,
     },
+    /// A pane's grid flipped into/out of the alternate screen.
+    Alt {
+        id: u32,
+        on: bool,
+    },
     /// The connection died (ptyd stopped or crashed) — all panes are gone.
     Closed,
 }
@@ -227,6 +232,10 @@ async fn reader_loop(
                 if let Ok(ev) = serde_json::from_slice::<Event>(&body) {
                     if ev.ev == "exit" {
                         let _ = events.send(PtydEvent::Exit { id: ev.id });
+                    } else if ev.ev == "alt_on" {
+                        let _ = events.send(PtydEvent::Alt { id: ev.id, on: true });
+                    } else if ev.ev == "alt_off" {
+                        let _ = events.send(PtydEvent::Alt { id: ev.id, on: false });
                     }
                 }
             }

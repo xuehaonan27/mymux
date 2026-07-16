@@ -101,6 +101,10 @@ pub struct PaneInfo {
     /// = an old ptyd that predates the field; fall back to the id bit then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ephemeral: Option<bool>,
+    /// Alternate-screen state, tracked by the pane grid. `None` = an old
+    /// ptyd that predates the field (the consumer's byte-scan covers it then).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt: Option<bool>,
 }
 
 impl PaneInfo {
@@ -244,5 +248,16 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn pane_info_legacy_json_defaults() {
+        // An old daemon's PaneInfo (no ephemeral/alt fields) still parses,
+        // with both optional fields collapsing to None.
+        let legacy = r#"{"id":5,"pid":42,"name":"sh","cols":80,"rows":24}"#;
+        let p: PaneInfo = serde_json::from_str(legacy).unwrap();
+        assert_eq!(p.ephemeral, None);
+        assert_eq!(p.alt, None);
+        assert!(!p.is_ephemeral()); // id-bit fallback: low id = persistent
     }
 }

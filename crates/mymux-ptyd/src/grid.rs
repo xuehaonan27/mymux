@@ -17,7 +17,24 @@ pub struct PaneGrid {
     /// Undecoded tail of the previous chunk (an incomplete UTF-8 sequence,
     /// at most 3 bytes).
     carry: Vec<u8>,
+    /// Authoritative alt-screen state, tracked over complete `CSI ?1047/1048/
+    /// 1049 h|l` sequences (chunk-split safe via alt_tail). The agent
+    /// heuristics read this instead of hoping their byte-scan catches them.
+    alt: bool,
+    alt_tail: Vec<u8>,
 }
+
+/// The six complete alt-screen sequences we track (all exactly 8 bytes).
+const ALT_SEQS: [(&[u8], bool); 6] = [
+    (b"\x1b[?1047h", true),
+    (b"\x1b[?1047l", false),
+    (b"\x1b[?1048h", true),
+    (b"\x1b[?1048l", false),
+    (b"\x1b[?1049h", true),
+    (b"\x1b[?1049l", false),
+];
+/// Sequences are 8 bytes: only the trailing 7 can sit incomplete at a cut.
+const ALT_CARRY: usize = 7;
 
 impl PaneGrid {
     pub fn new(cols: u16, rows: u16) -> Self {
@@ -27,12 +44,47 @@ impl PaneGrid {
                 .scrollback_limit(SCROLLBACK)
                 .build(),
             carry: Vec::new(),
+            alt: false,
+            alt_tail: Vec::new(),
         }
+    }
+
+    /// Current alternate-screen state (0 = primary screen).
+    pub fn alt_screen(&self) -> bool {
+        self.alt
+    }
+
+    /// Fold any complete alt-screen sequences into `alt`. The whole buffer
+    /// (tail + chunk) is scanned and matches apply in byte order; keeping
+    /// the trailing 7 bytes as the next tail means a boundary-straddling
+    /// sequence is re-seen (harmlessly — events are idempotent in order).
+    fn track_alt(&mut self, bytes: &[u8]) {
+        let mut buf = std::mem::take(&mut self.alt_tail);
+        buf.extend_from_slice(bytes);
+        let mut events: Vec<(usize, bool)> = Vec::new();
+        for (seq, on) in ALT_SEQS {
+            let mut pos = 0;
+            while let Some(i) = buf[pos..]
+                .windows(seq.len())
+                .position(|w| w == seq)
+                .map(|x| x + pos)
+            {
+                events.push((i, on));
+                pos = i + 1;
+            }
+        }
+        events.sort_unstable_by_key(|e| e.0);
+        for (_, on) in events {
+            self.alt = on;
+        }
+        let keep = buf.len().saturating_sub(ALT_CARRY);
+        self.alt_tail = buf[keep..].to_vec();
     }
 
     /// Feed raw pty output. Invalid bytes become U+FFFD; an incomplete trailing
     /// multibyte sequence is carried into the next feed.
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.track_alt(bytes);
         let mut buf = std::mem::take(&mut self.carry);
         buf.extend_from_slice(bytes);
         let mut rest: &[u8] = &buf;
@@ -261,6 +313,34 @@ mod tests {
         g.feed(b" after");
         let vt2 = replay(&g, 60, 20);
         assert_eq!(vt2.text(), g.vt.text());
+    }
+
+    #[test]
+    fn alt_screen_tracked_across_chunk_splits() {
+        let mut g = PaneGrid::new(40, 10);
+        assert!(!g.alt_screen());
+        // A sequence split at every plausible boundary is one event.
+        g.feed(b"\x1b[?1");
+        assert!(!g.alt_screen());
+        g.feed(b"049h");
+        assert!(g.alt_screen());
+        // Later sequences win in byte order, even packed into one chunk.
+        g.feed(b"noise \x1b[?1049l tail \x1b[?1047h");
+        assert!(g.alt_screen());
+        g.feed(b"\x1b[?1047l");
+        assert!(!g.alt_screen());
+        // No tail remains to trip a later feed.
+        g.feed(b"plain text");
+        assert!(!g.alt_screen());
+    }
+
+    #[test]
+    fn alt_screen_1048_variant_tracked() {
+        let mut g = PaneGrid::new(40, 10);
+        g.feed(b"\x1b[?1048h");
+        assert!(g.alt_screen());
+        g.feed(b"\x1b[?1048l");
+        assert!(!g.alt_screen());
     }
 
     #[test]
