@@ -145,7 +145,11 @@ Twelve batches (b1-b6 + A-J), each independently verified headless
 pagecheck,refcheck,historycheck,comparecheck,amendcheck,subcheck,
 subinitcheck,hunkcheck,blamecheck}.mjs). The panel is deliberately
 PLUGIN-SHAPED (narrow `initGitGraph` opts, lazy dynamic import) — the future
-ui-module package kind lifts it mechanically.
+ui-module package kind lifts it mechanically. **2026-07-16 design-B
+restructure (78614c6): ONE git surface with Changes/History tabs** — the
+user's callout about the two-entry split; all diff/staging work moved in,
+editor keeps only file-context git (blame, conflict widgets, submodule
+navigation), code panel changes rows are deep links.
 - **Graph core**: daemon `/git/log` (topology, branches list, branch-filter
   rev, --follow path mode, limit/skip pagination), `/git/show`, `/git/compare`
   (A..B), `/git/blame` (--line-porcelain groups). UI: swim-lane graph with an
