@@ -143,6 +143,8 @@ async fn run() {
         .route("/git/files", get(git::files))
         .route("/git/toplevel", get(git::toplevel))
         .route("/git/blob", get(git::blob))
+        .route("/git/log", get(git::log))
+        .route("/git/show", get(git::show))
         .route("/lsp", get(lsp::ws_handler))
         .route("/lsp/info", get(lsp::info))
         .route("/lsp/install", post(lsp::install))

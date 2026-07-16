@@ -199,3 +199,290 @@ pub async fn blob(Query(q): Query<BlobQuery>) -> Result<String, StatusCode> {
     }
     String::from_utf8(out.stdout).map_err(|_| StatusCode::UNSUPPORTED_MEDIA_TYPE)
 }
+
+// ---- history (the graph panel) ------------------------------------------------
+
+/// A revision used as a query target. No shell is involved, but a leading '-'
+/// would still read as an option to git — reject it.
+fn valid_rev(rev: &str) -> bool {
+    !rev.is_empty()
+        && rev.len() <= 128
+        && !rev.starts_with('-')
+        && rev
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._/^@~+-{}".contains(c))
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct LogCommit {
+    hash: String,
+    parents: Vec<String>,
+    author: String,
+    /// ISO-8601 commit author date.
+    date: String,
+    subject: String,
+    /// Ref decorations as one string ("HEAD -> main, origin/main, tag: v1").
+    refs: String,
+}
+
+/// Parse `--pretty=format:%H%x1f%P%x1f%an%x1f%aI%x1f%s%x1f%D` rows.
+fn parse_log(text: &str) -> Vec<LogCommit> {
+    text.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\x1f').collect();
+            if f.len() < 6 {
+                return None;
+            }
+            Some(LogCommit {
+                hash: f[0].to_string(),
+                parents: f[1].split(' ').filter(|p| !p.is_empty()).map(str::to_string).collect(),
+                author: f[2].to_string(),
+                date: f[3].to_string(),
+                subject: f[4].to_string(),
+                refs: f.get(5).unwrap_or(&"").to_string(),
+            })
+        })
+        .collect()
+}
+
+#[derive(Deserialize)]
+pub struct LogQuery {
+    pane: Option<u32>,
+    /// Optional absolute root override (the panel's root switcher).
+    root: Option<String>,
+    limit: Option<usize>,
+    skip: Option<usize>,
+    /// 1 = --all (every ref), 0/absent = HEAD's history only.
+    all: Option<bool>,
+}
+
+/// `GET /git/log?pane=&root=&limit=&skip=&all=` — commit topology for the
+/// graph (HEAD + every ref by default), plus the current branch and its
+/// upstream ahead/behind for the push/pull affordances.
+pub async fn log(Query(q): Query<LogQuery>) -> Json<serde_json::Value> {
+    let root = root_for_req(q.pane, &q.root).await;
+    let limit = q.limit.unwrap_or(200).clamp(1, 1000);
+    let skip = q.skip.unwrap_or(0);
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(&root).arg("log");
+    if q.all.unwrap_or(true) {
+        cmd.arg("--all");
+    }
+    cmd.args([
+        "--date-order",
+        "--pretty=format:%H%x1f%P%x1f%an%x1f%aI%x1f%s%x1f%D",
+        "-n",
+        &limit.to_string(),
+        "--skip",
+        &skip.to_string(),
+    ]);
+    let commits = cmd
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| parse_log(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default();
+
+    let branch = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["branch", "--show-current"])
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    // HEAD...@{upstream}: "ahead<TAB>behind" — fails when there's no upstream
+    // (detached, never pushed) — both counts stay null then.
+    let (upstream, ahead, behind) = {
+        let name = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+            .output()
+            .await
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+        let counts = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
+            .output()
+            .await
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                let mut it = t.split_whitespace();
+                Some((it.next()?.parse::<u64>().ok()?, it.next()?.parse::<u64>().ok()?))
+            });
+        match (name, counts) {
+            (Some(u), Some((a, b))) => (Some(u), Some(a), Some(b)),
+            _ => (None, None, None),
+        }
+    };
+
+    Json(serde_json::json!({
+        "branch": branch,
+        "upstream": upstream,
+        "ahead": ahead,
+        "behind": behind,
+        "commits": commits,
+    }))
+}
+
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct ShowFile {
+    /// Porcelain-ish letter: M, A, D, R…
+    status: String,
+    path: String,
+}
+
+#[derive(Deserialize)]
+pub struct ShowQuery {
+    #[serde(default)]
+    rev: String,
+    /// Only this file's diff in the detail pane (validated like /git/diff).
+    #[serde(default)]
+    path: String,
+    pane: Option<u32>,
+    /// Optional absolute root override (the panel's root switcher).
+    root: Option<String>,
+}
+
+/// Name-status rows of `git show --name-status --format=`: "M\tpath",
+/// "R100\told\tnew" (take the new path on renames/copies).
+fn parse_name_status(text: &str) -> Vec<ShowFile> {
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let st = parts.next()?;
+            let p = parts.next()?;
+            if st.is_empty() || p.is_empty() {
+                return None;
+            }
+            Some(ShowFile {
+                status: st.chars().next().unwrap_or('M').to_string(),
+                path: parts.next().unwrap_or(p).to_string(),
+            })
+        })
+        .collect()
+}
+
+/// `GET /git/show?pane=&root=&rev=` — one commit's meta, its name-status file
+/// list, and the unified diff (capped at ~4 MiB) for the detail pane.
+pub async fn show(Query(q): Query<ShowQuery>) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !valid_rev(&q.rev) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let root = root_for_req(q.pane, &q.root).await;
+
+    // Meta and name-status are separate spawns on purpose: an empty --or
+    // arbitrary—commit body makes a one-shot format unparseable.
+    let meta = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["show", "-s", "--format=%H%x1f%an%x1f%aI%x1f%s%x1f%b", &q.rev])
+        .output()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !meta.status.success() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let (hash, author, date, subject, body) = {
+        let text = String::from_utf8_lossy(&meta.stdout);
+        let mut f = text.splitn(6, '\x1f');
+        let hash = f.next().ok_or(StatusCode::NOT_FOUND)?.to_string();
+        let author = f.next().unwrap_or("").to_string();
+        let date = f.next().unwrap_or("").to_string();
+        let subject = f.next().unwrap_or("").to_string();
+        let body = f.next().unwrap_or("").trim_end().to_string();
+        (hash, author, date, subject, body)
+    };
+
+    let files = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["show", "--name-status", "--format=", &q.rev])
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| parse_name_status(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default();
+
+    const DIFF_CAP: usize = 4_000_000;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(&root)
+        .args(["show", "--format=", "--no-color", &q.rev]);
+    if !q.path.is_empty() {
+        safe_path(&root, &q.path, false).ok_or(StatusCode::FORBIDDEN)?;
+        cmd.arg("--").arg(&q.path);
+    }
+    let diff_out = cmd
+        .output()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut diff = String::from_utf8_lossy(&diff_out.stdout).into_owned();
+    if diff.len() > DIFF_CAP {
+        diff.truncate(DIFF_CAP);
+        diff.push_str("\n… (diff truncated at 4 MiB)\n");
+    }
+
+    Ok(Json(serde_json::json!({
+        "hash": hash,
+        "author": author,
+        "date": date,
+        "subject": subject,
+        "body": body,
+        "files": files,
+        "diff": diff,
+    })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_rows_parse() {
+        let text = "a1b2c3\x1fd4e5f6 a7b8c9\x1fXue Haonan\x1f2026-07-16T02:04:00+08:00\x1ffeat: graph endpoints\x1fHEAD -> main, origin/main\n\
+                    d4e5f6\x1f\x1fXue Haonan\x1f2026-07-15T01:00:00+08:00\x1ffix: root commit, no refs\x1f\n";
+        let rows = parse_log(text);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].hash, "a1b2c3");
+        assert_eq!(rows[0].parents, vec!["d4e5f6", "a7b8c9"]); // merge: two parents
+        assert_eq!(rows[0].refs, "HEAD -> main, origin/main");
+        assert_eq!(rows[1].parents.len(), 0); // root commit
+        assert_eq!(rows[1].refs, "");
+    }
+
+    #[test]
+    fn name_status_rows_parse() {
+        let text = "M\tui/src/main.ts\nA\tui/ux/gitcheck.mjs\nD\tdocs/old.md\nR100\told/name.ts\tnew/name.ts\n";
+        let files = parse_name_status(text);
+        assert_eq!(files.len(), 4);
+        assert_eq!(files[0], ShowFile { status: "M".into(), path: "ui/src/main.ts".into() });
+        assert_eq!(files[1].status, "A");
+        assert_eq!(files[2].status, "D");
+        assert_eq!(files[3].path, "new/name.ts");
+        assert_eq!(files[3].status, "R");
+    }
+
+    #[test]
+    fn rev_validation() {
+        assert!(valid_rev("HEAD"));
+        assert!(valid_rev("a1b2c3d4"));
+        assert!(valid_rev("origin/main~2"));
+        assert!(valid_rev("v1.0^{}"));
+        assert!(!valid_rev("--help"));
+        assert!(!valid_rev(""));
+        assert!(!valid_rev("-n 1"));
+    }
+}
