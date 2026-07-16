@@ -74,23 +74,28 @@ build_one() {
     local target="$1" stage
     stage="$(mktemp -d)"
     case "$target" in
-        x86_64-unknown-linux-musl)
-            note "building $target (system musl-gcc)…"
-            command -v x86_64-linux-musl-gcc >/dev/null || die "x86_64-linux-musl-gcc missing (apt install musl-tools)"
-            rustup target add "$target" >/dev/null
-            ( cd "$ROOT" && CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc \
-                cargo build --release --target "$target" -p mymuxd -p mymux-ptyd -p mymux-pkg )
-            ;;
-        aarch64-unknown-linux-musl)
-            note "building $target (cargo-zigbuild)…"
-            ensure_zig
-            rustup target add "$target" >/dev/null
-            if ! command -v cargo-zigbuild >/dev/null 2>&1; then
-                note "installing cargo-zigbuild (first time)…"
-                cargo install cargo-zigbuild --locked
+        x86_64-unknown-linux-musl | aarch64-unknown-linux-musl)
+            # One toolchain serves both arches: cargo-zigbuild (zig cc links
+            # musl). No apt/system packages — k3s runners with broken apt or
+            # DNS-hanging mirrors can't bite. musl-gcc stays an explicit
+            # fallback for local dev (USE_MUSL_GCC=1).
+            if [ "${USE_MUSL_GCC:-0}" = "1" ] && [ "$target" = "x86_64-unknown-linux-musl" ]; then
+                note "building $target (system musl-gcc, USE_MUSL_GCC=1)…"
+                command -v x86_64-linux-musl-gcc >/dev/null || die "x86_64-linux-musl-gcc missing (apt install musl-tools)"
+                rustup target add "$target" >/dev/null
+                ( cd "$ROOT" && CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc \
+                    cargo build --release --target "$target" -p mymuxd -p mymux-ptyd -p mymux-pkg )
+            else
+                note "building $target (cargo-zigbuild)…"
+                ensure_zig
+                rustup target add "$target" >/dev/null
+                if ! command -v cargo-zigbuild >/dev/null 2>&1; then
+                    note "installing cargo-zigbuild (first time)…"
+                    cargo install cargo-zigbuild --locked
+                fi
+                ( cd "$ROOT" && PATH="$ZIG_CACHE:$PATH" \
+                    cargo zigbuild --release --target "$target" -p mymuxd -p mymux-ptyd -p mymux-pkg )
             fi
-            ( cd "$ROOT" && PATH="$ZIG_CACHE:$PATH" \
-                cargo zigbuild --release --target "$target" -p mymuxd -p mymux-ptyd -p mymux-pkg )
             ;;
         *) die "unknown target $target" ;;
     esac

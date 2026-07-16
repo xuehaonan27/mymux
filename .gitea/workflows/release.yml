@@ -32,18 +32,16 @@ jobs:
       # x86_64 via system musl-gcc from the base image; aarch64 via
       # cargo-zigbuild. The script bootstraps everything else (rustup not
       # assumed: installed on the fly when missing).
-      - name: "toolchain: rust + musl-tools"
+      - name: "toolchain: rust"
         run: |
           set -x
-          export DEBIAN_FRONTEND=noninteractive
           if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
           fi
           export PATH="$HOME/.cargo/bin:$PATH"
-          # never hang here again: stale dpkg locks and slow mirrors FAIL,
-          # narrated — they don't sit quietly forever.
-          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
-          sudo apt-get install -y -o DPkg::Lock::Timeout=120 -o Acquire::Retries=3 musl-tools
+          # NO apt here on purpose: this runner's apt hangs silently (dpkg
+          # lock/DNS mirror); the matrix links musl via cargo-zigbuild for
+          # BOTH arches, so no system packages are needed at all.
           rustup toolchain install stable --profile minimal
 
       - name: build the daemon matrix (x86_64 + aarch64, musl-static)
