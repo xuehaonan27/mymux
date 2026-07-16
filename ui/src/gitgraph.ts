@@ -39,6 +39,7 @@ interface LogResp {
   ahead: number | null;
   behind: number | null;
   commits: LogCommit[];
+  branches: string[];
 }
 interface StatusFile {
   status: string;
@@ -76,7 +77,10 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
   // Repo/session state, resolved on open.
   let root: string | null = null;
   let pane: number | null = null;
-  let showAll = true;
+  /** '' = every ref, '~current' = HEAD only, else this branch's history. */
+  let branchFilter = '';
+  /** Free-text filter over the loaded commits (subject/author/hash/refs). */
+  let filterText = '';
   let selected = ''; // '' = uncommitted card; else commit hash; 'stash@{n}' = stash
   let uncommitted: StatusFile[] = [];
   let stashes: StashEntry[] = [];
@@ -664,58 +668,62 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       b.addEventListener('click', () => void op(path, {}, okMsg));
       bar.appendChild(b);
     }
-    const allLab = el('label', 'git-allrefs');
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = showAll;
-    cb.addEventListener('change', () => {
-      showAll = cb.checked;
+    // Branch filter: all / current / one branch's own history.
+    const sel = document.createElement('select');
+    sel.className = 'git-branch';
+    sel.title = 'which history to show';
+    const mkOpt = (v: string, label: string) => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = label;
+      sel.appendChild(o);
+    };
+    mkOpt('', 'all branches');
+    mkOpt('~current', `current (${logData?.branch ?? '—'})`);
+    for (const b of logData?.branches ?? []) mkOpt(b, `⎇ ${b}`);
+    sel.value = branchFilter;
+    sel.addEventListener('change', () => {
+      branchFilter = sel.value;
       void load();
     });
-    allLab.append(cb, document.createTextNode(' all refs'));
-    bar.appendChild(allLab);
+    bar.appendChild(sel);
+    // Free-text filter: local, soft-reloads only the graph (this toolbar —
+    // and its focus — stays put).
+    const search = document.createElement('input');
+    search.className = 'git-search';
+    search.placeholder = 'filter commits…';
+    search.value = filterText;
+    search.addEventListener('input', () => {
+      filterText = search.value;
+      softReload();
+    });
+    search.addEventListener('keydown', (e) => e.stopPropagation());
+    bar.appendChild(search);
     const refresh = el('button', 'pkgs-btn', 'Refresh');
     refresh.addEventListener('click', () => void load());
     bar.appendChild(refresh);
     return bar;
   }
 
-  async function load() {
-    const my = ++seq;
-    closeMenu();
-    panel.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
-    pane = opts.getActivePane();
-    const top = await get<{ toplevel: string | null }>(`/git/toplevel?${qs({ pane })}`);
-    root = top?.toplevel ?? null;
-    if (!root) {
-      panel.replaceChildren(
-        toolbar(),
-        el('div', 'git-detail-hint', 'the focused pane is not inside a git repository'),
-      );
-      return;
-    }
-    const [log, status, stashList, st] = await Promise.all([
-      get<LogResp>(`/git/log?${qs({ root, all: showAll, limit: 400 })}`),
-      get<StatusFile[]>(`/git/status?${qs({ root })}`),
-      get<StashEntry[]>(`/git/stash/list?${qs({ root })}`),
-      get<GitStateResp>(`/git/state?${qs({ root })}`),
-    ]);
-    if (my !== seq) return;
-    logData = log;
-    uncommitted = status ?? [];
-    stashes = stashList ?? [];
-    gitState = st ?? { state: null, conflicts: [] };
-    const commits = log?.commits ?? [];
-    // A selected row may vanish under us (popped stash, reset-away commit).
-    if (
-      selected &&
-      !commits.some((c) => c.hash === selected) &&
-      !stashes.some((s) => s.sel === selected)
-    ) {
-      selected = '';
-    }
-    const head = commits[0]?.hash;
-    const rows: LayRow[] = layout([
+  /** All fetched commits, then the search-filtered subset. Topology
+   * metadata (pseudo-row parents) always comes from the FULL set. */
+  function visibleCommits(): LogCommit[] {
+    const all = logData?.commits ?? [];
+    if (!filterText) return all;
+    const q = filterText.toLowerCase();
+    return all.filter(
+      (c) =>
+        c.subject.toLowerCase().includes(q) ||
+        c.author.toLowerCase().includes(q) ||
+        c.hash.startsWith(q) ||
+        c.refs.toLowerCase().includes(q),
+    );
+  }
+
+  function buildRows(): LayRow[] {
+    const all = logData?.commits ?? [];
+    const head = all[0]?.hash;
+    return layout([
       // The uncommitted card rides as a pseudo-commit parenting HEAD so its
       // lane flows into the real topology, exactly like the extension's.
       ...(uncommitted.length && head
@@ -744,10 +752,60 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
             }),
           )
         : []),
-      ...commits,
+      ...visibleCommits(),
     ]);
+  }
+
+  /** Rebuild just the graph side (search typing): the toolbar and its focus
+   * stay put; selection survives (guarded against the FULL set on load). */
+  function softReload() {
     const main = el('div', 'git-main');
-    main.appendChild(renderGraph(rows));
+    main.appendChild(renderGraph(buildRows()));
+    main.appendChild(detailEl);
+    panel.querySelector('.git-main')?.replaceWith(main);
+    void renderDetail();
+  }
+
+  async function load() {
+    const my = ++seq;
+    closeMenu();
+    panel.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
+    pane = opts.getActivePane();
+    const top = await get<{ toplevel: string | null }>(`/git/toplevel?${qs({ pane })}`);
+    root = top?.toplevel ?? null;
+    if (!root) {
+      panel.replaceChildren(
+        toolbar(),
+        el('div', 'git-detail-hint', 'the focused pane is not inside a git repository'),
+      );
+      return;
+    }
+    const logParams: Record<string, string | number | boolean> = { root, limit: 400 };
+    if (branchFilter === '') logParams.all = true;
+    else if (branchFilter === '~current') logParams.all = false;
+    else logParams.rev = branchFilter;
+    const [log, status, stashList, st] = await Promise.all([
+      get<LogResp>(`/git/log?${qs(logParams)}`),
+      get<StatusFile[]>(`/git/status?${qs({ root })}`),
+      get<StashEntry[]>(`/git/stash/list?${qs({ root })}`),
+      get<GitStateResp>(`/git/state?${qs({ root })}`),
+    ]);
+    if (my !== seq) return;
+    logData = log;
+    uncommitted = status ?? [];
+    stashes = stashList ?? [];
+    gitState = st ?? { state: null, conflicts: [] };
+    const commits = log?.commits ?? [];
+    // A selected row may vanish under us (popped stash, reset-away commit).
+    if (
+      selected &&
+      !commits.some((c) => c.hash === selected) &&
+      !stashes.some((s) => s.sel === selected)
+    ) {
+      selected = '';
+    }
+    const main = el('div', 'git-main');
+    main.appendChild(renderGraph(buildRows()));
     main.appendChild(detailEl);
     panel.replaceChildren(toolbar(), main);
     await renderDetail();

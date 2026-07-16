@@ -304,6 +304,8 @@ pub struct LogQuery {
     skip: Option<usize>,
     /// 1 = --all (every ref), 0/absent = HEAD's history only.
     all: Option<bool>,
+    /// Optional explicit revision (a branch name); wins over --all/HEAD.
+    rev: Option<String>,
 }
 
 /// `GET /git/log?pane=&root=&limit=&skip=&all=` — commit topology for the
@@ -315,7 +317,12 @@ pub async fn log(Query(q): Query<LogQuery>) -> Json<serde_json::Value> {
     let skip = q.skip.unwrap_or(0);
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(&root).arg("log");
-    if q.all.unwrap_or(true) {
+    // An explicit branch filter wins ("the branch's own history"); otherwise
+    // --all (default) or HEAD only. A bad rev just yields an empty page.
+    let rev = q.rev.filter(|r| valid_rev(r));
+    if let Some(rev) = &rev {
+        cmd.arg(rev);
+    } else if q.all.unwrap_or(true) {
         cmd.arg("--all");
     }
     cmd.args([
@@ -377,12 +384,32 @@ pub async fn log(Query(q): Query<LogQuery>) -> Json<serde_json::Value> {
         }
     };
 
+    // Local branch names for the filter dropdown (bounded, silent on error).
+    let branches: Vec<String> = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::to_string)
+                .filter(|s| !s.is_empty())
+                .take(500)
+                .collect()
+        })
+        .unwrap_or_default();
+
     Json(serde_json::json!({
         "branch": branch,
         "upstream": upstream,
         "ahead": ahead,
         "behind": behind,
         "commits": commits,
+        "branches": branches,
     }))
 }
 

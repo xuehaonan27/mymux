@@ -1738,6 +1738,23 @@ body.has-winalpha #hostbar {
   cursor: pointer;
   user-select: none;
 }
+.git-branch,
+.git-search {
+  padding: 3px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--control-bg);
+  color: var(--text);
+  font: 11px var(--mono);
+  outline: none;
+}
+.git-search {
+  width: 160px;
+}
+.git-branch:focus,
+.git-search:focus {
+  border-color: var(--accent);
+}
 .git-main {
   flex: 1;
   min-height: 0;
