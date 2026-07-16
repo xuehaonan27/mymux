@@ -155,12 +155,39 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     /** Two-click confirm for destructive verbs: first click arms (this text),
      * second click runs. */
     confirm?: string;
+    /** Renders as an inline input + submit row instead of a plain button
+     * (branch/tag creation needs a name). */
+    prompt?: { placeholder: string; apply: string; run: (name: string) => void };
     action: () => void;
   }
   function openMenu(x: number, y: number, items: MenuItem[]) {
     closeMenu();
     const m = el('div', 'git-menu');
     for (const it of items) {
+      if (it.prompt) {
+        const row = el('div', 'git-menu-prompt');
+        const inp = document.createElement('input');
+        inp.className = 'git-menu-input';
+        inp.placeholder = it.prompt.placeholder;
+        const go = el('button', 'git-menu-go', it.prompt.apply);
+        const submit = () => {
+          const name = inp.value.trim();
+          if (!name) return;
+          closeMenu();
+          it.prompt!.run(name);
+        };
+        go.addEventListener('click', (e) => {
+          e.stopPropagation();
+          submit();
+        });
+        inp.addEventListener('keydown', (e) => {
+          e.stopPropagation();
+          if (e.key === 'Enter') submit();
+        });
+        row.append(inp, go);
+        m.appendChild(row);
+        continue;
+      }
       const b = el('button', 'git-menu-item' + (it.danger ? ' danger' : ''), it.label);
       b.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -196,6 +223,67 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     },
     true,
   );
+  /** Prompt row: create a branch at `at` (null = HEAD). */
+  const branchPrompt = (at: string | null): MenuItem => ({
+    label: '',
+    prompt: {
+      placeholder: at ? `new branch @ ${at.slice(0, 8)}…` : 'new branch name…',
+      apply: 'Create',
+      run: (name) => void op('/git/branch', { rev: name, at }, `created branch ${name}`),
+    },
+    action: () => {},
+  });
+  /** Prompt row: create a lightweight tag at `at` (null = HEAD). */
+  const tagPrompt = (at: string | null): MenuItem => ({
+    label: '',
+    prompt: {
+      placeholder: at ? `new tag @ ${at.slice(0, 8)}…` : 'new tag name…',
+      apply: 'Create',
+      run: (name) => void op('/git/tag', { rev: name, at }, `tagged ${name}`),
+    },
+    action: () => {},
+  });
+  /** The right-click menu for one branch (or "HEAD -> x") badge. */
+  function branchMenu(x: number, y: number, branch: string, isHead: boolean) {
+    openMenu(x, y, [
+      {
+        label: `Check out ${branch}`,
+        action: () => void op('/git/checkout', { rev: branch }, `on ${branch}`),
+      },
+      {
+        label: `Merge ${branch} into current`,
+        action: () => void op('/git/merge', { rev: branch }, 'merged'),
+      },
+      branchPrompt(null),
+      tagPrompt(null),
+      ...(isHead
+        ? []
+        : ([
+            {
+              label: `Delete ${branch}`,
+              danger: true,
+              confirm: `delete branch ${branch}? click again`,
+              action: () => void op('/git/branch/delete', { rev: branch }, 'deleted'),
+            },
+          ] as MenuItem[])),
+    ]);
+  }
+  /** The right-click menu for one tag badge. */
+  function tagMenu(x: number, y: number, tagName: string) {
+    openMenu(x, y, [
+      {
+        label: `Check out (detach at ${tagName})`,
+        action: () => void op('/git/checkout', { rev: tagName }, `detached at ${tagName}`),
+      },
+      tagPrompt(null),
+      {
+        label: `Delete tag ${tagName}`,
+        danger: true,
+        confirm: `delete tag ${tagName}? click again`,
+        action: () => void op('/git/tag/delete', { rev: tagName }, 'tag deleted'),
+      },
+    ]);
+  }
   /** The right-click menu for one commit row. */
   function commitMenu(x: number, y: number, hash: string, subject: string) {
     openMenu(x, y, [
@@ -220,6 +308,8 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
         label: 'Check out (detach HEAD)',
         action: () => void op('/git/checkout', { rev: hash }, `detached at ${hash.slice(0, 8)}`),
       },
+      branchPrompt(hash),
+      tagPrompt(hash),
       {
         label: 'Reset --soft here',
         action: () => void op('/git/reset', { rev: hash, mode: 'soft' }, 'reset --soft'),
@@ -389,20 +479,22 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
                 ? 'remote'
                 : 'branch';
           const badge = el('span', `git-ref git-ref-${cls}`, ref.replace('tag: ', ''));
-          // Local branches (incl. the "HEAD -> x" pair) check out on
-          // right-click; tags/remotes are left passive.
+          // Local branches (incl. the "HEAD -> x" pair) and tags carry action
+          // menus; remote badges stay passive.
           if (cls === 'branch' || cls === 'head') {
             const branch = ref.includes('->') ? ref.split('->')[1].trim() : ref;
-            badge.title = 'right-click to check out';
+            badge.title = 'right-click for branch actions';
             badge.addEventListener('contextmenu', (e) => {
               e.preventDefault();
               e.stopPropagation();
-              openMenu(e.clientX, e.clientY, [
-                {
-                  label: `Check out ${branch}`,
-                  action: () => void op('/git/checkout', { rev: branch }, `on ${branch}`),
-                },
-              ]);
+              branchMenu(e.clientX, e.clientY, branch, cls === 'head');
+            });
+          } else if (cls === 'tag') {
+            badge.title = 'right-click for tag actions';
+            badge.addEventListener('contextmenu', (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              tagMenu(e.clientX, e.clientY, ref.replace('tag: ', ''));
             });
           }
           row.appendChild(badge);

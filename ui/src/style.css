@@ -1998,8 +1998,39 @@ body.has-winalpha #hostbar {
   white-space: normal;
 }
 .git-ref-branch,
-.git-ref-head {
+.git-ref-head,
+.git-ref-tag {
   cursor: context-menu;
+}
+
+/* Inline name input rows in the context menu (branch/tag creation). */
+.git-menu-prompt {
+  display: flex;
+  gap: 4px;
+  padding: 2px 4px;
+}
+.git-menu-input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--control-bg);
+  color: var(--text);
+  font: 11px var(--mono);
+  outline: none;
+}
+.git-menu-input:focus {
+  border-color: var(--accent);
+}
+.git-menu-go {
+  padding: 3px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+  font: 11px var(--mono);
+  cursor: pointer;
 }
 
 /* Stash rows (batch 5). */

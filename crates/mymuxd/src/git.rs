@@ -537,6 +537,8 @@ pub struct WriteReq {
     mode: Option<String>,
     /// Only for /git/op: continue|abort.
     action: Option<String>,
+    /// Only for branch/tag create: the commit to point at (absent = HEAD).
+    at: Option<String>,
     pane: Option<u32>,
     /// Optional absolute root override (the panel's root switcher).
     root: Option<String>,
@@ -701,6 +703,50 @@ pub async fn reset(Json(q): Json<WriteReq>) -> Json<WriteResp> {
         }
     };
     Json(run_op(&q, &["reset", flag, &rev], 60).await)
+}
+
+/// The optional `at` field (create-here targets) through the same check.
+fn req_at(q: &WriteReq) -> Option<String> {
+    q.at.clone().filter(|r| valid_rev(r))
+}
+
+/// `POST /git/branch {rev: name, at?}` — create a branch (at HEAD or the
+/// right-clicked commit). Invalid names are git's own error message.
+pub async fn branch(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let Some(name) = req_rev(&q) else { return bad_rev() };
+    match req_at(&q) {
+        Some(at) => Json(run_op(&q, &["branch", &name, &at], 60).await),
+        None => Json(run_op(&q, &["branch", &name], 60).await),
+    }
+}
+
+/// `POST /git/branch/delete {rev: name}` — safe delete (-d): git refuses an
+/// unmerged branch and its message says why.
+pub async fn branch_delete(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let Some(name) = req_rev(&q) else { return bad_rev() };
+    Json(run_op(&q, &["branch", "-d", &name], 60).await)
+}
+
+/// `POST /git/tag {rev: name, at?}` — create a lightweight tag.
+pub async fn tag(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let Some(name) = req_rev(&q) else { return bad_rev() };
+    match req_at(&q) {
+        Some(at) => Json(run_op(&q, &["tag", &name, &at], 60).await),
+        None => Json(run_op(&q, &["tag", &name], 60).await),
+    }
+}
+
+/// `POST /git/tag/delete {rev: name}` — delete a tag.
+pub async fn tag_delete(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let Some(name) = req_rev(&q) else { return bad_rev() };
+    Json(run_op(&q, &["tag", "-d", &name], 60).await)
+}
+
+/// `POST /git/merge {rev}` — merge into HEAD (120s: big trees + hooks). A
+/// conflict surfaces through the graph panel's own banner (batch A).
+pub async fn merge(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let Some(rev) = req_rev(&q) else { return bad_rev() };
+    Json(run_op(&q, &["merge", &rev], 120).await)
 }
 
 // ---- stash (the graph panel's stash section) ---------------------------------
