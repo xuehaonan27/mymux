@@ -804,8 +804,11 @@ body.has-winalpha #hostbar {
   color: var(--text-dim);
   border-bottom: 1px solid var(--hairline);
 }
-#code-blame {
+#code-history {
   margin-left: auto;
+  padding: 1px 10px;
+}
+#code-blame {
   padding: 1px 10px;
 }
 #code-blame.on {
@@ -1761,6 +1764,25 @@ body.has-winalpha #hostbar {
   color: var(--text-dim);
   font: 10px var(--mono);
   user-select: none;
+}
+/* File-history mode chip in the toolbar. */
+.git-filefilter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 8px;
+  color: var(--accent);
+  font-size: 10px;
+}
+.git-chip-x {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0 2px;
+  font: 10px var(--mono);
 }
 .git-main {
   flex: 1;

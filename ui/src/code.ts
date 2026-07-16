@@ -465,6 +465,8 @@ export interface CodePanelOpts {
   getDefaultRoot: () => 'pane' | 'repo';
   /** Blame-gutter click-through: open this commit in the git graph. */
   onBlameHash?: (hash: string) => void;
+  /** History-button click-through: open the file's history in the git graph. */
+  onFileHistory?: (root: string, path: string) => void;
 }
 
 /** The ⌘E code overlay, rooted at the focused pane's cwd. */
@@ -487,7 +489,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       <div class="code-tree" id="code-tree"></div>
     </div>
     <div class="code-main">
-      <div class="code-hd"><span id="code-path">no file open</span><button id="code-blame" class="pkgs-btn" title="git blame gutter (needs a saved file)">Blame</button><span id="code-hint" title="⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close">⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close</span></div>
+      <div class="code-hd"><span id="code-path">no file open</span><button id="code-history" class="pkgs-btn" title="file history in the git graph">Hist</button><button id="code-blame" class="pkgs-btn" title="git blame gutter (needs a saved file)">Blame</button><span id="code-hint" title="⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close">⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close</span></div>
       <div class="code-bufs" id="code-bufs"></div>
       <div class="code-editor" id="code-editor"></div>
       <div class="code-diff" id="code-diff"></div>
@@ -590,10 +592,25 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   // viewers / the empty state).
   const blameBtn = panel.querySelector('#code-blame') as HTMLButtonElement;
   blameBtn.addEventListener('click', () => void toggleBlame());
+  const histBtn = panel.querySelector('#code-history') as HTMLButtonElement;
+  histBtn.addEventListener('click', () => void openFileHistory());
   function renderBlameBtn() {
     const b = curBuf();
     blameBtn.classList.toggle('on', !!(b && b.kind === 'text' && b.blame));
     blameBtn.style.display = b && b.kind === 'text' ? '' : 'none';
+    histBtn.style.display = b && b.kind === 'text' && opts.onFileHistory ? '' : 'none';
+  }
+
+  /** Resolve (repo toplevel, repo-relative path) for a session file — shared
+   * by Blame and History. null when the file sits outside the work tree. */
+  async function repoPathFor(s: Session, path: string): Promise<{ top: string; rel: string } | null> {
+    const top = await gitToplevel(s.pane, s.root);
+    if (!top) return null;
+    const absRoot = (s.root ?? s.fsRoot)?.replace(/\/+$/, '');
+    if (!absRoot) return null;
+    const abs = `${absRoot}/${path}`;
+    if (!abs.startsWith(`${top}/`)) return null;
+    return { top, rel: abs.slice(top.length + 1) };
   }
 
   /** Toggle the per-buffer blame gutter. Kept off dirty buffers: blame line
@@ -613,22 +630,12 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       flashHint('save the file before blaming (⌘S)');
       return;
     }
-    const top = await gitToplevel(s.pane, s.root);
-    if (!top) {
-      flashHint('not a git repo');
+    const rp = await repoPathFor(s, path);
+    if (!rp) {
+      flashHint('not in a git repo (or root unresolved)');
       return;
     }
-    const absRoot = (s.root ?? s.fsRoot)?.replace(/\/+$/, '');
-    if (!absRoot) {
-      flashHint('root not resolved yet — try again');
-      return;
-    }
-    const abs = `${absRoot}/${path}`;
-    if (!abs.startsWith(`${top}/`)) {
-      flashHint('file is outside the repo');
-      return;
-    }
-    const rel = abs.slice(top.length + 1);
+    const { top, rel } = rp;
     let groups: BlameGroup[];
     try {
       const r = await fetch(
@@ -650,6 +657,18 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       effects: blameSlot.reconfigure(blameGutter(groups, (h) => opts.onBlameHash?.(h))),
     });
     renderBlameBtn();
+  }
+
+  /** The History button: hand the file's repo (top, rel) to the git graph. */
+  async function openFileHistory() {
+    const s = current;
+    if (!s?.path || !opts.onFileHistory) return;
+    const rp = await repoPathFor(s, s.path);
+    if (!rp) {
+      flashHint('not in a git repo (or root unresolved)');
+      return;
+    }
+    opts.onFileHistory(rp.top, rp.rel);
   }
 
   // Open-buffer chips: click to switch, ✕ to close. A dirty buffer's ✕ needs

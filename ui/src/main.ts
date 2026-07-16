@@ -756,6 +756,12 @@ const codeOpts: CodePanelOpts = {
     if (codePanel.isOpen()) codePanel.toggle();
     gitPanel.show(hash);
   },
+  // History jump: same z-band swap — graph takes over with this file's
+  // rename-following history.
+  onFileHistory: (root, path) => {
+    if (codePanel.isOpen()) codePanel.toggle();
+    gitPanel.showFileHistory(root, path);
+  },
 };
 // CodeMirror is heavy, so the code panel loads on first use (vite splits the
 // chunk); the wrapper keeps the synchronous interface the shell expects.
@@ -802,7 +808,9 @@ const pkgsPanel = initPkgsPanel({
 // lazy dynamic import, same contract shape as the code panel's wrapper.
 let gitReal: import('./gitgraph').GitGraphPanel | null = null;
 let gitLoading = false;
-let pendingGitShow: string | null = null; // blame jump while the chunk loads
+// A jump-in that arrived while the chunk was still loading: show(hash) or
+// showFileHistory(root, path) — applied once init completes.
+let pendingGit: { hash?: string; hist?: { root: string; path: string } } | null = null;
 async function ensureGit(): Promise<import('./gitgraph').GitGraphPanel> {
   if (!gitReal && !gitLoading) {
     gitLoading = true;
@@ -833,11 +841,21 @@ const gitPanel = {
   /** Blame click-through: open the graph ON this commit (the code panel is
    * above us in the z-band, so it must close first — the caller does that). */
   show: (hash: string) => {
-    pendingGitShow = hash;
+    pendingGit = { hash };
     void ensureGit().then((g) => {
-      const h = pendingGitShow;
-      pendingGitShow = null;
-      g.show(h ?? hash);
+      const p = pendingGit;
+      pendingGit = null;
+      if (p?.hash) g.show(p.hash);
+      noteModal('gitgraph', g.isOpen());
+    });
+  },
+  /** History click-through: the file's own history across renames. */
+  showFileHistory: (root: string, path: string) => {
+    pendingGit = { hist: { root, path } };
+    void ensureGit().then((g) => {
+      const p = pendingGit;
+      pendingGit = null;
+      if (p?.hist) g.showFileHistory(p.hist.root, p.hist.path);
       noteModal('gitgraph', g.isOpen());
     });
   },

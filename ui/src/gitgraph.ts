@@ -23,6 +23,9 @@ export interface GitGraphPanel {
   isOpen(): boolean;
   /** Open (if needed) with this commit selected — the blame gutter's jump-in. */
   show(hash: string): void;
+  /** Open (if needed) showing ONE FILE's history (renames followed) — the
+   * code panel's History button jump-in. */
+  showFileHistory(root: string, path: string): void;
 }
 
 interface LogCommit {
@@ -81,6 +84,12 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
   let branchFilter = '';
   /** Free-text filter over the loaded commits (subject/author/hash/refs). */
   let filterText = '';
+  /** Non-null = file-history mode: only commits touching this repo-relative
+   * path (renames followed). Set by the code panel's History button. */
+  let fileFilter: string | null = null;
+  /** Repo root override for jump-ins (file history may come from another
+   * pane's repo); cleared on every toggle-open. */
+  let rootOverride: string | null = null;
   let selected = ''; // '' = uncommitted card; else commit hash; 'stash@{n}' = stash
   let uncommitted: StatusFile[] = [];
   let stashes: StashEntry[] = [];
@@ -724,7 +733,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       return;
     }
     detailEl.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
-    const d = await get<ShowResp>(`/git/show?${qs({ root, rev: selected })}`);
+    const d = await get<ShowResp>(`/git/show?${qs({ root, rev: selected, path: fileFilter ?? undefined })}`);
     if (my !== seq) return;
     if (!d) {
       detailEl.replaceChildren(el('div', 'git-detail-hint', 'could not load this commit'));
@@ -746,6 +755,19 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     const bar = el('div', 'git-toolbar');
     const repo = el('span', 'git-repo', root ?? '(no git repo)');
     bar.appendChild(repo);
+    if (fileFilter) {
+      // File-history mode badge; ✕ clears back to the full graph.
+      const chip = el('span', 'git-filefilter', `history: ${fileFilter.split('/').pop()}`);
+      chip.title = fileFilter;
+      const x = el('button', 'git-chip-x', '✕');
+      x.title = 'clear the file history filter';
+      x.addEventListener('click', () => {
+        fileFilter = null;
+        void load();
+      });
+      chip.appendChild(x);
+      bar.appendChild(chip);
+    }
     if (logData?.branch) {
       bar.appendChild(el('span', 'git-ref git-ref-head', logData.branch));
       if (logData.upstream) {
@@ -873,21 +895,24 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     ).observe(foot);
   }
 
+  /** The branch/filter params shared by load() and loadMore() — they must
+   * page through the SAME view. */
+  function logParams(skip: number): Record<string, string | number | boolean> {
+    const p: Record<string, string | number | boolean> = { root: root ?? '', limit: PAGE, skip };
+    if (fileFilter) p.path = fileFilter;
+    if (branchFilter === '') p.all = true;
+    else if (branchFilter === '~current') p.all = false;
+    else p.rev = branchFilter;
+    return p;
+  }
+
   /** Fetch the next PAGE of commits under the SAME branch filter and merge
    * (hash-deduped) — keeps the user's scroll position and selection. */
   async function loadMore() {
     if (paging || loadedAll) return;
     paging = true;
     const my = seq;
-    const logParams: Record<string, string | number | boolean> = {
-      root: root ?? '',
-      limit: PAGE,
-      skip: logData?.commits.length ?? 0,
-    };
-    if (branchFilter === '') logParams.all = true;
-    else if (branchFilter === '~current') logParams.all = false;
-    else logParams.rev = branchFilter;
-    const more = await get<LogResp>(`/git/log?${qs(logParams)}`);
+    const more = await get<LogResp>(`/git/log?${qs(logParams(logData?.commits.length ?? 0))}`);
     paging = false;
     if (my !== seq) return; // a full reload happened under us
     const fresh = more?.commits ?? [];
@@ -923,7 +948,9 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     closeMenu();
     panel.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
     pane = opts.getActivePane();
-    const top = await get<{ toplevel: string | null }>(`/git/toplevel?${qs({ pane })}`);
+    const top = rootOverride
+      ? { toplevel: rootOverride }
+      : await get<{ toplevel: string | null }>(`/git/toplevel?${qs({ pane })}`);
     root = top?.toplevel ?? null;
     if (!root) {
       panel.replaceChildren(
@@ -932,12 +959,8 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       );
       return;
     }
-    const logParams: Record<string, string | number | boolean> = { root, limit: PAGE };
-    if (branchFilter === '') logParams.all = true;
-    else if (branchFilter === '~current') logParams.all = false;
-    else logParams.rev = branchFilter;
     const [log, status, stashList, st] = await Promise.all([
-      get<LogResp>(`/git/log?${qs(logParams)}`),
+      get<LogResp>(`/git/log?${qs(logParams(0))}`),
       get<StatusFile[]>(`/git/status?${qs({ root })}`),
       get<StashEntry[]>(`/git/stash/list?${qs({ root })}`),
       get<GitStateResp>(`/git/state?${qs({ root })}`),
@@ -973,11 +996,23 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       panel.classList.toggle('show', open);
       if (open) {
         selected = '';
+        rootOverride = null;
+        fileFilter = null;
         void load();
       }
     },
     show(hash: string) {
       selected = hash;
+      if (!open) {
+        open = true;
+        panel.classList.add('show');
+      }
+      void load();
+    },
+    showFileHistory(gr: string, path: string) {
+      rootOverride = gr;
+      fileFilter = path;
+      selected = '';
       if (!open) {
         open = true;
         panel.classList.add('show');

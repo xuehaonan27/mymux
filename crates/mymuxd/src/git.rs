@@ -306,6 +306,8 @@ pub struct LogQuery {
     all: Option<bool>,
     /// Optional explicit revision (a branch name); wins over --all/HEAD.
     rev: Option<String>,
+    /// Optional path: history of one file, renames followed (--follow).
+    path: Option<String>,
 }
 
 /// `GET /git/log?pane=&root=&limit=&skip=&all=` — commit topology for the
@@ -325,6 +327,18 @@ pub async fn log(Query(q): Query<LogQuery>) -> Json<serde_json::Value> {
     } else if q.all.unwrap_or(true) {
         cmd.arg("--all");
     }
+    // File-history mode: one path, renames followed. safe_path gates escape.
+    let path = q.path.clone().filter(|p| !p.is_empty());
+    let path = match &path {
+        Some(p) => match safe_path(&root, p, false) {
+            Some(_) => Some(p.clone()),
+            None => return Json(serde_json::json!({ "error": "path outside the root" })),
+        },
+        None => None,
+    };
+    if path.is_some() {
+        cmd.arg("--follow");
+    }
     cmd.args([
         "--date-order",
         "--pretty=format:%H%x1f%P%x1f%an%x1f%aI%x1f%s%x1f%D",
@@ -333,6 +347,9 @@ pub async fn log(Query(q): Query<LogQuery>) -> Json<serde_json::Value> {
         "--skip",
         &skip.to_string(),
     ]);
+    if let Some(p) = &path {
+        cmd.arg("--").arg(p);
+    }
     let commits = cmd
         .output()
         .await
