@@ -69,8 +69,7 @@ pub async fn status(Query(q): Query<StatusQuery>) -> Json<Vec<GitFile>> {
 /// .gitmodules values are toplevel-relative, so strip the pane's prefix (""
 /// at the toplevel; a subdir prefix keeps out-of-view subs from matching).
 /// None outside a work tree; Some(vec![]) when there's no .gitmodules.
-async fn submodule_paths(root: &std::path::Path) -> Option<Vec<String>> {
-    let out = Command::new("git")
+async fn submodule_paths(root: &std::path::Path) -> Option<Vec<String>> {    let out = Command::new("git")
         .arg("-C")
         .arg(root)
         .args(["rev-parse", "--show-toplevel", "--show-prefix"])
@@ -100,6 +99,34 @@ async fn submodule_paths(root: &std::path::Path) -> Option<Vec<String>> {
         .filter_map(|p| p.strip_prefix(prefix.as_str()).map(str::to_string))
         .collect();
     Some(subs)
+}
+
+#[derive(Serialize)]
+pub struct SubmoduleInfo {
+    path: String,
+    /// False = registered in .gitmodules but never initialized (empty dir) —
+    /// the tree offers a one-click `submodule update --init` then.
+    initialized: bool,
+}
+
+/// `GET /git/submodules?pane=&root=` — .gitmodules entries + init state.
+pub async fn submodules(Query(q): Query<StatusQuery>) -> Json<Vec<SubmoduleInfo>> {
+    let root = root_for_req(q.pane, &q.root).await;
+    let Some(paths) = submodule_paths(&root).await else {
+        return Json(vec![]);
+    };
+    let infos = paths
+        .into_iter()
+        .map(|path| {
+            // An initialized submodule anchors via a .git FILE (or dir).
+            let anchored = root.join(&path).join(".git").exists();
+            SubmoduleInfo {
+                path,
+                initialized: anchored,
+            }
+        })
+        .collect();
+    Json(infos)
 }
 
 /// `GET /git/files?pane=<id>` — tracked + untracked (non-ignored) files, for
@@ -702,6 +729,18 @@ pub async fn commit(Json(q): Json<WriteReq>) -> Json<WriteResp> {
 /// rewrites the tip commit.
 pub async fn amend(Json(q): Json<WriteReq>) -> Json<WriteResp> {
     Json(run_op(&q, &["commit", "--amend", "--no-edit"], 60).await)
+}
+
+/// `POST /git/submodule/update {path}` — `submodule update --init -- <path>`
+/// (120s: clones can dawdle).
+pub async fn submodule_update(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let Some(p) = q.path.clone().filter(|p| !p.is_empty()) else {
+        return Json(WriteResp {
+            ok: false,
+            out: "path required".into(),
+        });
+    };
+    Json(run_op(&q, &["submodule", "update", "--init", "--", &p], 120).await)
 }
 
 /// `POST /git/discard {path}` — drop ALL of a file's worktree+index changes

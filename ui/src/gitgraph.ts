@@ -47,6 +47,8 @@ interface LogResp {
 interface StatusFile {
   status: string;
   path: string;
+  /** Gitlink (submodule boundary) — badged S. */
+  submodule?: boolean;
 }
 interface StashEntry {
   sel: string;
@@ -747,7 +749,13 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
           void op('/git/discard', { path: f.path }, 'discarded');
         });
         row.appendChild(dbtn);
-        row.appendChild(el('span', `gbadge g${untracked ? 'new' : f.status.includes('D') ? 'del' : 'mod'}`, f.status.trim() || 'M'));
+        if (f.submodule) {
+          const sb = el('span', 'gbadge gsub', 'S');
+          sb.title = 'submodule — view the gitlink diff here; enter it from the code panel';
+          row.appendChild(sb);
+        } else {
+          row.appendChild(el('span', `gbadge g${untracked ? 'new' : f.status.includes('D') ? 'del' : 'mod'}`, f.status.trim() || 'M'));
+        }
         row.appendChild(el('span', 'git-file-path', f.path));
         row.addEventListener('click', async () => {
           // Conflicted file: resolving it beats staring at a marker-pocked

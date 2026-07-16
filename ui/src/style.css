@@ -941,6 +941,13 @@ body.has-winalpha #hostbar {
 .trow.tdir {
   color: #9aa5b1;
 }
+.trow.tsubinit {
+  color: #b98ae6;
+  font-style: italic;
+}
+.trow.tsubinit:hover {
+  background: var(--control-bg-hover);
+}
 #code-path {
   color: #c5cdd9;
 }

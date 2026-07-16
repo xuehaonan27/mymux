@@ -453,6 +453,8 @@ interface Session {
   /** Effective absolute root the daemon actually honored (LSP-URI mapping +
    * root bar display). */
   fsRoot?: string;
+  /** .gitmodules registry (uninitialized dirs get init rows in the tree). */
+  submodules?: { path: string; initialized: boolean }[];
 }
 
 export interface CodePanelOpts {
@@ -1020,6 +1022,48 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       wrap.appendChild(kids);
       let loaded = false;
       let expanded = false;
+      const renderKids = async () => {
+        kids.replaceChildren();
+        const pane = current?.pane ?? null;
+        const sroot = current?.root ?? null;
+        const entries = await fsList(pane, path, sroot);
+        for (const c of entries) {
+          kids.appendChild(treeItem(path ? `${path}/${c.name}` : c.name, c.name, c.dir, depth + 1));
+        }
+        // An EMPTY dir that's a registered-but-uninitialized submodule offers
+        // a one-click `submodule update --init`.
+        if (entries.length === 0) {
+          const sm = current?.submodules?.find((x) => x.path === path && !x.initialized);
+          if (sm) {
+            const initRow = document.createElement('div');
+            initRow.className = 'trow tsubinit';
+            initRow.style.paddingLeft = `${(depth + 1) * 12 + 8}px`;
+            initRow.textContent = '⬇ uninitialized submodule — click to init';
+            initRow.title = 'git submodule update --init';
+            initRow.addEventListener('click', async (ev) => {
+              ev.stopPropagation();
+              initRow.textContent = 'initializing (clone)…';
+              try {
+                const r = await fetch(`${apiBase()}/git/submodule/update`, {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ pane: pane ?? undefined, root: sroot ?? undefined, path }),
+                });
+                if (!r.ok) {
+                  initRow.textContent = 'init failed — click to retry';
+                  return;
+                }
+              } catch {
+                initRow.textContent = 'init failed — click to retry';
+                return;
+              }
+              sm.initialized = true;
+              await renderKids();
+            });
+            kids.appendChild(initRow);
+          }
+        }
+      };
       row.addEventListener('click', async (e) => {
         e.stopPropagation();
         expanded = !expanded;
@@ -1027,9 +1071,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
         kids.style.display = expanded ? '' : 'none';
         if (expanded && !loaded) {
           loaded = true;
-          for (const c of await fsList(current?.pane ?? null, path, current?.root ?? null)) {
-            kids.appendChild(treeItem(path ? `${path}/${c.name}` : c.name, c.name, c.dir, depth + 1));
-          }
+          await renderKids();
         }
       });
     } else {
@@ -1043,10 +1085,24 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
 
   async function loadTree() {
     const s = current;
+    void refreshSubmodules(s);
     treeEl.replaceChildren();
     const items = await fsList(s?.pane ?? null, '', s?.root ?? null);
     if (current !== s) return; // switched panes mid-fetch
     for (const c of items) treeEl.appendChild(treeItem(c.name, c.name, c.dir, 0));
+  }
+
+  /** .gitmodules registry for the session (used by the tree's init rows). */
+  async function refreshSubmodules(s: Session | null) {
+    if (!s) return;
+    try {
+      const r = await fetch(`${apiBase()}/git/submodules?${paneQ(s.pane)}${rootQ(s.root)}`);
+      if (!r.ok) return;
+      const list = (await r.json()) as { path: string; initialized: boolean }[];
+      if (current === s) s.submodules = list;
+    } catch {
+      /* optional metadata */
+    }
   }
 
   async function loadChanges() {
