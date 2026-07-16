@@ -87,7 +87,34 @@ const editors = await page.evaluate(() => document.querySelectorAll('#code-diff 
 check('split view: two side-by-side editors', editors === 2, `editors=${editors}`);
 const mergeText = await page.evaluate(() => document.querySelector('#code-diff .cm-mergeView')?.textContent ?? '');
 check('split view shows the staged line', mergeText.includes('three staged'), mergeText.slice(0, 80));
+// Merge styling must map onto the unified palette (the package baseTheme is
+// light-theme-only — a color regression here was the "split looks broken"
+// report). Sample file.txt's unstaged split: a MODIFIED line has both a
+// changed-line tint and changed-text color on the b (worktree) side.
+await page.evaluate(() => {
+  const r = [...document.querySelectorAll('.grow')].find((x) => x.textContent.includes('file.txt'));
+  r?.click();
+});
+await page.waitForTimeout(900);
+await page.evaluate(() => [...document.querySelectorAll('.diff-ctl-btn')].find((b) => b.textContent === 'split')?.click());
+await page.waitForTimeout(1200);
+const mergeStyle = await page.evaluate(() => {
+  const t = document.querySelector('#code-diff .cm-merge-b .cm-changedText');
+  const l = document.querySelector('#code-diff .cm-merge-b .cm-changedLine');
+  return {
+    fg: t ? getComputedStyle(t).color : '(no changedText)',
+    bg: l ? getComputedStyle(l).backgroundColor : '(no changedLine)',
+  };
+});
+check('split: inserted text takes the palette fg', mergeStyle.fg === 'rgb(126, 231, 135)', mergeStyle.fg);
+check('split: inserted line takes the palette bg', /rgba\(63, 185, 80/.test(mergeStyle.bg), mergeStyle.bg);
 await page.screenshot({ path: 'shots/code-split-diff.png' });
+// Leave staged.txt's diff up — step 6 opens it in the editor.
+await page.evaluate(() => {
+  const r = [...document.querySelectorAll('.grow')].find((x) => x.textContent.includes('staged.txt'));
+  r?.click();
+});
+await page.waitForTimeout(800);
 
 // 6. open in editor jumps to the file as a text buffer.
 await page.evaluate(() => [...document.querySelectorAll('.diff-ctl-btn')].find((b) => b.textContent === 'open in editor')?.click());

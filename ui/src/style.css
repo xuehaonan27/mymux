@@ -944,6 +944,50 @@ body.has-winalpha #hostbar {
 .dmeta {
   color: var(--text-dim);
 }
+
+/* Split (MergeView) diff: the package baseTheme is built for light themes —
+   8%-alpha line tints and underline-gradient text marks that read as
+   "broken" on dark. Re-map every merge class onto the unified view's
+   palette so both diff modes speak the same language. */
+.code-diff .cm-editor {
+  background: var(--bg);
+  color: var(--text);
+  font: 12px var(--mono);
+}
+.code-diff .cm-merge-a .cm-changedLine,
+.code-diff .cm-deletedChunk {
+  background: var(--diff-del-bg);
+}
+.code-diff .cm-merge-b .cm-changedLine,
+.code-diff .cm-inlineChangedLine {
+  background: var(--diff-add-bg);
+}
+.code-diff .cm-merge-a .cm-changedText,
+.code-diff .cm-deletedChunk .cm-deletedText,
+.code-diff .cm-merge-b .cm-deletedText {
+  background: transparent;
+  color: var(--diff-del-fg);
+  text-decoration: underline wavy var(--diff-del-fg) 1px;
+  text-underline-offset: 2px;
+}
+.code-diff .cm-merge-b .cm-changedText {
+  background: transparent;
+  color: var(--diff-add-fg);
+  text-decoration: underline wavy var(--diff-add-fg) 1px;
+  text-underline-offset: 2px;
+}
+.code-diff .cm-mergeView .cm-gutters {
+  background: var(--side-bg, #0d1117);
+  color: var(--text-dim);
+  border-right: 1px solid var(--hairline);
+}
+.code-diff .cm-collapsedLines {
+  color: var(--text-dim);
+  background: var(--side-bg, #0d1117);
+}
+.code-diff .cm-mergeSpacer {
+  background: color-mix(in srgb, var(--bg) 92%, var(--text) 8%);
+}
 .diff-ctl {
   position: sticky;
   top: 0;
