@@ -37,6 +37,8 @@ import { perl } from '@codemirror/legacy-modes/mode/perl';
 import { r } from '@codemirror/legacy-modes/mode/r';
 import { lspExtensionFor, notifySaved, setLspFileOpener, requestCodeActions } from './lsp';
 import { makeCtx, viewerFor } from './viewers';
+import MarkdownIt from 'markdown-it';
+import DOMPurify from 'dompurify';
 
 // Resolved per call so the panel follows the active workspace's daemon.
 let apiBase = () => 'http://127.0.0.1:8088';
@@ -312,6 +314,18 @@ function blameGutter(groups: BlameGroup[], onOpen: (h: string) => void): Extensi
     }),
     currentLineBlame(groups),
   ];
+}
+
+// Markdown preview engine: markdown-it escapes raw HTML at the source
+// (html:false — the first XSS wall), DOMPurify allowlists the result
+// (the second). Module-level: one instance, no per-render cost.
+const mdit = MarkdownIt({ html: false, linkify: true, breaks: true });
+
+/** Render. Sanitize. Then rewrite relative src/href to /fs/raw URLs (in a
+ * detached document, so the live DOM never sees unscrubbed markup). */
+function mdRenderSanitized(md: string): DocumentFragment {
+  const clean = DOMPurify.sanitize(mdit.render(md), { USE_PROFILES: { html: true } });
+  return document.createRange().createContextualFragment(clean);
 }
 
 // ---- conflict-marker resolution widgets ----------------------------------------
@@ -607,6 +621,8 @@ type Buffer =
       dirty: boolean; // cached for background buffers; live one uses isDirty()
       /** Non-null while the blame gutter is on for this buffer. */
       blame?: BlameGroup[] | null;
+      /** True while the markdown PREVIEW is showing (md buffers). */
+      mdPreview?: boolean;
     }
   | { kind: 'viewer' };
 interface Session {
@@ -658,10 +674,11 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       <div class="code-tree" id="code-tree"></div>
     </div>
     <div class="code-main">
-      <div class="code-hd"><span id="code-path">no file open</span><button id="code-history" class="pkgs-btn" title="file history in the git graph">Hist</button><button id="code-blame" class="pkgs-btn" title="git blame gutter (needs a saved file)">Blame</button><span id="code-hint" title="⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close">⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close</span></div>
+      <div class="code-hd"><span id="code-path">no file open</span><button id="code-md" class="pkgs-btn" title="markdown preview (rendered + sanitized)">Prev</button><button id="code-history" class="pkgs-btn" title="file history in the git graph">Hist</button><button id="code-blame" class="pkgs-btn" title="git blame gutter (needs a saved file)">Blame</button><span id="code-hint" title="⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close">⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close</span></div>
       <div class="code-bufs" id="code-bufs"></div>
       <div class="code-editor" id="code-editor"></div>
       <div class="code-diff" id="code-diff"></div>
+      <div class="code-mdpreview" id="code-mdpreview"></div>
       <div class="code-viewer" id="code-viewer"></div>
       <div class="code-ph" id="code-ph"></div>
     </div>`;
@@ -677,6 +694,8 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   const diffEl = panel.querySelector('#code-diff') as HTMLElement;
   const viewerEl = panel.querySelector('#code-viewer') as HTMLElement;
   const phEl = panel.querySelector('#code-ph') as HTMLElement;
+  const mdpEl = panel.querySelector('#code-mdpreview') as HTMLElement;
+  mdpEl.style.display = 'none';
   diffEl.style.display = 'none';
 
   panel.querySelector('#root-up')!.addEventListener('click', () => {
@@ -768,6 +787,8 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     blameBtn.classList.toggle('on', !!(b && b.kind === 'text' && b.blame));
     blameBtn.style.display = b && b.kind === 'text' ? '' : 'none';
     histBtn.style.display = b && b.kind === 'text' && opts.onFileHistory ? '' : 'none';
+    mdBtn.style.display = b && b.kind === 'text' && /\.(md|markdown)$/i.test(current?.path ?? '') ? '' : 'none';
+    mdBtn.classList.toggle('on', !!(b && b.kind === 'text' && b.mdPreview));
   }
 
   /** Resolve (repo toplevel, repo-relative path) for a session file — shared
@@ -838,6 +859,80 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       return;
     }
     opts.onFileHistory(rp.top, rp.rel);
+  }
+
+  // ---- markdown preview ---------------------------------------------------------
+  const mdBtn = panel.querySelector('#code-md') as HTMLButtonElement;
+  mdBtn.addEventListener('click', () => {
+    const b = curBuf();
+    if (!b || b.kind !== 'text') return;
+    b.mdPreview = !b.mdPreview;
+    applyMdPreview();
+  });
+
+  /** Show the preview (or the editor) to match the current buffer's flag. */
+  function applyMdPreview() {
+    const b = curBuf();
+    const on = !!(b && b.kind === 'text' && b.mdPreview);
+    if (!on || !b || b.kind !== 'text') {
+      mdpEl.style.display = 'none';
+      if (b && b.kind === 'text') editorParent.style.display = '';
+      renderBlameBtn();
+      return;
+    }
+    editorParent.style.display = 'none';
+    diffEl.style.display = 'none';
+    viewerEl.style.display = 'none';
+    destroyMerge();
+    phEl.style.display = '';
+    mdpEl.style.display = '';
+    renderBlameBtn();
+    void renderMdPreview();
+  }
+
+  async function renderMdPreview() {
+    const s = current;
+    const b = curBuf();
+    if (!s || !s.path || !b || b.kind !== 'text' || !editor) return;
+    const myPath = s.path;
+    const frag = mdRenderSanitized(editor.state.doc.toString());
+    if (current !== s || s.path !== myPath) return;
+    const base = (s.root ?? s.fsRoot ?? '').replace(/\/+$/, '');
+    if (!base) {
+      mdpEl.textContent = 'root not resolved yet — try again';
+      return;
+    }
+    const dir = myPath.includes('/') ? myPath.slice(0, myPath.lastIndexOf('/')) : '';
+    const urlFor = (p: string) =>
+      `${apiBase()}/fs/raw?${paneQ(s.pane)}${rootQ(s.root)}path=${encodeURIComponent(dir ? `${dir}/${p}` : p)}`;
+    // Relative resources load through the daemon (safe_path-confined);
+    // absolute-path and other-scheme references are dropped outright.
+    frag.querySelectorAll('img').forEach((img) => {
+      const src = img.getAttribute('src') ?? '';
+      if (/^https:\/\//.test(src)) {
+        img.setAttribute('loading', 'lazy');
+      } else if (src && !/^[a-z][a-z0-9+.-]*:/i.test(src) && !src.startsWith('/') && !src.startsWith('//')) {
+        img.setAttribute('src', urlFor(src));
+      } else {
+        img.remove();
+      }
+    });
+    frag.querySelectorAll('a').forEach((a) => {
+      const h = a.getAttribute('href') ?? '';
+      if (/^https?:\/\//.test(h) || h.startsWith('#')) {
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+      } else if (h && !/^[a-z][a-z0-9+.-]*:/i.test(h) && !h.startsWith('/') && !h.startsWith('//')) {
+        a.setAttribute('href', urlFor(h));
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+      } else {
+        a.removeAttribute('href');
+        a.removeAttribute('target');
+      }
+    });
+    mdpEl.replaceChildren();
+    mdpEl.appendChild(frag);
   }
 
   // Open-buffer chips: click to switch, ✕ to close. A dirty buffer's ✕ needs
@@ -936,6 +1031,13 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
                 }
               }, 0);
             }
+            // Live markdown preview: debounced re-render of the same buffer.
+            if (buf?.kind === 'text' && buf.mdPreview) {
+              setTimeout(() => {
+                const b2 = curBuf();
+                if (current?.path === path && b2?.kind === 'text' && b2.mdPreview) void renderMdPreview();
+              }, 400);
+            }
           }
         }),
       ],
@@ -950,6 +1052,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     destroyMerge();
     viewerEl.style.display = 'none';
     phEl.style.display = '';
+    applyMdPreview();
   }
 
   // A registered viewer takes over files the text editor can't show (binary,
@@ -966,6 +1069,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     editorParent.style.display = 'none';
     diffEl.style.display = 'none';
     destroyMerge();
+    mdpEl.style.display = 'none';
     phEl.style.display = '';
     viewerEl.style.display = 'flex';
   }
@@ -990,6 +1094,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     editorParent.style.display = 'none';
     diffEl.style.display = 'none';
     destroyMerge();
+    mdpEl.style.display = 'none';
     viewerEl.style.display = 'none';
     phEl.style.display = 'flex';
   }
@@ -1160,6 +1265,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     }
     editorParent.style.display = 'none';
     diffEl.style.display = '';
+    mdpEl.style.display = 'none';
     viewerEl.style.display = 'none';
     phEl.style.display = '';
   }
