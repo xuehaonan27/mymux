@@ -246,9 +246,25 @@ commit search (--grep server mode beyond the loaded window).
   LOCALLY, not via GitHub workflows (user's call): `scripts/build-release.sh`
   on the Mac = one command → bundle (delegated build) → UI → `cargo tauri
   build` (ad-hoc signed) → `dist/mymux.dmg`. First launch needs one
-  right-click→Open until a Developer ID + notarization happens. Still open:
-  a download/update channel for the dmg (GH releases vs self-hosted), and
-  Developer ID signing.
+  right-click→Open until a Developer ID + notarization happens. ~~Still open:
+  a download/update channel for the dmg (GH releases vs self-hosted)~~ —
+  **DECIDED 2026-07-16 (user): self-hosted Gitea Releases** (gitea.aka.cy,
+  colleague-run; GitHub Releases becomes the fallback mirror). Daemon
+  distribution moved OFF embedded bytes to a **pinned manifest + client-side
+  fetch model**: CI matrix (linux-x86_64 + linux-aarch64 musl-static,
+  `scripts/ci-build-daemon-matrix.sh`) → `bundles.json` (per-arch URL +
+  sha256 + version pins, committed per release into
+  `src-tauri/resources/daemon/`) → the app probes the host arch over SSH
+  (`uname -sm`), downloads exactly that tarball over HTTPS with integrity
+  verification, and relays it through the existing SSH master into the
+  established upload/install flow (`MYMUX_BUNDLE_MIRROR` swaps the URL host
+  for internal mirrors; the legacy embedded x86_64 bundle stays as the
+  airgapped fallback). Workflow `.gitea/workflows/release.yml` runs on the
+  `rui.ke` label (per user: the slow runner's name, not nl). Non-Mac client
+  platforms (Windows, Android, iOS) no longer pay daemon-megabytes either —
+  fetching at deploy time is the point. Remaining: first tagged release,
+  `scripts/build-release.sh` rewired to consume the pipeline, committed
+  bundles.json refresh policy, Developer ID signing.
 - ~~Remote uninstall from the app~~ — **DONE 2026-07-15**: the host manager
   gains a ⌫ action per host: `scripts/mymux-uninstall-remote.sh` (embedded,
   driven over the same russh exec channel) runs `--probe` first — a read-only,

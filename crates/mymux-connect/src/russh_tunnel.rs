@@ -488,11 +488,63 @@ static BUNDLE_VERSION: &str =
 #[cfg(not(daemon_bundle))]
 static BUNDLE_VERSION: &str = "";
 
-/// Does the host need the bundle push, given its `mymuxd --version` probe
-/// (empty = not installed)? A mismatch can also mean a broken daemon — the
-/// push is the repair either way.
-fn needs_install(remote_version: &str) -> bool {
-    !DAEMON_BUNDLE.is_empty() && remote_version.trim() != BUNDLE_VERSION.trim()
+/// The release-channel manifest (bundles.json, produced by
+/// scripts/ci-build-daemon-matrix.sh at publish time): per-arch asset URLs +
+/// sha256 pins. The client downloads host-matched bundles on demand instead
+/// of shipping daemon bytes for every arch inside every client platform.
+#[cfg(bundle_manifest)]
+static BUNDLES_JSON: &str =
+    include_str!("../../../src-tauri/resources/daemon/bundles.json");
+#[cfg(not(bundle_manifest))]
+static BUNDLES_JSON: &str = "";
+
+/// Expected remote version for THIS host: the manifest's pin when it covers
+/// the host's arch; else the embedded x86_64 bundle's version (legacy path).
+fn expected_version(uname_sm: &str) -> String {
+    if let Some(m) = crate::bundle::BundleManifest::parse(BUNDLES_JSON) {
+        if crate::bundle::arch_key(uname_sm).and_then(|k| m.assets.get(k)).is_some() {
+            return m.version;
+        }
+    }
+    BUNDLE_VERSION.trim().to_string()
+}
+
+/// Resolve the bytes to push: manifest-host-arch download (sha256-pinned) if
+/// a manifest is available; else the embedded x86_64 bundle (legacy/airgap).
+async fn resolve_bundle_bytes(master: &Master, uname_sm: &str) -> Result<Vec<u8>, String> {
+    let _ = master; // mirror override is env/global today; a per-host knob would ride here
+    if let Some(m) = crate::bundle::BundleManifest::parse(BUNDLES_JSON) {
+        if let Some(key) = crate::bundle::arch_key(uname_sm) {
+            if let Some(asset) = m.assets.get(key) {
+                let url = crate::bundle::asset_url(&m, asset);
+                let _ = master; // (mirror override is env-scoped, not host-scoped)
+                let bytes = crate::bundle::download(&url, 512 * 1024 * 1024).await?;
+                let got = crate::bundle::sha256_hex(&bytes);
+                if got != asset.sha256 {
+                    return Err(format!(
+                        "integrity check failed for {key}: expected {}, downloaded {got} — refusing to install",
+                        asset.sha256
+                    ));
+                }
+                return Ok(bytes);
+            }
+            return Err(format!(
+                "no daemon bundle published for {key} yet (a future release target) — install mymuxd manually for now"
+            ));
+        }
+        return Err(format!(
+            "unsupported host for the mymux daemon (uname: {uname_sm:?}) — Linux x86_64/aarch64 only"
+        ));
+    }
+    if DAEMON_BUNDLE.is_empty() {
+        return Err(
+            "mymuxd is not installed on the host, and this app has neither a release manifest nor an embedded bundle (publish a release with scripts/ci-publish-release.sh, or run scripts/build-daemon-bundle.sh)".into(),
+        );
+    }
+    match crate::bundle::arch_key(uname_sm) {
+        Some("linux-x86_64") | None if uname_sm.trim().is_empty() => Ok(DAEMON_BUNDLE.to_vec()),
+        _ => Err("the embedded daemon bundle is x86_64-only and this app has no release manifest — publish one with scripts/ci-publish-release.sh".into()),
+    }
 }
 
 /// Daemon start failed: when the host's mymuxd is missing or outdated, push
@@ -505,20 +557,25 @@ async fn maybe_install(
     master: &Master,
     status: &mpsc::Sender<Status>,
 ) -> Result<bool, String> {
+    let uname = master_exec_script(master, "uname -sm 2>/dev/null || true", Duration::from_secs(10))
+        .await
+        .unwrap_or_default();
     const PROBE: &str = "(timeout 2 ~/.local/bin/mymuxd --version 2>/dev/null || timeout 2 mymuxd --version 2>/dev/null || true) | head -1";
     let probe = master_exec_script(master, PROBE, Duration::from_secs(20))
         .await
         .map_err(|e| format!("probe failed: {e:?}"))?;
-    if !needs_install(probe.trim()) {
-        if DAEMON_BUNDLE.is_empty() && probe.trim().is_empty() {
-            return Err("mymuxd is not installed on the host, and this app was built without the daemon bundle (run scripts/build-daemon-bundle.sh first)".into());
-        }
+    let expected = expected_version(&uname);
+    if probe.trim() == expected && !expected.is_empty() {
         return Ok(false); // current — the start failure is something else
     }
+    if expected.is_empty() && probe.trim().is_empty() {
+        return Err("mymuxd is not installed on the host, and this app has neither a release manifest nor an embedded bundle (see ci-publish-release.sh / build-daemon-bundle.sh)".into());
+    }
     let _ = status.send(Status::Installing).await;
+    let bytes = resolve_bundle_bytes(master, &uname).await?;
     // Upload atomically (.new → rename), then run the box-side installer.
     const PUT: &str = "mkdir -p ~/.local/share/mymux/dist && cat > ~/.local/share/mymux/dist/daemon.tgz.new && mv -f ~/.local/share/mymux/dist/daemon.tgz.new ~/.local/share/mymux/dist/daemon.tgz";
-    master_exec_bytes(master, PUT, DAEMON_BUNDLE, Duration::from_secs(600))
+    master_exec_bytes(master, PUT, &bytes, Duration::from_secs(600))
         .await
         .map_err(|e| format!("bundle upload failed: {e:?}"))?;
     let out = master_exec_script(master, INSTALL_SCRIPT, Duration::from_secs(300))
@@ -581,19 +638,19 @@ pub async fn run_russh_tunnel(cfg: HostConfig, master: &Master, status: mpsc::Se
 
 #[cfg(test)]
 mod tests {
-    /// needs_install: missing or mismatched remote versions trigger a push;
-    /// an exact match (or an app built without a bundle) does not.
+    /// expected_version lane choice: a manifest embedded at build time owns
+    /// the answer when it covers the arch; the embedded bundle's version is
+    /// the lane otherwise (empty in a bundle-less dev build).
     #[test]
     fn install_decision() {
-        if super::DAEMON_BUNDLE.is_empty() {
-            eprintln!("built without the daemon bundle — skipping");
-            return;
+        let v = super::expected_version("Linux x86_64");
+        if !super::BUNDLES_JSON.is_empty() {
+            assert!(v.contains("mymuxd"), "manifest lane must win: {v}");
+        } else if !super::DAEMON_BUNDLE.is_empty() {
+            assert_eq!(v, super::BUNDLE_VERSION.trim(), "bundle lane: {v}");
+        } else {
+            assert!(v.is_empty(), "bundle-less dev build: {v}");
         }
-        assert!(super::needs_install("")); // not installed
-        assert!(super::needs_install("mymuxd 0.1.0")); // pre-rev build
-        assert!(super::needs_install("mymuxd 0.1.0 (deadbeef)")); // other rev
-        assert!(!super::needs_install(super::BUNDLE_VERSION)); // current
-        assert!(!super::needs_install(&format!("{}\n", super::BUNDLE_VERSION)));
     }
 
     /// parse_probe digests the box-side script's TAB rows into UI strings,

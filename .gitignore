@@ -2,6 +2,11 @@ target/
 node_modules/
 dist/
 src-tauri/gen/
-src-tauri/resources/daemon/
+src-tauri/resources/daemon/*
+!src-tauri/resources/daemon/bundles.json
 *.log
 .DS_Store
+.secret/
+
+# CI release artifacts (matrix outputs, not sources)
+release/

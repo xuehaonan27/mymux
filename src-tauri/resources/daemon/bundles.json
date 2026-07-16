@@ -1,0 +1,17 @@
+{
+  "channel": "gitea",
+  "version": "mymuxd 0.1.0 (3e8bc74-dirty)",
+  "baseUrl": "",
+  "assets": {
+    "linux-x86_64": {
+      "name": "linux-x86_64.tar.gz",
+      "sha256": "bdf185462171590a6f7190d518810fd7d591bfe767b83800f51e6eb8515d4f91",
+      "size": 3194744
+    },
+    "linux-aarch64": {
+      "name": "linux-aarch64.tar.gz",
+      "sha256": "69a792a148e3698145fdee79718ed0d7c8d7dd273f838ece6be4378e5a9a2ea3",
+      "size": 2861690
+    }
+  }
+}

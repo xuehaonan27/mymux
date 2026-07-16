@@ -153,6 +153,21 @@ For just the bundle on its own: `scripts/build-daemon-bundle.sh` (same
 delegation). Without the bundle the app still works — the zero-touch install
 just reports why it's unavailable instead of pushing.
 
+**Per-arch daemon distribution (release channel)**: the app no longer needs
+daemon bytes embedded for every arch. `scripts/ci-build-daemon-matrix.sh`
+produces `linux-{x86_64,aarch64}.tar.gz` (the second via cargo-zigbuild,
+bootstrapped pinned) plus a `bundles.json` manifest (per-arch URL + sha256 +
+version, embedded into the app). A push of tag `v*` runs the same script on
+Gitea Actions (`.gitea/workflows/release.yml`, runner label `rui.ke`) and
+`scripts/ci-publish-release.sh` creates the release and uploads everything to
+**self-hosted Gitea Releases** (gitea.aka.cy; GitHub Releases as the fallback
+mirror). On first contact with a host whose daemon is missing or outdated,
+the app probes `uname -sm` over SSH, downloads exactly that host's arch over
+HTTPS with integrity verification, then relays it through its own SSH into
+the established upload/install flow. `MYMUX_BUNDLE_MIRROR` swaps the URL host
+for internal mirrors; the embedded x86_64 bundle above stays as the
+offline/airgapped fallback.
+
 ```sh
 cargo install tauri-cli --version '^2'      # one-time; or: npm i -g @tauri-apps/cli
 cargo tauri dev                             # dev run; or `cargo tauri build` for a .app/.dmg
