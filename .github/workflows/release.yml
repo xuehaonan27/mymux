@@ -23,6 +23,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Cache layout: pinned ones (named by what's inside them), recovery
+      # ones (Lock-hash primary key, prefix fallback). Sizes stay tame.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/mymux-ci
+          key: mymux-ci-zig-0.13.0
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: ${{ runner.os }}-cargo-bin-zigbuild-v1
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
+
       - name: "toolchain: rust"
         run: |
           set -x
@@ -57,6 +80,25 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          # setup-node caches npm downloads + node_modules, keyed on the lock.
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: ${{ runner.os }}-cargo-bin-tauri-cli-v1
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+      - uses: actions/cache@v4
+        with:
+          path: src-tauri/target
+          key: ${{ runner.os }}-tauri-target-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-tauri-target-
       - name: "toolchain: rust + tauri-cli"
         run: |
           set -x
