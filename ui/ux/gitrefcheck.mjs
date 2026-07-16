@@ -37,6 +37,8 @@ await page.keyboard.press('Enter');
 await page.waitForTimeout(600);
 await page.click('#btn-git');
 await page.locator('.git-panel.show').waitFor({ timeout: 10000 });
+await page.click('.git-tab[data-page="history"]');
+await page.waitForTimeout(700);
 await page.locator('.git-row').first().waitFor({ timeout: 10000 });
 
 // 1. Commit-row menu: 7 buttons + 2 prompt rows; create branch at this commit.

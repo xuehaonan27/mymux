@@ -1,9 +1,7 @@
 import { EditorView, basicSetup } from 'codemirror';
-import { MergeView } from '@codemirror/merge';
 import { EditorState, Compartment, StateField, type Extension, type Text, type Range } from '@codemirror/state';
 import {
   keymap,
-  lineNumbers,
   gutter,
   GutterMarker,
   ViewPlugin,
@@ -102,12 +100,6 @@ async function gitStatus(pane: number | null, root: string | null = null): Promi
   const r = await fetch(`${apiBase()}/git/status?${paneQ(pane)}${rootQ(root)}`);
   return r.ok ? r.json() : [];
 }
-async function gitDiff(pane: number | null, path: string, staged = false, root: string | null = null): Promise<string> {
-  const r = await fetch(
-    `${apiBase()}/git/diff?${paneQ(pane)}${rootQ(root)}path=${encodeURIComponent(path)}${staged ? '&staged=true' : ''}`,
-  );
-  return r.ok ? r.text() : '';
-}
 async function gitFiles(pane: number | null, root: string | null = null): Promise<string[]> {
   const r = await fetch(`${apiBase()}/git/files?${paneQ(pane)}${rootQ(root)}`);
   return r.ok ? r.json() : [];
@@ -118,18 +110,6 @@ async function gitToplevel(pane: number | null, root: string | null = null): Pro
   if (!r.ok) return null;
   const j = (await r.json()) as { toplevel?: string | null };
   return j.toplevel ?? null;
-}
-/** The file's HEAD blob (staged=true → its index blob); null when absent. */
-async function gitBlob(
-  pane: number | null,
-  path: string,
-  staged: boolean,
-  root: string | null = null,
-): Promise<string | null> {
-  const r = await fetch(
-    `${apiBase()}/git/blob?${paneQ(pane)}${rootQ(root)}path=${encodeURIComponent(path)}${staged ? '&staged=true' : ''}`,
-  );
-  return r.ok ? r.text() : null;
 }
 
 // ---- blame gutter ------------------------------------------------------------
@@ -451,60 +431,6 @@ const conflictBars = StateField.define<DecorationSet>({
   provide: (f) => EditorView.decorations.from(f),
 });
 
-/** Rebuild a REDUCED unified patch from a file's diff, keeping only the
- * chosen +/- lines (unchosen '+' dropped, unchosen '-' rewritten as context
- * — git add -p's edit-hunk semantics; counts recomputed, starts kept so
- * `git apply --cached` applies it cleanly). */
-function buildPatch(lines: string[], chosen: Set<number>): string {
-  const firstHunk = lines.findIndex((l) => l.startsWith('@@'));
-  if (firstHunk < 0) return '';
-  const out = lines.slice(0, firstHunk);
-  let i = firstHunk;
-  while (i < lines.length) {
-    const head = lines[i];
-    if (!head.startsWith('@@')) {
-      i++;
-      continue;
-    }
-    let j = i + 1;
-    const body: { idx: number; text: string }[] = [];
-    while (j < lines.length && !lines[j].startsWith('@@') && !lines[j].startsWith('diff --git')) {
-      if (lines[j] !== '') body.push({ idx: j, text: lines[j] });
-      j++;
-    }
-    let anyChosen = false;
-    const kept: string[] = [];
-    for (const l of body) {
-      const c = l.text[0];
-      if (c === '+') {
-        if (chosen.has(l.idx)) {
-          kept.push(l.text);
-          anyChosen = true;
-        }
-      } else if (c === '-') {
-        if (chosen.has(l.idx)) {
-          kept.push(l.text);
-          anyChosen = true;
-        } else {
-          kept.push(' ' + l.text.slice(1));
-        }
-      } else {
-        kept.push(l.text); // context + "\ No newline" tails
-      }
-    }
-    if (anyChosen) {
-      const m = /@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/.exec(head);
-      const start = m ? m[1] : '0';
-      const oldCount = kept.filter((l) => l[0] === ' ' || l[0] === '-').length;
-      const newCount = kept.filter((l) => l[0] === ' ' || l[0] === '+').length;
-      out.push(`@@ -${start},${oldCount} +${start},${newCount} @@`);
-      out.push(...kept);
-    }
-    i = j;
-  }
-  return out.join('\n') + '\n';
-}
-
 // Highlighting covers every language the package index installs a server
 // for (go, c/cpp, bash, yaml…) plus the daily config/web formats — official
 // @codemirror/lang-* packages where they exist, CM5 legacy-modes otherwise
@@ -600,6 +526,9 @@ export interface CodePanel {
   escape(): boolean;
   /** Re-apply the current theme preset to every editor and buffer. */
   retheme(): void;
+  /** Syntax-language extensions for a path — the git surface's split diff
+   * reuses this mapping (wrapper-thunk, lazy-safe). */
+  langFor(path: string): Extension[];
   /** Open the panel at (pane-root session, path) — the git graph's conflict
    * jump-in. */
   openAt(root: string, path: string): void;
@@ -652,6 +581,9 @@ export interface CodePanelOpts {
   onBlameHash?: (hash: string) => void;
   /** History-button click-through: open the file's history in the git graph. */
   onFileHistory?: (root: string, path: string) => void;
+  /** Changes-row click-through: open THIS FILE's stageable diff in the git
+   * surface's Changes page (design B — diffs live there now). */
+  onOpenChanges?: (root: string, path?: string) => void;
 }
 
 /** The ⌘E code overlay, rooted at the focused pane's cwd. */
@@ -677,7 +609,6 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       <div class="code-hd"><span id="code-path">no file open</span><button id="code-md" class="pkgs-btn" title="markdown preview (rendered + sanitized)">Prev</button><button id="code-history" class="pkgs-btn" title="file history in the git graph">Hist</button><button id="code-blame" class="pkgs-btn" title="git blame gutter (needs a saved file)">Blame</button><span id="code-hint" title="⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close">⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close</span></div>
       <div class="code-bufs" id="code-bufs"></div>
       <div class="code-editor" id="code-editor"></div>
-      <div class="code-diff" id="code-diff"></div>
       <div class="code-mdpreview" id="code-mdpreview"></div>
       <div class="code-viewer" id="code-viewer"></div>
       <div class="code-ph" id="code-ph"></div>
@@ -691,12 +622,10 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   const pathEl = panel.querySelector('#code-path') as HTMLElement;
   const bufsEl = panel.querySelector('#code-bufs') as HTMLElement;
   const editorParent = panel.querySelector('#code-editor') as HTMLElement;
-  const diffEl = panel.querySelector('#code-diff') as HTMLElement;
   const viewerEl = panel.querySelector('#code-viewer') as HTMLElement;
   const phEl = panel.querySelector('#code-ph') as HTMLElement;
   const mdpEl = panel.querySelector('#code-mdpreview') as HTMLElement;
   mdpEl.style.display = 'none';
-  diffEl.style.display = 'none';
 
   panel.querySelector('#root-up')!.addEventListener('click', () => {
     const s = current;
@@ -881,9 +810,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       return;
     }
     editorParent.style.display = 'none';
-    diffEl.style.display = 'none';
     viewerEl.style.display = 'none';
-    destroyMerge();
     phEl.style.display = '';
     mdpEl.style.display = '';
     renderBlameBtn();
@@ -1048,8 +975,6 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     if (editor) editor.setState(state);
     else editor = new EditorView({ state, parent: editorParent });
     editorParent.style.display = '';
-    diffEl.style.display = 'none';
-    destroyMerge();
     viewerEl.style.display = 'none';
     phEl.style.display = '';
     applyMdPreview();
@@ -1067,8 +992,6 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     viewerEl.replaceChildren();
     void v.render(makeCtx(apiBase(), s.pane, path), viewerEl);
     editorParent.style.display = 'none';
-    diffEl.style.display = 'none';
-    destroyMerge();
     mdpEl.style.display = 'none';
     phEl.style.display = '';
     viewerEl.style.display = 'flex';
@@ -1092,8 +1015,6 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       line('ph-reason', reason),
     );
     editorParent.style.display = 'none';
-    diffEl.style.display = 'none';
-    destroyMerge();
     mdpEl.style.display = 'none';
     viewerEl.style.display = 'none';
     phEl.style.display = 'flex';
@@ -1188,180 +1109,6 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     }
     renderHeader();
     editor!.focus();
-  }
-
-  // The diff is a transient view over the current pane; it leaves the editor
-  // session untouched, so switching back restores the open file and its edits.
-  // Two modes: the classic unified view, or a side-by-side MergeView
-  // (HEAD/index on the left, working tree on the right).
-  let mergeView: MergeView | null = null;
-  function destroyMerge() {
-    mergeView?.destroy();
-    mergeView = null;
-  }
-  async function showDiff(path: string, staged = false, mode: 'unified' | 'split' = 'unified') {
-    if (!current) return;
-    const s = current;
-    pathEl.textContent = `diff · ${path}`;
-    pathEl.style.color = '';
-    destroyMerge();
-    const text = (await gitDiff(s.pane, path, staged, s.root)) || '(no textual diff)';
-    if (current !== s) return;
-    diffEl.replaceChildren();
-    // Controls: staged/unstaged toggle (hidden for new files), unified/split
-    // view modes, and a jump into the editor.
-    const ctl = document.createElement('div');
-    ctl.className = 'diff-ctl';
-    const isNew = text.includes('new file mode');
-    const mkBtn = (label: string, on: boolean, fn: () => void) => {
-      const b = document.createElement('button');
-      b.className = 'diff-ctl-btn' + (on ? ' on' : '');
-      b.textContent = label;
-      b.addEventListener('click', fn);
-      return b;
-    };
-    if (!isNew) {
-      ctl.append(
-        mkBtn('unstaged', !staged, () => void showDiff(path, false, mode)),
-        mkBtn('staged', staged, () => void showDiff(path, true, mode)),
-      );
-    }
-    ctl.append(
-      mkBtn('unified', mode === 'unified', () => void showDiff(path, staged, 'unified')),
-      mkBtn('split', mode === 'split', () => void showDiff(path, staged, 'split')),
-      mkBtn('open in editor', false, () => void openFile(path)),
-    );
-    diffEl.appendChild(ctl);
-    if (mode === 'split') {
-      // Left = HEAD; right = the index (staged) or the working tree (unstaged).
-      const aText = (await gitBlob(s.pane, path, false, s.root)) ?? '';
-      let bText = '';
-      if (staged) bText = (await gitBlob(s.pane, path, true, s.root)) ?? '';
-      else bText = await fsRead(s.pane, path, s.root).catch(() => '');
-      if (current !== s) return;
-      const ro = [
-        lineNumbers(),
-        EditorState.readOnly.of(true),
-        EditorView.editable.of(false),
-        editorTheme,
-        themed(),
-        langFor(path),
-      ];
-      mergeView = new MergeView({
-        a: { doc: aText, extensions: ro },
-        b: { doc: bText, extensions: ro },
-        parent: diffEl,
-        gutter: true,
-        highlightChanges: true,
-        collapseUnchanged: { margin: 3, minSize: 4 },
-      });
-    } else if (text !== '(no textual diff)') {
-      renderStageableUnified(text, path, staged, ctl);
-    } else {
-      const el = document.createElement('div');
-      el.className = 'dl';
-      el.textContent = text;
-      diffEl.appendChild(el);
-    }
-    editorParent.style.display = 'none';
-    diffEl.style.display = '';
-    mdpEl.style.display = 'none';
-    viewerEl.style.display = 'none';
-    phEl.style.display = '';
-  }
-
-  /** Unified diff with hunk/line-level staging: every '+'/'-' row toggles
-   * into a selection on click, every @@ carries a whole-hunk action, and the
-   * ctl row drives "N selected". Rebuilds a REDUCED patch (unchosen '+'
-   * dropped, unchosen '-' rewritten as context — the git add -p edit
-   * semantics) and applies it via /git/apply (--cached; --reverse from the
-   * staged side). */
-  function renderStageableUnified(text: string, path: string, staged: boolean, ctl: HTMLElement) {
-    const s = current;
-    if (!s) return;
-    const lines = text.split('\n');
-    const word = staged ? 'unstage' : 'stage';
-    const sel = new Set<number>();
-    const selBtn = document.createElement('button');
-    selBtn.className = 'diff-ctl-btn';
-    selBtn.style.display = 'none';
-    const clearBtn = document.createElement('button');
-    clearBtn.className = 'diff-ctl-btn';
-    clearBtn.style.display = 'none';
-    clearBtn.textContent = 'clear';
-    clearBtn.addEventListener('click', () => {
-      sel.clear();
-      diffEl.querySelectorAll('.dl.sline.sel').forEach((x) => x.classList.remove('sel'));
-      refreshSelCtl();
-    });
-    ctl.append(selBtn, clearBtn);
-    const refreshSelCtl = () => {
-      selBtn.style.display = sel.size ? '' : 'none';
-      clearBtn.style.display = sel.size ? '' : 'none';
-      selBtn.textContent = sel.size ? `${word} ${sel.size} selected` : '';
-    };
-    let inHunks = false;
-    let hunkBody: number[] = [];
-    lines.forEach((line, idx) => {
-      const isHunk = line.startsWith('@@');
-      const isMeta =
-        /^(diff |index |--- |\+\+\+ |new file|deleted |similarity |rename )/.test(line);
-      const row = document.createElement('div');
-      row.className =
-        'dl ' +
-        (isHunk ? 'dhunk' : isMeta ? 'dmeta' : inHunks && line[0] === '+' ? 'dadd' : inHunks && line[0] === '-' ? 'ddel' : '');
-      row.textContent = line || ' ';
-      if (isHunk) {
-        inHunks = true;
-        hunkBody = [];
-        const hb = document.createElement('button');
-        hb.className = 'dl-hunk-btn';
-        hb.textContent = `${word} hunk`;
-        const idxs = hunkBody;
-        hb.addEventListener('click', (e) => {
-          e.stopPropagation();
-          void applyLines(new Set(idxs));
-        });
-        row.appendChild(hb);
-      } else if (!isMeta && inHunks && (line[0] === '+' || line[0] === '-')) {
-        hunkBody.push(idx);
-        row.classList.add('sline');
-        row.title = `click to ${word === 'stage' ? 'select' : 'select'} — ${word} selected ranges below`;
-        row.addEventListener('click', () => {
-          if (sel.has(idx)) sel.delete(idx);
-          else sel.add(idx);
-          row.classList.toggle('sel');
-          refreshSelCtl();
-        });
-      }
-      diffEl.appendChild(row);
-    });
-    selBtn.addEventListener('click', () => {
-      const chosen = new Set(sel);
-      sel.clear();
-      void applyLines(chosen);
-    });
-    async function applyLines(chosen: Set<number>) {
-      const sess = s;
-      if (!chosen.size || !sess) return;
-      const patch = buildPatch(lines, chosen);
-      let ok = false;
-      try {
-        const r = await fetch(`${apiBase()}/git/apply`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ pane: sess.pane ?? undefined, root: sess.root ?? undefined, patch, reverse: staged }),
-        });
-        const res = (await r.json()) as { ok: boolean; out: string };
-        ok = r.ok && res.ok;
-        if (!ok) flashHint(res.out.split('\n')[0] || 'apply failed');
-      } catch {
-        flashHint('daemon unreachable');
-      }
-      if (!ok) return;
-      loadChanges();
-      await showDiff(path, staged, 'unified');
-    }
   }
 
   function treeItem(path: string, name: string, dir: boolean, depth: number): HTMLElement {
@@ -1489,7 +1236,16 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
         row.title = 'submodule — click to switch root into it';
         row.addEventListener('click', () => void enterSubmodule(f.path));
       } else {
-        row.addEventListener('click', () => void showDiff(f.path));
+        // Design B: all diff/staging work lives in the git surface — the row
+        // is a deep LINK (opens this file's stageable diff there).
+        row.title = 'open in the Git surface (stageable diff)';
+        row.addEventListener('click', () => {
+          if (!opts.onOpenChanges || !s) return;
+          const sess = s;
+          void repoPathFor(sess, f.path).then((rp) => {
+            if (rp) opts.onOpenChanges!(rp.top, rp.rel);
+          });
+        });
       }
       changesEl.appendChild(row);
     }
@@ -1744,6 +1500,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
         }
       }
     },
+    langFor: (path: string) => [langFor(path)],
     openAt(root: string, path: string) {
       if (!open) {
         open = true;

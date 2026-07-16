@@ -1,6 +1,7 @@
 // Code-panel batch checks against a live daemon:
-//   root switcher (↑ / ⌂ / ⎇), staged diff toggle, split (MergeView) diff,
-//   open-in-editor jump — inside a throwaway git repo at ~/ux-git-test.
+//   root switcher (↑ / ⌂ / ⎇), changes list rows (deep links into the git
+//   surface since design B — diff checks live in gitchangescheck.mjs now)
+//   — inside a throwaway git repo at ~/ux-git-test.
 import { chromium } from 'playwright-core';
 
 const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
@@ -32,7 +33,8 @@ const clickRoot = (id) => page.click(`#${id}`);
 // 1. Root starts at the pane cwd (the test repo).
 check('root = pane cwd (the repo)', (await rootPath())?.endsWith('/ux-git-test'), await rootPath());
 
-// 2. Changes list has our two files (file.txt unstaged, staged.txt staged).
+// 2. Changes list has our two files (file.txt unstaged, staged.txt staged) —
+//    now deep links into the git surface (badges intact).
 const changeRows = () => page.evaluate(() => [...document.querySelectorAll('.grow')].map((r) => r.textContent));
 const rows = await changeRows();
 check('changes: file.txt + staged.txt', rows.some((r) => r.includes('file.txt')) && rows.some((r) => r.includes('staged.txt')), JSON.stringify(rows));
@@ -55,73 +57,16 @@ await clickRoot('root-repo');
 await page.waitForTimeout(900);
 check('⎇ → repo toplevel', (await rootPath())?.endsWith('/ux-git-test'), await rootPath());
 
-// 4. Unified diff for file.txt shows the change; staged side is empty;
-//    staged.txt's staged side has its line.
+// 4. A changes row deep-links: editor closes, git surface opens (the repo's
+//    Changes page greets it — full workbench flow is gitchangescheck's).
 await page.evaluate(() => {
   const r = [...document.querySelectorAll('.grow')].find((x) => x.textContent.includes('file.txt'));
   r?.click();
 });
-await page.waitForTimeout(1000);
-const diffText = () => page.evaluate(() => document.getElementById('code-diff').textContent);
-check('unified diff has the change', (await diffText()).includes('beta CHANGED'));
-const ctlBtns = () => page.evaluate(() => [...document.querySelectorAll('.diff-ctl-btn')].map((b) => b.textContent));
-check('controls: unstaged/staged/unified/split/open', (await ctlBtns()).join(',').includes('unstaged,staged,unified,split,open in editor'), (await ctlBtns()).join(','));
-await page.evaluate(() => [...document.querySelectorAll('.diff-ctl-btn')].find((b) => b.textContent === 'staged')?.click());
-await page.waitForTimeout(900);
-check('staged side of file.txt is empty', (await diffText()).includes('(no textual diff)'));
-await page.evaluate(() => {
-  const r = [...document.querySelectorAll('.grow')].find((x) => x.textContent.includes('staged.txt'));
-  r?.click();
-});
-await page.waitForTimeout(1000);
-check('staged.txt unstaged side is empty', (await diffText()).includes('(no textual diff)'));
-await page.evaluate(() => [...document.querySelectorAll('.diff-ctl-btn')].find((b) => b.textContent === 'staged')?.click());
-await page.waitForTimeout(900);
-check('staged.txt staged diff has its line', (await diffText()).includes('three staged'));
-
-// 5. Split view: MergeView renders two editors, and the inserted line is
-//    actually visible (a=HEAD vs b=index for the staged side).
-await page.evaluate(() => [...document.querySelectorAll('.diff-ctl-btn')].find((b) => b.textContent === 'split')?.click());
 await page.waitForTimeout(1500);
-const editors = await page.evaluate(() => document.querySelectorAll('#code-diff .cm-editor').length);
-check('split view: two side-by-side editors', editors === 2, `editors=${editors}`);
-const mergeText = await page.evaluate(() => document.querySelector('#code-diff .cm-mergeView')?.textContent ?? '');
-check('split view shows the staged line', mergeText.includes('three staged'), mergeText.slice(0, 80));
-// Merge styling must map onto the unified palette (the package baseTheme is
-// light-theme-only — a color regression here was the "split looks broken"
-// report). Sample file.txt's unstaged split: a MODIFIED line has both a
-// changed-line tint and changed-text color on the b (worktree) side.
-await page.evaluate(() => {
-  const r = [...document.querySelectorAll('.grow')].find((x) => x.textContent.includes('file.txt'));
-  r?.click();
-});
-await page.waitForTimeout(900);
-await page.evaluate(() => [...document.querySelectorAll('.diff-ctl-btn')].find((b) => b.textContent === 'split')?.click());
-await page.waitForTimeout(1200);
-const mergeStyle = await page.evaluate(() => {
-  const t = document.querySelector('#code-diff .cm-merge-b .cm-changedText');
-  const l = document.querySelector('#code-diff .cm-merge-b .cm-changedLine');
-  return {
-    fg: t ? getComputedStyle(t).color : '(no changedText)',
-    bg: l ? getComputedStyle(l).backgroundColor : '(no changedLine)',
-  };
-});
-check('split: inserted text takes the palette fg', mergeStyle.fg === 'rgb(126, 231, 135)', mergeStyle.fg);
-check('split: inserted line takes the palette bg', /rgba\(63, 185, 80/.test(mergeStyle.bg), mergeStyle.bg);
-await page.screenshot({ path: 'shots/code-split-diff.png' });
-// Leave staged.txt's diff up — step 6 opens it in the editor.
-await page.evaluate(() => {
-  const r = [...document.querySelectorAll('.grow')].find((x) => x.textContent.includes('staged.txt'));
-  r?.click();
-});
-await page.waitForTimeout(800);
-
-// 6. open in editor jumps to the file as a text buffer.
-await page.evaluate(() => [...document.querySelectorAll('.diff-ctl-btn')].find((b) => b.textContent === 'open in editor')?.click());
-await page.waitForTimeout(1200);
-const openPath = await page.evaluate(() => document.getElementById('code-path').textContent);
-check('open in editor → staged.txt buffer', openPath?.includes('staged.txt'), openPath ?? '');
-await page.screenshot({ path: 'shots/code-open-in-editor.png' });
+check('changes row deep-links to the git surface', (await page.locator('.git-panel.show').count()) === 1 && (await page.locator('.code-panel.show').count()) === 0);
+check('Changes page on top', ((await page.locator('.git-tab.on').textContent()) ?? '').includes('Changes'));
+check('workbench opened on file.txt', ((await page.locator('.git-workbench .git-detail-title').textContent()) ?? '').includes('file.txt'));
 
 await browser.close();
 if (fails.length) {

@@ -1,12 +1,20 @@
-// The git graph panel — Git Graph (mhutchie) for mymux, as a deliberately
-// PLUGIN-SHAPED module: a narrow entry over explicit opts, no imports of
-// code.ts internals. When a second UI module wants the same contract, both
-// extract into the mymux-pkg "ui-module" kind untouched.
+// The git surface — ONE home for all repo work (design B, 2026-07-16), as a
+// deliberately PLUGIN-SHAPED module: a narrow entry over explicit opts, no
+// imports of code.ts internals. Two pages behind one button:
 //
-// Layout (mirrors the extension): a toolbar (repo, upstream ahead/behind,
-// all-refs toggle, refresh), a left swim-lane graph (uncommitted card +
-// commit topology from /git/log), and a right detail column (commit meta +
-// files + inline diff from /git/show; uncommitted diffs from /git/diff).
+//   CHANGES — the working-tree workbench: uncommitted/staged files, the
+//   conflict banner, stash list; clicking a file opens a STAGEABLE diff
+//   (unified + split) on the right, with hunk/line-level (un)staging.
+//
+//   HISTORY — swim-lane commit topology (pure now: pseudo-rows are gone),
+//   branch/search filters, pagination, context menus, compare, file history.
+//
+// The editor's only git affordances are file-context ones (blame gutter,
+// conflict accept widgets); its changes list deep-links HERE.
+
+import { MergeView } from '@codemirror/merge';
+import { EditorView, lineNumbers } from '@codemirror/view';
+import { EditorState } from '@codemirror/state';
 
 export interface GitGraphOpts {
   /** The focused pane, for repo resolution (its cwd's toplevel). */
@@ -16,16 +24,22 @@ export interface GitGraphOpts {
   toast: (msg: string) => void;
   /** Conflict jump: open a file in the code panel's editor. */
   openInCode?: (root: string, path: string) => void;
+  /** Optional syntax-language resolver for the workbench's split diff —
+   * passes through to the code panel's langFor when it has loaded. */
+  langFor?: (path: string) => import('@codemirror/state').Extension[];
 }
 
 export interface GitGraphPanel {
   toggle(): void;
   isOpen(): boolean;
-  /** Open (if needed) with this commit selected — the blame gutter's jump-in. */
+  /** Open (if needed) in HISTORY on this commit — the blame gutter's jump-in. */
   show(hash: string): void;
-  /** Open (if needed) showing ONE FILE's history (renames followed) — the
-   * code panel's History button jump-in. */
+  /** Open (if needed) in HISTORY showing ONE FILE's history (renames
+   * followed) — the code panel's History button jump-in. */
   showFileHistory(root: string, path: string): void;
+  /** Open (if needed) in CHANGES (optionally pre-opening that file's
+   * stageable diff) — the code panel's changes-list jump-in. */
+  showChanges(root?: string | null, path?: string): void;
 }
 
 interface LogCommit {
@@ -82,6 +96,8 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
   // Repo/session state, resolved on open.
   let root: string | null = null;
   let pane: number | null = null;
+  /** The git surface's two pages: the working-tree workbench, or history. */
+  let page: 'changes' | 'history' = 'changes';
   /** '' = every ref, '~current' = HEAD only, else this branch's history. */
   let branchFilter = '';
   /** Free-text filter over the loaded commits (subject/author/hash/refs). */
@@ -384,7 +400,6 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       },
     ]);
   }
-  const isStashRow = (hash: string) => hash.startsWith('stash@{');
   const qs = (params: Record<string, string | number | boolean | null | undefined>): string =>
     Object.entries(params)
       .filter(([, v]) => v != null && v !== '')
@@ -510,9 +525,6 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       row.style.paddingLeft = `${svgW + 6}px`;
       const subj = el('span', 'git-subject', r.c.subject);
       row.appendChild(subj);
-      if (isStashRow(r.c.hash)) {
-        row.appendChild(el('span', 'git-ref git-ref-stash', r.c.hash));
-      }
       if (r.c.refs) {
         for (const ref of r.c.refs.split(', ')) {
           const cls = ref.startsWith('tag:')
@@ -553,14 +565,8 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
         row.classList.add('sel');
         void renderDetail();
       });
-      // Real commits get the op menu, stashes the stash menu; the
-      // uncommitted pseudo-row gets neither.
-      if (r.c.hash && isStashRow(r.c.hash)) {
-        row.addEventListener('contextmenu', (e) => {
-          e.preventDefault();
-          stashMenu(e.clientX, e.clientY, r.c.hash);
-        });
-      } else if (r.c.hash) {
+      // Every History row is a commit now — always the op menu.
+      if (r.c.hash) {
         row.addEventListener('contextmenu', (e) => {
           e.preventDefault();
           commitMenu(e.clientX, e.clientY, r.c.hash, r.c.subject);
@@ -601,24 +607,6 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
 
   async function renderDetail() {
     const my = ++seq;
-    /** Files (click → per-file diff) + whole-revision diff, shared by the
-     * commit, compare, and stash details. */
-    const appendFilesAndDiff = (d: ShowResp, perFile: (path: string) => Promise<ShowResp | null>) => {
-      const list = el('div', 'git-files');
-      for (const f of d.files) {
-        const row = el('div', 'git-file');
-        row.appendChild(el('span', `gbadge g${f.status === 'A' ? 'new' : f.status === 'D' ? 'del' : 'mod'}`, f.status));
-        row.appendChild(el('span', 'git-file-path', f.path));
-        row.addEventListener('click', async () => {
-          const fd = await perFile(f.path);
-          detailEl.querySelector('.git-diff')?.remove();
-          detailEl.appendChild(renderUnifiedDiff(fd?.diff ?? '(no diff)'));
-        });
-        list.appendChild(row);
-      }
-      detailEl.appendChild(list);
-      detailEl.appendChild(renderUnifiedDiff(d.diff));
-    };
     // Compare mode: A..B between two right-click-marked commits.
     if (compareView) {
       const { a, b } = compareView;
@@ -634,199 +622,15 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
         el('div', 'git-detail-title', `⇄ ${a.slice(0, 8)}..${b.slice(0, 8)}`),
         el('div', 'git-detail-meta', `${d.files?.length ?? 0} file(s) changed · click a row to leave compare`),
       );
-      appendFilesAndDiff(d, (p) => get<ShowResp>(`/git/compare?${qs({ root, rev: a, rev2: b, path: p })}`));
-      return;
-    }
-    if (isStashRow(selected)) {
-      // Stash detail: the entry's summary, apply/pop/drop actions, its diff.
-      detailEl.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
-      const d = await get<ShowResp>(`/git/show?${qs({ root, rev: selected })}`);
-      if (my !== seq) return;
-      const entry = stashes.find((s) => s.sel === selected);
-      if (!d) {
-        detailEl.replaceChildren(el('div', 'git-detail-hint', 'could not load this stash'));
-        return;
-      }
-      detailEl.replaceChildren(
-        el('div', 'git-detail-title', entry?.msg ?? selected),
-        el('div', 'git-detail-meta', `${selected} · ${d.author} · ${fmtDate(d.date)}`),
-      );
-      const actions = el('div', 'git-bulk');
-      const ap = el('button', 'pkgs-btn', 'Apply');
-      ap.title = 'apply, keep the entry';
-      ap.addEventListener('click', () => void op('/git/stash/apply', { rev: selected }, 'applied'));
-      const pp = el('button', 'pkgs-btn', 'Pop');
-      pp.title = 'apply and drop';
-      pp.addEventListener('click', () => void op('/git/stash/pop', { rev: selected }, 'popped'));
-      const dr = el('button', 'pkgs-btn git-danger', 'Drop');
-      dr.title = 'delete the entry (two clicks)';
-      dr.addEventListener('click', () => {
-        if (dr.dataset.armed !== '1') {
-          dr.dataset.armed = '1';
-          dr.textContent = 'Drop for good? click again';
-          return;
-        }
-        void op('/git/stash/drop', { rev: selected }, 'dropped');
-      });
-      actions.append(ap, pp, dr);
-      detailEl.appendChild(actions);
-      appendFilesAndDiff(d, (p) => get<ShowResp>(`/git/show?${qs({ root, rev: selected, path: p })}`));
+      appendFilesAndDiff(detailEl, d, (p) => get<ShowResp>(`/git/compare?${qs({ root, rev: a, rev2: b, path: p })}`));
       return;
     }
     if (!selected) {
-      // The uncommitted card: stage/unstage per file, stage-all, commit box.
-      const files = uncommitted;
+      // The uncommitted card lives on the CHANGES page now; on History this
+      // is just the landing hint.
       detailEl.replaceChildren(
-        el('div', 'git-detail-title', `Uncommitted Changes (${files.length})`),
-        el(
-          'div',
-          'git-detail-hint',
-          files.length ? 'click a file for its diff · + stage / − unstage' : 'working tree clean',
-        ),
+        el('div', 'git-detail-hint', 'select a commit for its details · working tree lives under Changes'),
       );
-      // Conflict banner: the in-progress sequencer and its driver. Conflicted
-      // rows below open in the editor instead of showing a useless diff.
-      if (gitState.state || gitState.conflicts.length) {
-        const label = gitState.state ? `${gitState.state} in progress` : 'conflicts present';
-        const banner = el('div', 'git-conflict-banner');
-        banner.appendChild(
-          el('span', 'git-conflict-title', `⚡ ${label} · ${gitState.conflicts.length} conflicted file(s)`),
-        );
-        const btns = el('span', 'git-conflict-actions');
-        const cont = el('button', 'pkgs-btn primary', 'Continue');
-        cont.title = `git ${gitState.state ?? 'merge'} --continue`;
-        cont.addEventListener('click', () => void op('/git/op', { action: 'continue' }, 'continued'));
-        const ab = el('button', 'pkgs-btn git-danger', 'Abort');
-        ab.title = 'click twice to confirm';
-        ab.addEventListener('click', () => {
-          if (ab.dataset.armed !== '1') {
-            ab.dataset.armed = '1';
-            ab.textContent = `Abort the ${gitState.state}? click again`;
-            return;
-          }
-          void op('/git/op', { action: 'abort' }, 'aborted');
-        });
-        btns.append(cont, ab);
-        banner.appendChild(btns);
-        detailEl.appendChild(banner);
-      }
-      if (files.length) {
-        const bulk = el('div', 'git-bulk');
-        const sa = el('button', 'pkgs-btn', 'Stage all');
-        sa.addEventListener('click', () => void op('/git/add', {}, 'staged all'));
-        const ua = el('button', 'pkgs-btn', 'Unstage all');
-        ua.addEventListener('click', () => void op('/git/unstage', {}, 'unstaged all'));
-        bulk.append(sa, ua);
-        detailEl.appendChild(bulk);
-      }
-      const list = el('div', 'git-files');
-      for (const f of files) {
-        const untracked = f.status.includes('?');
-        const staged = !untracked && f.status[0] !== ' ';
-        const unstaged = untracked || f.status[1] !== ' ';
-        const row = el('div', 'git-file');
-        const stageBtn = el(
-          'button',
-          'git-stage-btn' + (staged ? ' staged' : ''),
-          unstaged ? '+' : '−',
-        );
-        stageBtn.title = unstaged ? 'stage this file' : 'unstage this file';
-        stageBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          void op(unstaged ? '/git/add' : '/git/unstage', { path: f.path }, unstaged ? 'staged' : 'unstaged');
-        });
-        row.appendChild(stageBtn);
-        // Discard ALL of this file's changes — two-click armed.
-        const dbtn = el('button', 'git-discard-btn', '✕');
-        dbtn.title = 'discard changes (two clicks)';
-        dbtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          if (dbtn.dataset.armed !== '1') {
-            dbtn.dataset.armed = '1';
-            dbtn.title = `discard ${f.path}? click again`;
-            return;
-          }
-          void op('/git/discard', { path: f.path }, 'discarded');
-        });
-        row.appendChild(dbtn);
-        if (f.submodule) {
-          const sb = el('span', 'gbadge gsub', 'S');
-          sb.title = 'submodule — view the gitlink diff here; enter it from the code panel';
-          row.appendChild(sb);
-        } else {
-          row.appendChild(el('span', `gbadge g${untracked ? 'new' : f.status.includes('D') ? 'del' : 'mod'}`, f.status.trim() || 'M'));
-        }
-        row.appendChild(el('span', 'git-file-path', f.path));
-        row.addEventListener('click', async () => {
-          // Conflicted file: resolving it beats staring at a marker-pocked
-          // diff — jump into the code panel's editor (accept widgets there).
-          if (gitState.conflicts.includes(f.path) && opts.openInCode && root) {
-            opts.openInCode(root, f.path);
-            return;
-          }
-          const forStaged = staged && !unstaged;
-          const diff = await getText(`/git/diff?${qs({ pane, path: f.path, staged: forStaged })}`);
-          detailEl.querySelector('.git-diff')?.remove();
-          detailEl.appendChild(renderUnifiedDiff(diff ?? '(no diff)'));
-        });
-        if (gitState.conflicts.includes(f.path)) {
-          row.classList.add('git-file-conflict');
-          row.title = 'conflict — click to resolve in the editor';
-        }
-        list.appendChild(row);
-      }
-      detailEl.appendChild(list);
-      // Commit box: commits the staged set; stages everything first when the
-      // index is empty (VS Code's smart-commit behaviour, toasted).
-      const crow = el('div', 'git-commit-row');
-      const msg = document.createElement('input');
-      msg.className = 'git-commit-input';
-      msg.placeholder = 'Commit message (Enter to commit)';
-      const cbtn = el('button', 'pkgs-btn primary', 'Commit');
-      const doCommit = () => {
-        const message = msg.value.trim();
-        if (!message) return;
-        const stagedAny = uncommitted.some((f) => !f.status.includes('?') && f.status[0] !== ' ');
-        void (async () => {
-          if (!stagedAny) {
-            opts.toast('nothing staged — staging all first');
-            await op('/git/add', {}, 'staged all');
-          }
-          await op('/git/commit', { message }, 'committed');
-          msg.value = '';
-        })();
-      };
-      cbtn.addEventListener('click', doCommit);
-      msg.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') doCommit();
-        e.stopPropagation();
-      });
-      crow.append(msg, cbtn);
-      // Amend HEAD: folds the staged set into the tip commit (--no-edit).
-      // Rewrites history → two-click armed, only offered with a HEAD at all.
-      if (logData?.commits.length) {
-        const abtn = el('button', 'pkgs-btn git-danger', 'Amend');
-        abtn.title = 'amend HEAD with the staged set (--no-edit; two clicks)';
-        abtn.addEventListener('click', () => {
-          if (abtn.dataset.armed !== '1') {
-            abtn.dataset.armed = '1';
-            abtn.textContent = 'rewrite HEAD? click again';
-            return;
-          }
-          const stagedAny = uncommitted.some((f) => !f.status.includes('?') && f.status[0] !== ' ');
-          void (async () => {
-            if (!stagedAny) {
-              opts.toast('nothing staged — nothing to amend with');
-              abtn.dataset.armed = '';
-              abtn.textContent = 'Amend';
-              return;
-            }
-            await op('/git/amend', {}, 'amended HEAD');
-          })();
-        });
-        crow.appendChild(abtn);
-      }
-      detailEl.appendChild(crow);
       return;
     }
     detailEl.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
@@ -844,15 +648,484 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       el('div', 'git-detail-meta', `${d.author} · ${fmtDate(d.date)}`),
     );
     if (d.body.trim()) detailEl.appendChild(el('div', 'git-detail-body', d.body.trim()));
-    appendFilesAndDiff(d, (p) => get<ShowResp>(`/git/show?${qs({ root, rev: d.hash, path: p })}`));
+    appendFilesAndDiff(detailEl, d, (p) => get<ShowResp>(`/git/show?${qs({ root, rev: d.hash, path: p })}`));
   }
+
+  /** Files (click → per-file diff) + whole-revision diff, shared by the
+   * commit, compare, and stash details. */
+  function appendFilesAndDiff(container: HTMLElement, d: ShowResp, perFile: (path: string) => Promise<ShowResp | null>) {
+    const list = el('div', 'git-files');
+    for (const f of d.files) {
+      const row = el('div', 'git-file');
+      row.appendChild(el('span', `gbadge g${f.status === 'A' ? 'new' : f.status === 'D' ? 'del' : 'mod'}`, f.status));
+      row.appendChild(el('span', 'git-file-path', f.path));
+      row.addEventListener('click', async () => {
+        const fd = await perFile(f.path);
+        container.querySelector('.git-diff')?.remove();
+        container.appendChild(renderUnifiedDiff(fd?.diff ?? '(no diff)'));
+      });
+      list.appendChild(row);
+    }
+    container.appendChild(list);
+    container.appendChild(renderUnifiedDiff(d.diff));
+  }
+
+  // ---- Changes page: uncommitted workbench + stash section ----------------------
+  const workEl = el('div', 'git-workbench');
+
+  /** The conflict banner (sequencer driver), on top of the changes side. */
+  function renderConflictBanner(): HTMLElement | null {
+    if (!gitState.state && !gitState.conflicts.length) return null;
+    const label = gitState.state ? `${gitState.state} in progress` : 'conflicts present';
+    const banner = el('div', 'git-conflict-banner');
+    banner.appendChild(
+      el('span', 'git-conflict-title', `⚡ ${label} · ${gitState.conflicts.length} conflicted file(s)`),
+    );
+    const btns = el('span', 'git-conflict-actions');
+    const cont = el('button', 'pkgs-btn primary', 'Continue');
+    cont.title = `git ${gitState.state ?? 'merge'} --continue`;
+    cont.addEventListener('click', () => void op('/git/op', { action: 'continue' }, 'continued'));
+    const ab = el('button', 'pkgs-btn git-danger', 'Abort');
+    ab.title = 'click twice to confirm';
+    ab.addEventListener('click', () => {
+      if (ab.dataset.armed !== '1') {
+        ab.dataset.armed = '1';
+        ab.textContent = `Abort the ${gitState.state}? click again`;
+        return;
+      }
+      void op('/git/op', { action: 'abort' }, 'aborted');
+    });
+    btns.append(cont, ab);
+    banner.appendChild(btns);
+    return banner;
+  }
+
+  /** The left side: uncommitted section (stage buttons + commit box) + stashes. */
+  function renderChangesSide(side: HTMLElement) {
+    const files = uncommitted;
+    side.appendChild(el('div', 'git-detail-title', `Uncommitted Changes (${files.length})`));
+    side.appendChild(
+      el(
+        'div',
+        'git-detail-hint',
+        files.length ? 'click a file for the stageable diff · + stage / − unstage' : 'working tree clean',
+      ),
+    );
+    const banner = renderConflictBanner();
+    if (banner) side.appendChild(banner);
+    if (files.length) {
+      const bulk = el('div', 'git-bulk');
+      const sa = el('button', 'pkgs-btn', 'Stage all');
+      sa.addEventListener('click', () => void op('/git/add', {}, 'staged all'));
+      const ua = el('button', 'pkgs-btn', 'Unstage all');
+      ua.addEventListener('click', () => void op('/git/unstage', {}, 'unstaged all'));
+      bulk.append(sa, ua);
+      side.appendChild(bulk);
+    }
+    const list = el('div', 'git-files');
+    for (const f of files) {
+      const untracked = f.status.includes('?');
+      const staged = !untracked && f.status[0] !== ' ';
+      const unstaged = untracked || f.status[1] !== ' ';
+      const row = el('div', 'git-file');
+      const stageBtn = el('button', 'git-stage-btn' + (staged ? ' staged' : ''), unstaged ? '+' : '−');
+      stageBtn.title = unstaged ? 'stage this file' : 'unstage this file';
+      stageBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        void op(unstaged ? '/git/add' : '/git/unstage', { path: f.path }, unstaged ? 'staged' : 'unstaged');
+      });
+      row.appendChild(stageBtn);
+      // Discard ALL of this file's changes — two-click armed.
+      const dbtn = el('button', 'git-discard-btn', '✕');
+      dbtn.title = 'discard changes (two clicks)';
+      dbtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (dbtn.dataset.armed !== '1') {
+          dbtn.dataset.armed = '1';
+          dbtn.title = `discard ${f.path}? click again`;
+          return;
+        }
+        void op('/git/discard', { path: f.path }, 'discarded');
+      });
+      row.appendChild(dbtn);
+      if (f.submodule) {
+        const sb = el('span', 'gbadge gsub', 'S');
+        sb.title = 'submodule — view the gitlink diff here; enter it from the code panel';
+        row.appendChild(sb);
+      } else {
+        row.appendChild(el('span', `gbadge g${untracked ? 'new' : f.status.includes('D') ? 'del' : 'mod'}`, f.status.trim() || 'M'));
+      }
+      row.appendChild(el('span', 'git-file-path', f.path));
+      row.addEventListener('click', () => {
+        // Conflicted file: resolving it beats staring at a marker-pocked
+        // diff — jump into the code panel's editor (accept widgets there).
+        if (gitState.conflicts.includes(f.path) && opts.openInCode && root) {
+          opts.openInCode(root, f.path);
+          return;
+        }
+        openWorkbench(f.path, { staged: staged && !unstaged });
+      });
+      if (gitState.conflicts.includes(f.path)) {
+        row.classList.add('git-file-conflict');
+        row.title = 'conflict — click to resolve in the editor';
+      }
+      list.appendChild(row);
+    }
+    side.appendChild(list);
+    // Commit box: commits the staged set; stages everything first when the
+    // index is empty (VS Code's smart-commit behaviour, toasted).
+    const crow = el('div', 'git-commit-row');
+    const msg = document.createElement('input');
+    msg.className = 'git-commit-input';
+    msg.placeholder = 'Commit message (Enter to commit)';
+    const cbtn = el('button', 'pkgs-btn primary', 'Commit');
+    const doCommit = () => {
+      const message = msg.value.trim();
+      if (!message) return;
+      const stagedAny = uncommitted.some((f) => !f.status.includes('?') && f.status[0] !== ' ');
+      void (async () => {
+        if (!stagedAny) {
+          opts.toast('nothing staged — staging all first');
+          await op('/git/add', {}, 'staged all');
+        }
+        await op('/git/commit', { message }, 'committed');
+        msg.value = '';
+      })();
+    };
+    cbtn.addEventListener('click', doCommit);
+    msg.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doCommit();
+      e.stopPropagation();
+    });
+    crow.append(msg, cbtn);
+    // Amend HEAD: folds the staged set into the tip commit (--no-edit);
+    // rewrites history → two-click armed, only offered with a HEAD at all.
+    if (logData?.commits.length) {
+      const abtn = el('button', 'pkgs-btn git-danger', 'Amend');
+      abtn.title = 'amend HEAD with the staged set (--no-edit; two clicks)';
+      abtn.addEventListener('click', () => {
+        if (abtn.dataset.armed !== '1') {
+          abtn.dataset.armed = '1';
+          abtn.textContent = 'rewrite HEAD? click again';
+          return;
+        }
+        const stagedAny = uncommitted.some((f) => !f.status.includes('?') && f.status[0] !== ' ');
+        void (async () => {
+          if (!stagedAny) {
+            opts.toast('nothing staged — nothing to amend with');
+            abtn.dataset.armed = '';
+            abtn.textContent = 'Amend';
+            return;
+          }
+          await op('/git/amend', {}, 'amended HEAD');
+        })();
+      });
+      crow.appendChild(abtn);
+    }
+    side.appendChild(crow);
+    // Stashes (their controls+diff render in the workbench on the right).
+    side.appendChild(el('div', 'git-detail-title', `Stashes (${stashes.length})`));
+    const slist = el('div', 'git-files');
+    if (!stashes.length) {
+      slist.appendChild(el('div', 'git-detail-hint', 'none — the toolbar Stash button makes one'));
+    }
+    for (const s of stashes) {
+      const row = el('div', 'git-stash-row');
+      row.appendChild(el('span', 'git-ref git-ref-stash', s.sel));
+      row.appendChild(el('span', 'git-file-path', s.msg));
+      row.addEventListener('click', () => void renderStashWorkbench(s.sel));
+      row.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        stashMenu(e.clientX, e.clientY, s.sel);
+      });
+      slist.appendChild(row);
+    }
+    side.appendChild(slist);
+  }
+
+  /** Stash detail (actions + diff), in the workbench. */
+  async function renderStashWorkbench(sel: string) {
+    const my = ++seq;
+    workEl.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
+    const d = await get<ShowResp>(`/git/show?${qs({ root, rev: sel })}`);
+    if (my !== seq) return;
+    const entry = stashes.find((s) => s.sel === sel);
+    if (!d) {
+      workEl.replaceChildren(el('div', 'git-detail-hint', 'could not load this stash'));
+      return;
+    }
+    workEl.replaceChildren(
+      el('div', 'git-detail-title', entry?.msg ?? sel),
+      el('div', 'git-detail-meta', `${sel} · ${d.author} · ${fmtDate(d.date)}`),
+    );
+    const actions = el('div', 'git-bulk');
+    const ap = el('button', 'pkgs-btn', 'Apply');
+    ap.title = 'apply, keep the entry';
+    ap.addEventListener('click', () => void op('/git/stash/apply', { rev: sel }, 'applied'));
+    const pp = el('button', 'pkgs-btn', 'Pop');
+    pp.title = 'apply and drop';
+    pp.addEventListener('click', () => void op('/git/stash/pop', { rev: sel }, 'popped'));
+    const dr = el('button', 'pkgs-btn git-danger', 'Drop');
+    dr.title = 'delete the entry (two clicks)';
+    dr.addEventListener('click', () => {
+      if (dr.dataset.armed !== '1') {
+        dr.dataset.armed = '1';
+        dr.textContent = 'Drop for good? click again';
+        return;
+      }
+      void op('/git/stash/drop', { rev: sel }, 'dropped');
+    });
+    actions.append(ap, pp, dr);
+    workEl.appendChild(actions);
+    appendFilesAndDiff(workEl, d, (p) => get<ShowResp>(`/git/show?${qs({ root, rev: sel, path: p })}`));
+  }
+
+  // ---- workbench: stageable diff (ported from the code panel, design B) ----------
+  const cmWorkbenchTheme = EditorView.theme({
+    '&': { height: '100%' },
+    '.cm-scroller': { overflow: 'auto' },
+  });
+  interface WorkState {
+    path: string;
+    staged: boolean;
+    mode: 'unified' | 'split';
+  }
+  let workState: WorkState | null = null;
+  let mergeView: MergeView | null = null;
+
+  function openWorkbench(path: string, o: { staged?: boolean; mode?: 'unified' | 'split' } = {}) {
+    void renderWorkbenchDiff(path, o);
+  }
+
+  async function renderWorkbenchDiff(path: string, o: { staged?: boolean; mode?: 'unified' | 'split' } = {}) {
+    const staged = o.staged ?? false;
+    const mode = o.mode ?? workState?.mode ?? 'unified';
+    const my = ++seq;
+    workState = { path, staged, mode };
+    mergeView?.destroy();
+    mergeView = null;
+    // Controls — same classes/ordering as the code panel's diff had (checks
+    // key off them): side toggle, view mode, jump out, plus sel buttons.
+    const ctl = el('div', 'diff-ctl');
+    const mkBtn = (label: string, on: boolean, fn: () => void) => {
+      const b = el('button', 'diff-ctl-btn' + (on ? ' on' : ''), label);
+      b.addEventListener('click', fn);
+      return b;
+    };
+    ctl.append(
+      mkBtn('unstaged', !staged, () => void renderWorkbenchDiff(path, { staged: false, mode })),
+      mkBtn('staged', staged, () => void renderWorkbenchDiff(path, { staged: true, mode })),
+      mkBtn('unified', mode === 'unified', () => void renderWorkbenchDiff(path, { staged, mode: 'unified' })),
+      mkBtn('split', mode === 'split', () => void renderWorkbenchDiff(path, { staged, mode: 'split' })),
+    );
+    if (opts.openInCode && root) {
+      ctl.appendChild(mkBtn('open in editor', false, () => opts.openInCode!(root!, path)));
+    }
+    const histBtn = mkBtn('Hist', false, () => {
+      fileFilter = path;
+      page = 'history';
+      void load();
+    });
+    histBtn.title = 'this file’s history (renames followed) on the History page';
+    ctl.appendChild(histBtn);
+
+    const box = el('div', 'code-diff');
+    box.appendChild(ctl);
+    const text = (await getText(`/git/diff?${qs({ pane, root, path, staged })}`)) || '(no textual diff)';
+    if (my !== seq) return;
+    workEl.replaceChildren(el('div', 'git-detail-title', `diff · ${path}`), box);
+    if (text === '(no textual diff)') {
+      box.appendChild(el('div', 'dl', '(no textual diff)'));
+      return;
+    }
+    if (mode === 'split') {
+      // Left = HEAD; right = the index (staged) or the working tree (unstaged).
+      const aText = (await getText(`/git/blob?${qs({ pane, root, path, staged: false })}`)) ?? '';
+      const bText = staged
+        ? ((await getText(`/git/blob?${qs({ pane, root, path, staged: true })}`)) ?? '')
+        : ((await getText(`/fs/read?${qs({ pane, root, path })}`)) ?? '(unreadable)');
+      if (my !== seq) return;
+      const ro = [
+        lineNumbers(),
+        EditorState.readOnly.of(true),
+        EditorView.editable.of(false),
+        cmWorkbenchTheme,
+        ...(opts.langFor?.(path) ?? []),
+      ];
+      mergeView = new MergeView({
+        a: { doc: aText, extensions: ro },
+        b: { doc: bText, extensions: ro },
+        parent: box,
+        gutter: true,
+        highlightChanges: true,
+        collapseUnchanged: { margin: 3, minSize: 4 },
+      });
+      return;
+    }
+    renderStageableUnified(box, text, staged);
+  }
+
+  /** Unified diff with hunk/line-level staging: every '+'/'-' row toggles
+   * into a selection, every @@ carries a whole-hunk action, and the ctl row
+   * drives "N selected". Rebuilt reduced patches go to /git/apply. */
+  function renderStageableUnified(box: HTMLElement, text: string, staged: boolean) {
+    const ctl = box.querySelector('.diff-ctl') as HTMLElement;
+    const lines = text.split('\n');
+    const word = staged ? 'unstage' : 'stage';
+    const sel = new Set<number>();
+    const selBtn = el('button', 'diff-ctl-btn');
+    selBtn.style.display = 'none';
+    const clearBtn = el('button', 'diff-ctl-btn', 'clear');
+    clearBtn.style.display = 'none';
+    clearBtn.addEventListener('click', () => {
+      sel.clear();
+      box.querySelectorAll('.dl.sline.sel').forEach((x) => x.classList.remove('sel'));
+      refreshSelCtl();
+    });
+    ctl.append(selBtn, clearBtn);
+    const refreshSelCtl = () => {
+      selBtn.style.display = sel.size ? '' : 'none';
+      clearBtn.style.display = sel.size ? '' : 'none';
+      selBtn.textContent = sel.size ? `${word} ${sel.size} selected` : '';
+    };
+    let inHunks = false;
+    let hunkBody: number[] = [];
+    lines.forEach((line, idx) => {
+      const isHunk = line.startsWith('@@');
+      const isMeta = /^(diff |index |--- |\+\+\+ |new file|deleted |similarity |rename )/.test(line);
+      const row = el('div', 'dl');
+      row.className =
+        'dl ' +
+        (isHunk ? 'dhunk' : isMeta ? 'dmeta' : inHunks && line[0] === '+' ? 'dadd' : inHunks && line[0] === '-' ? 'ddel' : '');
+      row.textContent = line || ' ';
+      if (isHunk) {
+        inHunks = true;
+        hunkBody = [];
+        const hb = el('button', 'dl-hunk-btn', `${word} hunk`);
+        const idxs = hunkBody;
+        hb.addEventListener('click', (e) => {
+          e.stopPropagation();
+          void applyLines(new Set(idxs));
+        });
+        row.appendChild(hb);
+      } else if (!isMeta && inHunks && (line[0] === '+' || line[0] === '-')) {
+        hunkBody.push(idx);
+        row.classList.add('sline');
+        row.addEventListener('click', () => {
+          if (sel.has(idx)) sel.delete(idx);
+          else sel.add(idx);
+          row.classList.toggle('sel');
+          refreshSelCtl();
+        });
+      }
+      box.appendChild(row);
+    });
+    selBtn.addEventListener('click', () => {
+      const chosen = new Set(sel);
+      sel.clear();
+      void applyLines(chosen);
+    });
+    async function applyLines(chosen: Set<number>) {
+      if (!chosen.size) return;
+      const patch = buildPatch(lines, chosen);
+      try {
+        const r = await fetch(`${opts.getApiBase()}/git/apply`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ pane, root, patch, reverse: staged }),
+        });
+        const res = (await r.json()) as { ok: boolean; out: string };
+        if (!r.ok || !res.ok) {
+          opts.toast(res.out.split('\n')[0] || 'apply failed');
+          return;
+        }
+      } catch {
+        opts.toast('operation failed (daemon unreachable)');
+        return;
+      }
+      // Refresh status counts everywhere, then re-render this diff on top.
+      await load();
+      if (page === 'changes' && workState) void renderWorkbenchDiff(workState.path, workState);
+    }
+  }
+
+  /** Rebuild a REDUCED unified patch from a file's diff, keeping only the
+   * chosen +/- lines (unchosen '+' dropped, unchosen '-' rewritten as
+   * context — git add -p's edit-hunk semantics; counts recomputed). */
+  function buildPatch(lines: string[], chosen: Set<number>): string {
+    const firstHunk = lines.findIndex((l) => l.startsWith('@@'));
+    if (firstHunk < 0) return '';
+    const out = lines.slice(0, firstHunk);
+    let i = firstHunk;
+    while (i < lines.length) {
+      const head = lines[i];
+      if (!head.startsWith('@@')) {
+        i++;
+        continue;
+      }
+      let j = i + 1;
+      const body: { idx: number; text: string }[] = [];
+      while (j < lines.length && !lines[j].startsWith('@@') && !lines[j].startsWith('diff --git')) {
+        if (lines[j] !== '') body.push({ idx: j, text: lines[j] });
+        j++;
+      }
+      let anyChosen = false;
+      const kept: string[] = [];
+      for (const l of body) {
+        const c = l.text[0];
+        if (c === '+') {
+          if (chosen.has(l.idx)) {
+            kept.push(l.text);
+            anyChosen = true;
+          }
+        } else if (c === '-') {
+          if (chosen.has(l.idx)) {
+            kept.push(l.text);
+            anyChosen = true;
+          } else {
+            kept.push(' ' + l.text.slice(1));
+          }
+        } else {
+          kept.push(l.text); // context + "\ No newline" tails
+        }
+      }
+      if (anyChosen) {
+        const m = /@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/.exec(head);
+        const start = m ? m[1] : '0';
+        const oldCount = kept.filter((l) => l[0] === ' ' || l[0] === '-').length;
+        const newCount = kept.filter((l) => l[0] === ' ' || l[0] === '+').length;
+        out.push(`@@ -${start},${oldCount} +${start},${newCount} @@`);
+        out.push(...kept);
+      }
+      i = j;
+    }
+    return out.join('\n') + '\n';
+  }
+
 
   // ---- toolbar + load ----------------------------------------------------------
   function toolbar(): HTMLElement {
     const bar = el('div', 'git-toolbar');
+    // The one git surface's two pages.
+    const tabs = el('div', 'git-tabs');
+    for (const [p, label] of [
+      ['changes', 'Changes'],
+      ['history', 'History'],
+    ] as const) {
+      const t = el('button', 'git-tab' + (page === p ? ' on' : ''), label);
+      t.dataset.page = p;
+      t.addEventListener('click', () => {
+        if (page !== p) {
+          page = p;
+          void load();
+        }
+      });
+      tabs.appendChild(t);
+    }
+    bar.appendChild(tabs);
     const repo = el('span', 'git-repo', root ?? '(no git repo)');
     bar.appendChild(repo);
-    if (fileFilter) {
+    if (page === 'history' && fileFilter) {
       // File-history mode badge; ✕ clears back to the full graph.
       const chip = el('span', 'git-filefilter', `history: ${fileFilter.split('/').pop()}`);
       chip.title = fileFilter;
@@ -940,39 +1213,9 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
   }
 
   function buildRows(): LayRow[] {
-    const all = logData?.commits ?? [];
-    const head = all[0]?.hash;
-    return layout([
-      // The uncommitted card rides as a pseudo-commit parenting HEAD so its
-      // lane flows into the real topology, exactly like the extension's.
-      ...(uncommitted.length && head
-        ? [
-            {
-              hash: '',
-              parents: [head],
-              author: '',
-              date: '',
-              subject: `Uncommitted Changes (${uncommitted.length})`,
-              refs: '',
-            } satisfies LogCommit,
-          ]
-        : []),
-      // Stashes too: one pseudo-row each, also parenting HEAD (their real
-      // first parent is whatever HEAD was at stash time — noisy noise).
-      ...(head
-        ? stashes.map(
-            (s): LogCommit => ({
-              hash: s.sel,
-              parents: [head],
-              author: '',
-              date: '',
-              subject: s.msg,
-              refs: '',
-            }),
-          )
-        : []),
-      ...visibleCommits(),
-    ]);
+    // History is PURE topology now: the uncommitted card and stashes moved
+    // to the Changes page (real sections, not pseudo-rows in the lanes).
+    return layout(visibleCommits());
   }
 
   /** The bottom sentinel: when it scrolls into view, pull the next page.
@@ -1023,20 +1266,38 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     }
   }
 
-  /** Rebuild just the graph side (search typing / paging): the toolbar and
+  /** Mount the active page's main area (history lanes+detail, or the changes
+   * workbench). Used by load(), tab switches, and softReload (search/paging
+   * on history) alike. */
+  function renderCurrentMain() {
+    const main = el('div', 'git-main');
+    if (page === 'history') {
+      main.appendChild(renderGraph(buildRows()));
+      main.appendChild(detailEl);
+      attachPager(main);
+    } else {
+      mergeView?.destroy();
+      mergeView = null;
+      const side = el('div', 'git-detail git-changes-side');
+      renderChangesSide(side);
+      main.appendChild(side);
+      main.appendChild(workEl);
+    }
+    const old = panel.querySelector('.git-main');
+    if (old) old.replaceWith(main);
+    else panel.appendChild(main);
+  }
+
+  /** Rebuild just the mounted page (search typing / paging): the toolbar and
    * its focus stay put; selection survives (guarded on load). */
   function softReload(preserveScroll = false) {
     const oldGraph = panel.querySelector('.git-graph');
     const st = preserveScroll ? (oldGraph?.scrollTop ?? 0) : 0;
-    const main = el('div', 'git-main');
-    main.appendChild(renderGraph(buildRows()));
-    main.appendChild(detailEl);
-    panel.querySelector('.git-main')?.replaceWith(main);
+    renderCurrentMain();
     if (preserveScroll) {
       const g = panel.querySelector('.git-graph');
       if (g) g.scrollTop = st;
     }
-    attachPager(main);
     void renderDetail();
   }
 
@@ -1077,11 +1338,8 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     ) {
       selected = '';
     }
-    const main = el('div', 'git-main');
-    main.appendChild(renderGraph(buildRows()));
-    main.appendChild(detailEl);
-    panel.replaceChildren(toolbar(), main);
-    attachPager(main);
+    panel.replaceChildren(toolbar());
+    renderCurrentMain();
     await renderDetail();
   }
 
@@ -1092,6 +1350,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       closeMenu();
       panel.classList.toggle('show', open);
       if (open) {
+        page = 'changes'; // the everyday page; jumps land where they belong
         selected = '';
         rootOverride = null;
         fileFilter = null;
@@ -1099,6 +1358,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       }
     },
     show(hash: string) {
+      page = 'history';
       selected = hash;
       if (!open) {
         open = true;
@@ -1107,6 +1367,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       void load();
     },
     showFileHistory(gr: string, path: string) {
+      page = 'history';
       rootOverride = gr;
       fileFilter = path;
       selected = '';
@@ -1115,6 +1376,19 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
         panel.classList.add('show');
       }
       void load();
+    },
+    showChanges(gr?: string | null, path?: string) {
+      page = 'changes';
+      if (gr) rootOverride = gr;
+      selected = '';
+      if (!open) {
+        open = true;
+        panel.classList.add('show');
+      }
+      void (async () => {
+        await load();
+        if (path && page === 'changes') openWorkbench(path, {});
+      })();
     },
   };
 }

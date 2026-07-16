@@ -36,7 +36,7 @@ await page.keyboard.press('Enter');
 await page.waitForTimeout(600);
 await page.click('#btn-git');
 await page.locator('.git-panel.show').waitFor({ timeout: 10000 });
-await page.locator('.git-row').first().waitFor({ timeout: 10000 });
+await page.locator('.git-changes-side .git-detail-title').first().waitFor({ timeout: 10000 });
 
 // 1. Dirty a.txt, stage via ＋, then Amend (two-click): HEAD rewrites.
 execSync(`echo amendme >> ${REPO}/a.txt`);

@@ -765,6 +765,12 @@ const codeOpts: CodePanelOpts = {
     if (codePanel.isOpen()) codePanel.toggle();
     gitPanel.showFileHistory(root, path);
   },
+  // Changes-row deep links (design B): close the editor, open the workbench
+  // page with this file's diff.
+  onOpenChanges: (root, path) => {
+    if (codePanel.isOpen()) codePanel.toggle();
+    gitPanel.showChanges(root, path);
+  },
 };
 // CodeMirror is heavy, so the code panel loads on first use (vite splits the
 // chunk); the wrapper keeps the synchronous interface the shell expects.
@@ -811,9 +817,12 @@ const pkgsPanel = initPkgsPanel({
 // lazy dynamic import, same contract shape as the code panel's wrapper.
 let gitReal: import('./gitgraph').GitGraphPanel | null = null;
 let gitLoading = false;
-// A jump-in that arrived while the chunk was still loading: show(hash) or
-// showFileHistory(root, path) — applied once init completes.
-let pendingGit: { hash?: string; hist?: { root: string; path: string } } | null = null;
+// A jump-in that arrived while the chunk was still loading: show(hash),
+// showFileHistory(root, path), or showChanges(root?, path?) — applied once
+// init completes.
+let pendingGit:
+  | { hash?: string; hist?: { root: string; path: string }; changes?: { root?: string | null; path?: string } }
+  | null = null;
 async function ensureGit(): Promise<import('./gitgraph').GitGraphPanel> {
   if (!gitReal && !gitLoading) {
     gitLoading = true;
@@ -827,6 +836,7 @@ async function ensureGit(): Promise<import('./gitgraph').GitGraphPanel> {
         if (gitPanel.isOpen()) gitPanel.toggle();
         codePanel.openAt(root, path);
       },
+      langFor: (p) => codeReal?.langFor(p) ?? [],
     });
     gitLoading = false;
   }
@@ -859,6 +869,17 @@ const gitPanel = {
       const p = pendingGit;
       pendingGit = null;
       if (p?.hist) g.showFileHistory(p.hist.root, p.hist.path);
+      noteModal('gitgraph', g.isOpen());
+    });
+  },
+  /** Changes click-through (design B): the workbench page, optionally with a
+   * file's stageable diff already open. */
+  showChanges: (root?: string | null, path?: string) => {
+    pendingGit = { changes: { root: root ?? null, path } };
+    void ensureGit().then((g) => {
+      const p = pendingGit;
+      pendingGit = null;
+      if (p?.changes) g.showChanges(p.changes.root, p.changes.path);
       noteModal('gitgraph', g.isOpen());
     });
   },

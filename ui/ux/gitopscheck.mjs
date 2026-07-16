@@ -24,14 +24,14 @@ await page.keyboard.press('Enter');
 await page.waitForTimeout(600);
 await page.click('#btn-git');
 await page.locator('.git-panel.show').waitFor({ timeout: 10000 });
-await page.locator('.git-row').first().waitFor({ timeout: 10000 });
+await page.locator('.git-changes-side .git-detail-title').first().waitFor({ timeout: 10000 });
 
 // Dirty the tree, refresh, then the uncommitted card must list it.
 git('checkout -q master');
 execSync(`date >> ${REPO}/a.txt && echo new >> ${REPO}/b.txt`);
 await page.click('.git-toolbar .pkgs-btn:last-child'); // Refresh
 await page.waitForTimeout(900);
-const uncText = await page.locator('.git-row').first().textContent();
+const uncText = await page.locator('.git-changes-side .git-detail-title').first().textContent();
 check('uncommitted card lists the dirt (2)', uncText?.includes('Uncommitted Changes (2)'));
 
 // Stage ONLY a.txt via its ＋, commit it, and the log must have it.

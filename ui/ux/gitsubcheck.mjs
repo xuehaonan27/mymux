@@ -58,10 +58,18 @@ check('submodule files tree lists its contents', (await page.locator('.trow', { 
 
 // Its diff works too (nested repo resolves itself).
 await page.locator('.grow', { hasText: 'lib.txt' }).first().click();
-await page.waitForTimeout(1000);
-check('diff inside the submodule renders', ((await page.locator('#code-diff').textContent()) ?? '').includes('subchange'));
+await page.waitForTimeout(1500);
+// The row is a deep link now (design B): git surface opens with the diff.
+check('change row deep-links to the git surface', (await page.locator('.git-panel.show').count()) === 1);
+check('diff inside the submodule renders', ((await page.locator('.git-workbench .code-diff').textContent()) ?? '').includes('subchange'));
 
-// ⎇ root-repo stays (a submodule IS its own toplevel); ⌂ goes back to the pane.
+// ⎇ root-repo stays (a submodule IS its own toplevel); ⌂ goes back to the pane
+// — reopen the editor (the deep link closed it): Esc closes the git surface
+// first (⌘E is suspended while a modal is on top), THEN ⌘E toggles the panel.
+await page.keyboard.press('Escape');
+await page.waitForTimeout(400);
+await page.keyboard.press('Control+e');
+await page.waitForTimeout(900);
 await page.click('#root-repo');
 await page.waitForTimeout(900);
 check('⎇ stays at the submodule root', (await rootPath())?.endsWith('/ux-git-sub/lib'), await rootPath());
