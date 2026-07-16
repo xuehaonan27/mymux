@@ -623,6 +623,80 @@ pub async fn reset(Json(q): Json<WriteReq>) -> Json<WriteResp> {
     Json(run_op(&q, &["reset", flag, &rev], 60).await)
 }
 
+// ---- stash (the graph panel's stash section) ---------------------------------
+
+#[derive(Serialize)]
+pub struct StashEntry {
+    #[allow(dead_code)] // kept for a future "show stash commit" deep-link
+    hash: String,
+    /// The selector apply/pop/drop take ("stash@{0}").
+    sel: String,
+    /// %gs — "WIP on master: abc1234 subject" or the user's -m text.
+    msg: String,
+}
+
+/// `GET /git/stash/list?pane=&root=` — the stash stack, top first (capped).
+pub async fn stash_list(Query(q): Query<StatusQuery>) -> Json<Vec<StashEntry>> {
+    let root = root_for_req(q.pane, &q.root).await;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["stash", "list", "--format=%H%x1f%gd%x1f%gs"])
+        .output()
+        .await;
+    let Ok(out) = out else { return Json(vec![]) };
+    if !out.status.success() {
+        return Json(vec![]);
+    }
+    let entries = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\x1f').collect();
+            if f.len() < 3 {
+                return None;
+            }
+            Some(StashEntry {
+                hash: f[0].to_string(),
+                sel: f[1].to_string(),
+                msg: f[2..].join("\x1f"),
+            })
+        })
+        .take(50)
+        .collect();
+    Json(entries)
+}
+
+/// `POST /git/stash {message?}` — stash the tracked working tree (untracked
+/// files stay put, git's default); auto message unless one is given.
+pub async fn stash_push(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    match &q.message {
+        Some(m) if !m.trim().is_empty() && m.len() <= 10_000 => {
+            Json(run_op(&q, &["stash", "push", "-m", m], 60).await)
+        }
+        _ => Json(run_op(&q, &["stash", "push"], 60).await),
+    }
+}
+
+/// `POST /git/stash/pop {rev=stash@{n}}` — apply and drop; conflicts come
+/// back as git's own output (the entry is kept on conflict).
+pub async fn stash_pop(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let Some(sel) = req_rev(&q) else { return bad_rev() };
+    Json(run_op(&q, &["stash", "pop", &sel], 60).await)
+}
+
+/// `POST /git/stash/apply {rev=stash@{n}}` — apply, keep the entry.
+pub async fn stash_apply(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let Some(sel) = req_rev(&q) else { return bad_rev() };
+    Json(run_op(&q, &["stash", "apply", &sel], 60).await)
+}
+
+/// `POST /git/stash/drop {rev=stash@{n}}` — delete the entry (the panel
+/// two-click-confirms this one before calling).
+pub async fn stash_drop(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let Some(sel) = req_rev(&q) else { return bad_rev() };
+    Json(run_op(&q, &["stash", "drop", &sel], 60).await)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

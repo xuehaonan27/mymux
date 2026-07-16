@@ -1839,6 +1839,19 @@ body.has-winalpha #hostbar {
   cursor: context-menu;
 }
 
+/* Stash rows (batch 5). */
+.git-ref-stash {
+  color: #b98ae6;
+  border-color: rgba(185, 138, 230, 0.45);
+}
+.pkgs-btn.git-danger {
+  color: #f85149;
+}
+.pkgs-btn.git-danger[data-armed='1'] {
+  border-color: #f85149;
+  background: rgba(248, 81, 73, 0.12);
+}
+
 /* Viewer pane (images, hex — plugin-system P2 built-ins). */
 .code-viewer {
   display: none;

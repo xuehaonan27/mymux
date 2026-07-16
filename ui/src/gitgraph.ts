@@ -40,6 +40,10 @@ interface StatusFile {
   status: string;
   path: string;
 }
+interface StashEntry {
+  sel: string;
+  msg: string;
+}
 interface ShowResp {
   hash: string;
   author: string;
@@ -65,8 +69,9 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
   let root: string | null = null;
   let pane: number | null = null;
   let showAll = true;
-  let selected = ''; // '' = uncommitted card; else commit hash
+  let selected = ''; // '' = uncommitted card; else commit hash; 'stash@{n}' = stash
   let uncommitted: StatusFile[] = [];
+  let stashes: StashEntry[] = [];
   let logData: LogResp | null = null;
 
   const el = (tag: string, cls?: string, text?: string): HTMLElement => {
@@ -213,6 +218,26 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       },
     ]);
   }
+  /** The right-click menu for one stash row. */
+  function stashMenu(x: number, y: number, stashSel: string) {
+    openMenu(x, y, [
+      {
+        label: 'Apply (keep entry)',
+        action: () => void op('/git/stash/apply', { rev: stashSel }, 'applied'),
+      },
+      {
+        label: 'Pop (apply + drop)',
+        action: () => void op('/git/stash/pop', { rev: stashSel }, 'popped'),
+      },
+      {
+        label: 'Drop this stash',
+        danger: true,
+        confirm: `drop ${stashSel} for good? click again`,
+        action: () => void op('/git/stash/drop', { rev: stashSel }, 'dropped'),
+      },
+    ]);
+  }
+  const isStashRow = (hash: string) => hash.startsWith('stash@{');
   const qs = (params: Record<string, string | number | boolean | null | undefined>): string =>
     Object.entries(params)
       .filter(([, v]) => v != null && v !== '')
@@ -333,6 +358,9 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       row.style.paddingLeft = `${svgW + 6}px`;
       const subj = el('span', 'git-subject', r.c.subject);
       row.appendChild(subj);
+      if (isStashRow(r.c.hash)) {
+        row.appendChild(el('span', 'git-ref git-ref-stash', r.c.hash));
+      }
       if (r.c.refs) {
         for (const ref of r.c.refs.split(', ')) {
           const cls = ref.startsWith('tag:')
@@ -370,8 +398,14 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
         row.classList.add('sel');
         void renderDetail();
       });
-      // Real commits get the op menu; the uncommitted pseudo-row does not.
-      if (r.c.hash) {
+      // Real commits get the op menu, stashes the stash menu; the
+      // uncommitted pseudo-row gets neither.
+      if (r.c.hash && isStashRow(r.c.hash)) {
+        row.addEventListener('contextmenu', (e) => {
+          e.preventDefault();
+          stashMenu(e.clientX, e.clientY, r.c.hash);
+        });
+      } else if (r.c.hash) {
         row.addEventListener('contextmenu', (e) => {
           e.preventDefault();
           commitMenu(e.clientX, e.clientY, r.c.hash, r.c.subject);
@@ -409,6 +443,60 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
 
   async function renderDetail() {
     const my = ++seq;
+    /** Files (click → per-file diff) + whole-revision diff, shared by the
+     * commit and stash details. */
+    const appendFilesAndDiff = (d: ShowResp, rev: string) => {
+      const list = el('div', 'git-files');
+      for (const f of d.files) {
+        const row = el('div', 'git-file');
+        row.appendChild(el('span', `gbadge g${f.status === 'A' ? 'new' : f.status === 'D' ? 'del' : 'mod'}`, f.status));
+        row.appendChild(el('span', 'git-file-path', f.path));
+        row.addEventListener('click', async () => {
+          const fd = await get<ShowResp>(`/git/show?${qs({ root, rev, path: f.path })}`);
+          detailEl.querySelector('.git-diff')?.remove();
+          detailEl.appendChild(renderUnifiedDiff(fd?.diff ?? '(no diff)'));
+        });
+        list.appendChild(row);
+      }
+      detailEl.appendChild(list);
+      detailEl.appendChild(renderUnifiedDiff(d.diff));
+    };
+    if (isStashRow(selected)) {
+      // Stash detail: the entry's summary, apply/pop/drop actions, its diff.
+      detailEl.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
+      const d = await get<ShowResp>(`/git/show?${qs({ root, rev: selected })}`);
+      if (my !== seq) return;
+      const entry = stashes.find((s) => s.sel === selected);
+      if (!d) {
+        detailEl.replaceChildren(el('div', 'git-detail-hint', 'could not load this stash'));
+        return;
+      }
+      detailEl.replaceChildren(
+        el('div', 'git-detail-title', entry?.msg ?? selected),
+        el('div', 'git-detail-meta', `${selected} · ${d.author} · ${fmtDate(d.date)}`),
+      );
+      const actions = el('div', 'git-bulk');
+      const ap = el('button', 'pkgs-btn', 'Apply');
+      ap.title = 'apply, keep the entry';
+      ap.addEventListener('click', () => void op('/git/stash/apply', { rev: selected }, 'applied'));
+      const pp = el('button', 'pkgs-btn', 'Pop');
+      pp.title = 'apply and drop';
+      pp.addEventListener('click', () => void op('/git/stash/pop', { rev: selected }, 'popped'));
+      const dr = el('button', 'pkgs-btn git-danger', 'Drop');
+      dr.title = 'delete the entry (two clicks)';
+      dr.addEventListener('click', () => {
+        if (dr.dataset.armed !== '1') {
+          dr.dataset.armed = '1';
+          dr.textContent = 'Drop for good? click again';
+          return;
+        }
+        void op('/git/stash/drop', { rev: selected }, 'dropped');
+      });
+      actions.append(ap, pp, dr);
+      detailEl.appendChild(actions);
+      appendFilesAndDiff(d, selected);
+      return;
+    }
     if (!selected) {
       // The uncommitted card: stage/unstage per file, stage-all, commit box.
       const files = uncommitted;
@@ -501,22 +589,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       el('div', 'git-detail-meta', `${d.author} · ${fmtDate(d.date)}`),
     );
     if (d.body.trim()) detailEl.appendChild(el('div', 'git-detail-body', d.body.trim()));
-    const list = el('div', 'git-files');
-    for (const f of d.files) {
-      const row = el('div', 'git-file');
-      row.appendChild(el('span', `gbadge g${f.status === 'A' ? 'new' : f.status === 'D' ? 'del' : 'mod'}`, f.status));
-      row.appendChild(el('span', 'git-file-path', f.path));
-      row.addEventListener('click', async () => {
-        const fd = await get<ShowResp>(
-          `/git/show?${qs({ root, rev: d.hash, path: f.path })}`,
-        );
-        detailEl.querySelector('.git-diff')?.remove();
-        detailEl.appendChild(renderUnifiedDiff(fd?.diff ?? '(no diff)'));
-      });
-      list.appendChild(row);
-    }
-    detailEl.appendChild(list);
-    detailEl.appendChild(renderUnifiedDiff(d.diff));
+    appendFilesAndDiff(d, d.hash);
   }
 
   // ---- toolbar + load ----------------------------------------------------------
@@ -540,6 +613,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       ['Pull', '/git/pull', 'pulled'],
       ['Push', '/git/push', 'pushed'],
       ['Rebase', '/git/rebase', 'rebased'],
+      ['Stash', '/git/stash', 'stashed'],
     ] as const) {
       const b = el('button', 'pkgs-btn', label);
       b.addEventListener('click', () => void op(path, {}, okMsg));
@@ -575,28 +649,53 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       );
       return;
     }
-    const [log, status] = await Promise.all([
+    const [log, status, stashList] = await Promise.all([
       get<LogResp>(`/git/log?${qs({ root, all: showAll, limit: 400 })}`),
       get<StatusFile[]>(`/git/status?${qs({ root })}`),
+      get<StashEntry[]>(`/git/stash/list?${qs({ root })}`),
     ]);
     if (my !== seq) return;
     logData = log;
     uncommitted = status ?? [];
+    stashes = stashList ?? [];
     const commits = log?.commits ?? [];
+    // A selected row may vanish under us (popped stash, reset-away commit).
+    if (
+      selected &&
+      !commits.some((c) => c.hash === selected) &&
+      !stashes.some((s) => s.sel === selected)
+    ) {
+      selected = '';
+    }
+    const head = commits[0]?.hash;
     const rows: LayRow[] = layout([
       // The uncommitted card rides as a pseudo-commit parenting HEAD so its
       // lane flows into the real topology, exactly like the extension's.
-      ...(uncommitted.length && commits.length
+      ...(uncommitted.length && head
         ? [
             {
               hash: '',
-              parents: [commits[0].hash],
+              parents: [head],
               author: '',
               date: '',
               subject: `Uncommitted Changes (${uncommitted.length})`,
               refs: '',
             } satisfies LogCommit,
           ]
+        : []),
+      // Stashes too: one pseudo-row each, also parenting HEAD (their real
+      // first parent is whatever HEAD was at stash time — noisy noise).
+      ...(head
+        ? stashes.map(
+            (s): LogCommit => ({
+              hash: s.sel,
+              parents: [head],
+              author: '',
+              date: '',
+              subject: s.msg,
+              refs: '',
+            }),
+          )
         : []),
       ...commits,
     ]);
