@@ -7,8 +7,9 @@
 # Runner layout: the matrix runs on the performant runner (label: rui.ke,
 # per the user) — edit here if labels change (labels, not names, pick).
 #
-# Secrets needed on the repo: GITEA_TOKEN (write:repository) — release
-# creation + asset upload ride it, verified working 2026-07-16.
+# Secrets needed on the repo: MYMUX_RELEASE_TOKEN (a user's api token with
+# write:repository — repo secrets CANNOT be named GITEA_TOKEN: the GITEA_
+# prefix is reserved for the instance's built-in variables).
 name: release
 on:
   push:
@@ -47,7 +48,7 @@ jobs:
       - name: publish release ${{ github.ref_name }}
         env:
           TAG: ${{ github.ref_name }}
-          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GITEA_TOKEN: ${{ secrets.MYMUX_RELEASE_TOKEN }}
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           bash scripts/ci-publish-release.sh
