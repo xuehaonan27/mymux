@@ -91,6 +91,10 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
    * pane's repo); cleared on every toggle-open. */
   let rootOverride: string | null = null;
   let selected = ''; // '' = uncommitted card; else commit hash; 'stash@{n}' = stash
+  /** Compare mode: base set via a row's menu → highlighted; a second pick
+   * turns it into an A..B view in the detail column. */
+  let compareBase: string | null = null;
+  let compareView: { a: string; b: string } | null = null;
   let uncommitted: StatusFile[] = [];
   let stashes: StashEntry[] = [];
   let gitState: GitStateResp = { state: null, conflicts: [] };
@@ -317,6 +321,30 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
         label: 'Check out (detach HEAD)',
         action: () => void op('/git/checkout', { rev: hash }, `detached at ${hash.slice(0, 8)}`),
       },
+      {
+        label:
+          compareBase === hash
+            ? 'Clear compare base'
+            : compareBase
+              ? `Compare with ${compareBase.slice(0, 8)}`
+              : 'Mark as compare base',
+        action: () => {
+          if (compareBase === hash) {
+            compareBase = null;
+            softReload();
+            return;
+          }
+          if (!compareBase) {
+            compareBase = hash;
+            opts.toast(`compare base @ ${hash.slice(0, 8)} — right-click another commit to compare`);
+            softReload();
+            return;
+          }
+          compareView = { a: compareBase, b: hash };
+          compareBase = null;
+          softReload();
+        },
+      },
       branchPrompt(hash),
       tagPrompt(hash),
       {
@@ -471,7 +499,12 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
 
     const rowsEl = el('div', 'git-rows');
     for (const r of rows) {
-      const row = el('div', 'git-row' + (r.c.hash === selected || (!r.c.hash && !selected) ? ' sel' : ''));
+      const row = el(
+        'div',
+        'git-row' +
+          (r.c.hash === selected || (!r.c.hash && !selected) ? ' sel' : '') +
+          (r.c.hash === compareBase ? ' compare-base' : ''),
+      );
       row.style.paddingLeft = `${svgW + 6}px`;
       const subj = el('span', 'git-subject', r.c.subject);
       row.appendChild(subj);
@@ -512,6 +545,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       row.appendChild(el('span', 'git-author', r.c.author));
       row.appendChild(el('span', 'git-date', r.c.hash ? fmtDate(r.c.date) : ''));
       row.addEventListener('click', () => {
+        compareView = null; // any row click leaves compare mode
         selected = r.c.hash;
         rowsEl.querySelectorAll('.git-row.sel').forEach((x) => x.classList.remove('sel'));
         row.classList.add('sel');
@@ -566,15 +600,15 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
   async function renderDetail() {
     const my = ++seq;
     /** Files (click → per-file diff) + whole-revision diff, shared by the
-     * commit and stash details. */
-    const appendFilesAndDiff = (d: ShowResp, rev: string) => {
+     * commit, compare, and stash details. */
+    const appendFilesAndDiff = (d: ShowResp, perFile: (path: string) => Promise<ShowResp | null>) => {
       const list = el('div', 'git-files');
       for (const f of d.files) {
         const row = el('div', 'git-file');
         row.appendChild(el('span', `gbadge g${f.status === 'A' ? 'new' : f.status === 'D' ? 'del' : 'mod'}`, f.status));
         row.appendChild(el('span', 'git-file-path', f.path));
         row.addEventListener('click', async () => {
-          const fd = await get<ShowResp>(`/git/show?${qs({ root, rev, path: f.path })}`);
+          const fd = await perFile(f.path);
           detailEl.querySelector('.git-diff')?.remove();
           detailEl.appendChild(renderUnifiedDiff(fd?.diff ?? '(no diff)'));
         });
@@ -583,6 +617,24 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       detailEl.appendChild(list);
       detailEl.appendChild(renderUnifiedDiff(d.diff));
     };
+    // Compare mode: A..B between two right-click-marked commits.
+    if (compareView) {
+      const { a, b } = compareView;
+      detailEl.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
+      const d = await get<ShowResp>(`/git/compare?${qs({ root, rev: a, rev2: b })}`);
+      if (my !== seq) return;
+      if (!d) {
+        compareView = null;
+        detailEl.replaceChildren(el('div', 'git-detail-hint', 'could not compare these commits'));
+        return;
+      }
+      detailEl.replaceChildren(
+        el('div', 'git-detail-title', `⇄ ${a.slice(0, 8)}..${b.slice(0, 8)}`),
+        el('div', 'git-detail-meta', `${d.files?.length ?? 0} file(s) changed · click a row to leave compare`),
+      );
+      appendFilesAndDiff(d, (p) => get<ShowResp>(`/git/compare?${qs({ root, rev: a, rev2: b, path: p })}`));
+      return;
+    }
     if (isStashRow(selected)) {
       // Stash detail: the entry's summary, apply/pop/drop actions, its diff.
       detailEl.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
@@ -616,7 +668,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       });
       actions.append(ap, pp, dr);
       detailEl.appendChild(actions);
-      appendFilesAndDiff(d, selected);
+      appendFilesAndDiff(d, (p) => get<ShowResp>(`/git/show?${qs({ root, rev: selected, path: p })}`));
       return;
     }
     if (!selected) {
@@ -747,7 +799,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       el('div', 'git-detail-meta', `${d.author} · ${fmtDate(d.date)}`),
     );
     if (d.body.trim()) detailEl.appendChild(el('div', 'git-detail-body', d.body.trim()));
-    appendFilesAndDiff(d, d.hash);
+    appendFilesAndDiff(d, (p) => get<ShowResp>(`/git/show?${qs({ root, rev: d.hash, path: p })}`));
   }
 
   // ---- toolbar + load ----------------------------------------------------------

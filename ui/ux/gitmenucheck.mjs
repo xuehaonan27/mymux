@@ -55,7 +55,7 @@ await page.locator('.git-row').first().waitFor({ timeout: 10000 });
 const sideRow = page.locator('.git-row', { hasText: 'side: add side.txt' }).first();
 await sideRow.click({ button: 'right' });
 await page.locator('.git-menu').waitFor();
-check('row menu opens', (await page.locator('.git-menu-item').count()) === 7);
+check('row menu opens', (await page.locator('.git-menu-item').count()) === 8);
 await page.click('.git-menu-item:text-is("Cherry-pick onto HEAD")');
 await page.waitForTimeout(1500);
 check('cherry-pick landed on master', git('log -1 --format=%s').includes('side: add side.txt'));

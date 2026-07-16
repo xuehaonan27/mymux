@@ -540,6 +540,59 @@ pub async fn show(Query(q): Query<ShowQuery>) -> Result<Json<serde_json::Value>,
     })))
 }
 
+#[derive(Deserialize)]
+pub struct CompareQuery {
+    #[serde(default)]
+    rev: String,
+    #[serde(default)]
+    rev2: String,
+    #[serde(default)]
+    path: String,
+    pane: Option<u32>,
+    root: Option<String>,
+}
+
+/// `GET /git/compare?pane=&root=&rev=A&rev2=B` — the A..B cumulative diff
+/// (name-status files + unified diff, same 4 MiB cap as /git/show).
+pub async fn compare(Query(q): Query<CompareQuery>) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !valid_rev(&q.rev) || !valid_rev(&q.rev2) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let root = root_for_req(q.pane, &q.root).await;
+    let files = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["diff", "--name-status", "--format=", &q.rev, &q.rev2])
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| parse_name_status(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default();
+    const DIFF_CAP: usize = 4_000_000;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(&root)
+        .args(["diff", "--no-color", &q.rev, &q.rev2]);
+    if !q.path.is_empty() {
+        safe_path(&root, &q.path, false).ok_or(StatusCode::FORBIDDEN)?;
+        cmd.arg("--").arg(&q.path);
+    }
+    let diff_out = cmd
+        .output()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !diff_out.status.success() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let mut diff = String::from_utf8_lossy(&diff_out.stdout).into_owned();
+    if diff.len() > DIFF_CAP {
+        diff.truncate(DIFF_CAP);
+        diff.push_str("\n… (diff truncated at 4 MiB)\n");
+    }
+    Ok(Json(serde_json::json!({ "files": files, "diff": diff })))
+}
+
 // ---- write operations (the graph panel's action buttons) ---------------------
 
 #[derive(Deserialize, Clone)]

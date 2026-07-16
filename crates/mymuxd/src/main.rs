@@ -145,6 +145,7 @@ async fn run() {
         .route("/git/blob", get(git::blob))
         .route("/git/log", get(git::log))
         .route("/git/show", get(git::show))
+        .route("/git/compare", get(git::compare))
         .route("/git/blame", get(git::blame))
         .route("/git/add", post(git::add))
         .route("/git/unstage", post(git::unstage))

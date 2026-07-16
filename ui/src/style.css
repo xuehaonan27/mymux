@@ -1822,6 +1822,9 @@ body.has-winalpha #hostbar {
   background: var(--control-bg-hover);
   box-shadow: inset 2px 0 0 var(--accent);
 }
+.git-row.compare-base {
+  box-shadow: inset 2px 0 0 #d6a04c;
+}
 .git-subject {
   overflow: hidden;
   text-overflow: ellipsis;

@@ -42,7 +42,7 @@ await page.locator('.git-row').first().waitFor({ timeout: 10000 });
 // 1. Commit-row menu: 7 buttons + 2 prompt rows; create branch at this commit.
 await page.locator('.git-row:has(.git-ref-head)').first().click({ button: 'right' });
 await page.locator('.git-menu').waitFor();
-check('commit menu: 7 actions + 2 prompts', (await page.locator('.git-menu-item').count()) === 7 && (await page.locator('.git-menu-prompt').count()) === 2);
+check('commit menu: 8 actions + 2 prompts', (await page.locator('.git-menu-item').count()) === 8 && (await page.locator('.git-menu-prompt').count()) === 2);
 await page.locator('.git-menu-prompt').nth(0).locator('.git-menu-input').fill('feat-x');
 await page.locator('.git-menu-prompt').nth(0).locator('.git-menu-go').click();
 await page.waitForTimeout(1200);
