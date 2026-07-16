@@ -780,6 +780,33 @@ const procPanel = initProcPanel({
 const pkgsPanel = initPkgsPanel({
   getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
 });
+// The git graph is a plugin-shaped module (ui/src/gitgraph.ts) behind a
+// lazy dynamic import, same contract shape as the code panel's wrapper.
+let gitReal: import('./gitgraph').GitGraphPanel | null = null;
+let gitLoading = false;
+const gitPanel = {
+  isOpen: () => gitReal?.isOpen() ?? false,
+  toggle: () => {
+    if (gitReal) return gitReal.toggle();
+    if (gitLoading) return;
+    gitLoading = true;
+    void import('./gitgraph').then((m) => {
+      gitReal = m.initGitGraph({
+        getActivePane: () => active()?.activePane ?? null,
+        getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
+        toast,
+      });
+      gitReal.toggle();
+      noteModal('gitgraph', gitReal.isOpen());
+    });
+  },
+};
+function toggleGitGraph() {
+  gitPanel.toggle();
+  if (gitReal) noteModal('gitgraph', gitReal.isOpen());
+  setLeader(false);
+}
+registerModal('gitgraph', { isOpen: () => gitPanel.isOpen(), close: () => toggleGitGraph() });
 // The overlays are full-screen and share a z-band, so they're mutually exclusive.
 function closeOtherPanels(keep: 'code' | 'proc' | 'pkgs') {
   if (keep !== 'code' && codePanel.isOpen()) codePanel.toggle();
@@ -832,6 +859,7 @@ registerModal('pkgs', { isOpen: () => pkgsPanel.isOpen(), close: () => togglePlu
 document.getElementById('btn-code')?.addEventListener('click', toggleCode);
 document.getElementById('btn-proc')?.addEventListener('click', toggleProc);
 document.getElementById('btn-pkgs')?.addEventListener('click', togglePlugins);
+document.getElementById('btn-git')?.addEventListener('click', toggleGitGraph);
 
 // Agent attention notifications (see notify.ts): the bell arms a system-level
 // alert for agents that enter waiting/done while the app is unfocused. Off by
@@ -929,6 +957,7 @@ const keyDeps: KeyDeps = {
   jumpAttention: () => jumpToAttention(),
   keepToggle,
   togglePlugins: () => togglePlugins(),
+  toggleGitGraph: () => toggleGitGraph(),
   toggleSettings: () => toggleSettings(),
 };
 

@@ -29,6 +29,7 @@ export type ActionId =
   | 'proc'
   | 'attention'
   | 'plugins'
+  | 'gitgraph'
   | 'settings'
   | 'help';
 
@@ -43,6 +44,7 @@ export interface KeyDeps {
   /** ⌁↔∞ toggle on the active window (demote side confirms). */
   keepToggle(): void;
   togglePlugins(): void;
+  toggleGitGraph(): void;
   toggleSettings(): void;
 }
 
@@ -143,6 +145,12 @@ export const ACTIONS: Record<ActionId, ActionDef> = {
     desc: 'packages — browse & install language servers etc.',
     run: (d) => d.togglePlugins(),
   },
+  gitgraph: {
+    key: 'v',
+    direct: 'none', // like the packages panel: leader-only
+    desc: 'git graph — history, branches, diffs',
+    run: (d) => d.toggleGitGraph(),
+  },
   settings: {
     key: 's',
     direct: 'none',
@@ -190,6 +198,7 @@ export function helpRows(): Array<[string, string, string]> {
     'proc',
     'attention',
     'plugins',
+    'gitgraph',
     'settings',
     'help',
   ];
