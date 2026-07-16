@@ -93,6 +93,30 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       return null;
     }
   };
+  interface WriteResp {
+    ok: boolean;
+    out: string;
+  }
+  let opBusy = false;
+  /** One user-initiated git write (add/unstage/commit/fetch/pull/push/
+   * rebase). Serialized, toasts the git output, reloads the graph on success. */
+  async function op(path: string, body: Record<string, string | number | null>, okMsg: string) {
+    if (opBusy) return;
+    opBusy = true;
+    try {
+      const r = await fetch(`${opts.getApiBase()}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ pane, root, ...body }),
+      });
+      const res = (await r.json().catch(() => ({ ok: false, out: 'bad response' }))) as WriteResp;
+      opts.toast(res.out.split('\n').slice(0, 3).join(' · ') || (res.ok ? okMsg : 'failed'));
+      if (res.ok) await load();
+    } catch {
+      opts.toast('operation failed (daemon unreachable)');
+    }
+    opBusy = false;
+  }
   const qs = (params: Record<string, string | number | boolean | null | undefined>): string =>
     Object.entries(params)
       .filter(([, v]) => v != null && v !== '')
@@ -266,30 +290,80 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
   async function renderDetail() {
     const my = ++seq;
     if (!selected) {
-      // The uncommitted card: working-tree + staged changes and their diffs.
+      // The uncommitted card: stage/unstage per file, stage-all, commit box.
       const files = uncommitted;
       detailEl.replaceChildren(
         el('div', 'git-detail-title', `Uncommitted Changes (${files.length})`),
         el(
           'div',
           'git-detail-hint',
-          files.length ? 'click a file for its diff' : 'working tree clean',
+          files.length ? 'click a file for its diff · + stage / − unstage' : 'working tree clean',
         ),
       );
+      if (files.length) {
+        const bulk = el('div', 'git-bulk');
+        const sa = el('button', 'pkgs-btn', 'Stage all');
+        sa.addEventListener('click', () => void op('/git/add', {}, 'staged all'));
+        const ua = el('button', 'pkgs-btn', 'Unstage all');
+        ua.addEventListener('click', () => void op('/git/unstage', {}, 'unstaged all'));
+        bulk.append(sa, ua);
+        detailEl.appendChild(bulk);
+      }
       const list = el('div', 'git-files');
       for (const f of files) {
+        const untracked = f.status.includes('?');
+        const staged = !untracked && f.status[0] !== ' ';
+        const unstaged = untracked || f.status[1] !== ' ';
         const row = el('div', 'git-file');
-        row.appendChild(el('span', `gbadge g${f.status.includes('?') ? 'new' : f.status.includes('D') ? 'del' : 'mod'}`, f.status.trim() || 'M'));
+        const stageBtn = el(
+          'button',
+          'git-stage-btn' + (staged ? ' staged' : ''),
+          unstaged ? '+' : '−',
+        );
+        stageBtn.title = unstaged ? 'stage this file' : 'unstage this file';
+        stageBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          void op(unstaged ? '/git/add' : '/git/unstage', { path: f.path }, unstaged ? 'staged' : 'unstaged');
+        });
+        row.appendChild(stageBtn);
+        row.appendChild(el('span', `gbadge g${untracked ? 'new' : f.status.includes('D') ? 'del' : 'mod'}`, f.status.trim() || 'M'));
         row.appendChild(el('span', 'git-file-path', f.path));
         row.addEventListener('click', async () => {
-          const staged = !f.status.startsWith(' ') && f.status[0] !== '?' && !f.status.endsWith(' ');
-          const diff = await getText(`/git/diff?${qs({ pane, path: f.path, staged })}`);
+          const forStaged = staged && !unstaged;
+          const diff = await getText(`/git/diff?${qs({ pane, path: f.path, staged: forStaged })}`);
           detailEl.querySelector('.git-diff')?.remove();
           detailEl.appendChild(renderUnifiedDiff(diff ?? '(no diff)'));
         });
         list.appendChild(row);
       }
       detailEl.appendChild(list);
+      // Commit box: commits the staged set; stages everything first when the
+      // index is empty (VS Code's smart-commit behaviour, toasted).
+      const crow = el('div', 'git-commit-row');
+      const msg = document.createElement('input');
+      msg.className = 'git-commit-input';
+      msg.placeholder = 'Commit message (Enter to commit)';
+      const cbtn = el('button', 'pkgs-btn primary', 'Commit');
+      const doCommit = () => {
+        const message = msg.value.trim();
+        if (!message) return;
+        const stagedAny = uncommitted.some((f) => !f.status.includes('?') && f.status[0] !== ' ');
+        void (async () => {
+          if (!stagedAny) {
+            opts.toast('nothing staged — staging all first');
+            await op('/git/add', {}, 'staged all');
+          }
+          await op('/git/commit', { message }, 'committed');
+          msg.value = '';
+        })();
+      };
+      cbtn.addEventListener('click', doCommit);
+      msg.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') doCommit();
+        e.stopPropagation();
+      });
+      crow.append(msg, cbtn);
+      detailEl.appendChild(crow);
       return;
     }
     detailEl.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
@@ -341,6 +415,16 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     }
     const spacer = el('span', 'git-spacer');
     bar.appendChild(spacer);
+    for (const [label, path, okMsg] of [
+      ['Fetch', '/git/fetch', 'fetched'],
+      ['Pull', '/git/pull', 'pulled'],
+      ['Push', '/git/push', 'pushed'],
+      ['Rebase', '/git/rebase', 'rebased'],
+    ] as const) {
+      const b = el('button', 'pkgs-btn', label);
+      b.addEventListener('click', () => void op(path, {}, okMsg));
+      bar.appendChild(b);
+    }
     const allLab = el('label', 'git-allrefs');
     const cb = document.createElement('input');
     cb.type = 'checkbox';

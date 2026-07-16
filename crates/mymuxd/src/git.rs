@@ -446,6 +446,125 @@ pub async fn show(Query(q): Query<ShowQuery>) -> Result<Json<serde_json::Value>,
     })))
 }
 
+// ---- write operations (the graph panel's action buttons) ---------------------
+
+#[derive(Deserialize, Clone)]
+pub struct WriteReq {
+    /// Only for add/unstage: the file to (un)stage. Absent/empty = everything.
+    path: Option<String>,
+    /// Only for commit: the message (argv-passed, no shell anywhere).
+    message: Option<String>,
+    pane: Option<u32>,
+    /// Optional absolute root override (the panel's root switcher).
+    root: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct WriteResp {
+    ok: bool,
+    /// stdout+stderr tail — git narrates failures well (no upstream, hooks,
+    /// rebase conflicts); the UI toasts it verbatim.
+    out: String,
+}
+
+/// Run one user-initiated git mutation. Network verbs get 120s, the rest 60s.
+async fn run_op(q: &WriteReq, args: &[&str], timeout_secs: u64) -> WriteResp {
+    let root = root_for_req(q.pane, &q.root).await;
+    if let Some(p) = &q.path {
+        if !p.is_empty() && safe_path(&root, p, false).is_none() {
+            return WriteResp {
+                ok: false,
+                out: "path outside the root".into(),
+            };
+        }
+    }
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(&root).args(args);
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        cmd.output(),
+    )
+    .await;
+    match out {
+        Err(_) => WriteResp {
+            ok: false,
+            out: format!("timed out after {timeout_secs}s"),
+        },
+        Ok(Err(e)) => WriteResp {
+            ok: false,
+            out: format!("git failed to start: {e}"),
+        },
+        Ok(Ok(o)) => {
+            let tail: String = String::from_utf8_lossy(&o.stderr)
+                .lines()
+                .chain(String::from_utf8_lossy(&o.stdout).lines())
+                .filter(|l| !l.trim().is_empty())
+                .take(8)
+                .collect::<Vec<_>>()
+                .join("\n");
+            WriteResp {
+                ok: o.status.success(),
+                out: tail,
+            }
+        }
+    }
+}
+
+/// `POST /git/add {path?}` — stage one file, or everything when absent.
+pub async fn add(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    match &q.path {
+        Some(p) if !p.is_empty() => Json(run_op(&q, &["add", "--", p], 60).await),
+        _ => Json(run_op(&q, &["add", "-A"], 60).await),
+    }
+}
+
+/// `POST /git/unstage {path?}` — unstage one file (or everything).
+pub async fn unstage(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    match &q.path {
+        Some(p) if !p.is_empty() => Json(run_op(&q, &["reset", "-q", "HEAD", "--", p], 60).await),
+        _ => Json(run_op(&q, &["reset", "-q", "HEAD"], 60).await),
+    }
+}
+
+/// `POST /git/commit {message}` — commit the staged set.
+pub async fn commit(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let Some(message) = q
+        .message
+        .clone()
+        .filter(|m| !m.trim().is_empty() && m.len() <= 10_000)
+    else {
+        return Json(WriteResp {
+            ok: false,
+            out: "empty (or oversized) commit message".into(),
+        });
+    };
+    Json(run_op(&q, &["commit", "-m", &message], 60).await)
+}
+
+/// `POST /git/fetch` — fetch all remotes (prune).
+pub async fn fetch(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    Json(run_op(&q, &["fetch", "--all", "--prune"], 120).await)
+}
+
+/// `POST /git/pull` — pull with autostash (plain merge pull, the least
+/// surprising default — interactive rebase stays out of scope).
+pub async fn pull(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    Json(run_op(&q, &["pull", "--autostash"], 120).await)
+}
+
+/// `POST /git/push` — push HEAD to its upstream (git's own error explains a
+/// missing upstream with the exact -u suggestion).
+pub async fn push(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    Json(run_op(&q, &["push"], 120).await)
+}
+
+/// `POST /git/rebase` — rebase onto @{upstream} (the common "sync my work"
+/// action). Conflicts are reported via git's output; the user resolves in
+/// the terminal.
+pub async fn rebase(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    Json(run_op(&q, &["rebase", "--autostash", "@{upstream}"], 120).await)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1756,6 +1756,47 @@ body.has-winalpha #hostbar {
   stroke-dasharray: 2.5 2;
 }
 
+/* Write-op widgets (batch 3). */
+.git-bulk {
+  display: flex;
+  gap: 8px;
+}
+.git-stage-btn {
+  flex: 0 0 18px;
+  padding: 0 2px;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: 11px/16px var(--mono);
+}
+.git-stage-btn:hover {
+  color: #3fb950;
+  border-color: #3fb950;
+}
+.git-stage-btn.staged:hover {
+  color: #f85149;
+  border-color: #f85149;
+}
+.git-commit-row {
+  display: flex;
+  gap: 8px;
+}
+.git-commit-input {
+  flex: 1;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--hairline);
+  background: var(--control-bg);
+  color: var(--text);
+  font: 12px var(--mono);
+  outline: none;
+}
+.git-commit-input:focus {
+  border-color: var(--accent);
+}
+
 /* Viewer pane (images, hex — plugin-system P2 built-ins). */
 .code-viewer {
   display: none;
