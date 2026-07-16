@@ -31,7 +31,7 @@ jobs:
       # x86_64 via system musl-gcc from the base image; aarch64 via
       # cargo-zigbuild. The script bootstraps everything else (rustup not
       # assumed: installed on the fly when missing).
-      - name: toolchain: rust + musl-tools
+      - name: "toolchain: rust + musl-tools"
         run: |
           set -e
           if ! command -v rustup >/dev/null 2>&1; then
