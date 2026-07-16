@@ -67,9 +67,11 @@ jobs:
           if ! cargo tauri --version >/dev/null 2>&1; then
             cargo install tauri-cli --locked --version '^2'
           fi
+          # $HOME/.cargo/bin lands on PATH for this step and every later one
+          # (env.HOME as ${{ env.HOME }} is EMPTY in expressions — PATH must
+          # be extended this way, not via a run-level env override).
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: build mymux.dmg (ad-hoc signed by cargo tauri build)
-        env:
-          PATH: ${{ env.HOME }}/.cargo/bin:$PATH
         run: cargo tauri build
       - name: upload .dmg to the release (gh on runners reads GH_TOKEN)
         env:
