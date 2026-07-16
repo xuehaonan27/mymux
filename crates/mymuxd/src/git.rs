@@ -454,6 +454,10 @@ pub struct WriteReq {
     path: Option<String>,
     /// Only for commit: the message (argv-passed, no shell anywhere).
     message: Option<String>,
+    /// Only for the rev ops (cherry-pick/revert/reset/checkout).
+    rev: Option<String>,
+    /// Only for reset: soft|mixed|hard (validated, no silent default).
+    mode: Option<String>,
     pane: Option<u32>,
     /// Optional absolute root override (the panel's root switcher).
     root: Option<String>,
@@ -563,6 +567,60 @@ pub async fn push(Json(q): Json<WriteReq>) -> Json<WriteResp> {
 /// the terminal.
 pub async fn rebase(Json(q): Json<WriteReq>) -> Json<WriteResp> {
     Json(run_op(&q, &["rebase", "--autostash", "@{upstream}"], 120).await)
+}
+
+// ---- rev-targeted operations (the graph panel's commit context menu) ---------
+
+/// The request's rev, run through the same charset check as the read side.
+fn req_rev(q: &WriteReq) -> Option<String> {
+    q.rev.clone().filter(|r| valid_rev(r))
+}
+
+fn bad_rev() -> Json<WriteResp> {
+    Json(WriteResp {
+        ok: false,
+        out: "bad (or missing) rev".into(),
+    })
+}
+
+/// `POST /git/cherry-pick {rev}` — apply one commit onto HEAD; conflicts come
+/// back as git's own output.
+pub async fn cherry_pick(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let Some(rev) = req_rev(&q) else { return bad_rev() };
+    Json(run_op(&q, &["cherry-pick", &rev], 60).await)
+}
+
+/// `POST /git/revert {rev}` — revert one commit with the default message
+/// (--no-edit: the panel can't host an editor).
+pub async fn revert(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let Some(rev) = req_rev(&q) else { return bad_rev() };
+    Json(run_op(&q, &["revert", "--no-edit", &rev], 60).await)
+}
+
+/// `POST /git/checkout {rev}` — switch branches (or detach at a commit);
+/// dirty-tree refusals are git's own message. Long timeout: checkouts of big
+/// trees with hooks can lag.
+pub async fn checkout(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let Some(rev) = req_rev(&q) else { return bad_rev() };
+    Json(run_op(&q, &["checkout", &rev], 120).await)
+}
+
+/// `POST /git/reset {rev, mode}` — reset HEAD to rev. mode ∈ soft|mixed|hard;
+/// a destructive verb with no silent default — anything else is rejected.
+pub async fn reset(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let Some(rev) = req_rev(&q) else { return bad_rev() };
+    let flag = match q.mode.as_deref() {
+        Some("soft") => "--soft",
+        Some("mixed") => "--mixed",
+        Some("hard") => "--hard",
+        _ => {
+            return Json(WriteResp {
+                ok: false,
+                out: "mode must be soft|mixed|hard".into(),
+            })
+        }
+    };
+    Json(run_op(&q, &["reset", flag, &rev], 60).await)
 }
 
 #[cfg(test)]

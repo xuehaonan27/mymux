@@ -117,6 +117,102 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     }
     opBusy = false;
   }
+  // ---- context menu (commit rows + branch badges) ---------------------------
+  // One menu at a time, body-appended (escapes the panel's overflow). Outside
+  // mousedown and Esc close it; Esc is capture+stopPropagation so the modal
+  // stack keeps the PANEL open (VS Code behaviour: Esc closes the menu only).
+  let menuEl: HTMLElement | null = null;
+  const closeMenu = () => {
+    menuEl?.remove();
+    menuEl = null;
+  };
+  interface MenuItem {
+    label: string;
+    danger?: boolean;
+    /** Two-click confirm for destructive verbs: first click arms (this text),
+     * second click runs. */
+    confirm?: string;
+    action: () => void;
+  }
+  function openMenu(x: number, y: number, items: MenuItem[]) {
+    closeMenu();
+    const m = el('div', 'git-menu');
+    for (const it of items) {
+      const b = el('button', 'git-menu-item' + (it.danger ? ' danger' : ''), it.label);
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (it.confirm && b.dataset.armed !== '1') {
+          b.dataset.armed = '1';
+          b.textContent = it.confirm;
+          return;
+        }
+        closeMenu();
+        it.action();
+      });
+      m.appendChild(b);
+    }
+    document.body.appendChild(m);
+    m.style.left = `${Math.min(x, innerWidth - m.offsetWidth - 8)}px`;
+    m.style.top = `${Math.min(y, innerHeight - m.offsetHeight - 8)}px`;
+    menuEl = m;
+  }
+  document.addEventListener('mousedown', (e) => {
+    if (menuEl && !menuEl.contains(e.target as Node)) closeMenu();
+  });
+  // WINDOW capture, not document: main.ts's modal-stack keydown is a document
+  // bubble listener, and document-level capture loses to it by registration
+  // order whenever the event target IS document. Window is higher in the
+  // capture path, so this always runs first and the Esc is eaten here.
+  window.addEventListener(
+    'keydown',
+    (e) => {
+      if (e.key === 'Escape' && menuEl) {
+        e.stopPropagation();
+        closeMenu();
+      }
+    },
+    true,
+  );
+  /** The right-click menu for one commit row. */
+  function commitMenu(x: number, y: number, hash: string, subject: string) {
+    openMenu(x, y, [
+      {
+        label: 'Cherry-pick onto HEAD',
+        action: () => void op('/git/cherry-pick', { rev: hash }, 'cherry-picked'),
+      },
+      {
+        label: 'Revert this commit',
+        action: () => void op('/git/revert', { rev: hash }, 'reverted'),
+      },
+      {
+        label: 'Copy hash',
+        action: () => {
+          void navigator.clipboard.writeText(hash).then(
+            () => opts.toast(`copied ${hash.slice(0, 8)}`),
+            () => opts.toast('clipboard write failed'),
+          );
+        },
+      },
+      {
+        label: 'Check out (detach HEAD)',
+        action: () => void op('/git/checkout', { rev: hash }, `detached at ${hash.slice(0, 8)}`),
+      },
+      {
+        label: 'Reset --soft here',
+        action: () => void op('/git/reset', { rev: hash, mode: 'soft' }, 'reset --soft'),
+      },
+      {
+        label: 'Reset --mixed here',
+        action: () => void op('/git/reset', { rev: hash, mode: 'mixed' }, 'reset --mixed'),
+      },
+      {
+        label: 'Reset --hard here',
+        danger: true,
+        confirm: `discard ALL changes back to “${subject.slice(0, 40)}”? click again`,
+        action: () => void op('/git/reset', { rev: hash, mode: 'hard' }, 'reset --hard'),
+      },
+    ]);
+  }
   const qs = (params: Record<string, string | number | boolean | null | undefined>): string =>
     Object.entries(params)
       .filter(([, v]) => v != null && v !== '')
@@ -246,7 +342,24 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
               : ref.includes('/')
                 ? 'remote'
                 : 'branch';
-          row.appendChild(el('span', `git-ref git-ref-${cls}`, ref.replace('tag: ', '')));
+          const badge = el('span', `git-ref git-ref-${cls}`, ref.replace('tag: ', ''));
+          // Local branches (incl. the "HEAD -> x" pair) check out on
+          // right-click; tags/remotes are left passive.
+          if (cls === 'branch' || cls === 'head') {
+            const branch = ref.includes('->') ? ref.split('->')[1].trim() : ref;
+            badge.title = 'right-click to check out';
+            badge.addEventListener('contextmenu', (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              openMenu(e.clientX, e.clientY, [
+                {
+                  label: `Check out ${branch}`,
+                  action: () => void op('/git/checkout', { rev: branch }, `on ${branch}`),
+                },
+              ]);
+            });
+          }
+          row.appendChild(badge);
         }
       }
       row.appendChild(el('span', 'git-author', r.c.author));
@@ -257,6 +370,13 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
         row.classList.add('sel');
         void renderDetail();
       });
+      // Real commits get the op menu; the uncommitted pseudo-row does not.
+      if (r.c.hash) {
+        row.addEventListener('contextmenu', (e) => {
+          e.preventDefault();
+          commitMenu(e.clientX, e.clientY, r.c.hash, r.c.subject);
+        });
+      }
       rowsEl.appendChild(row);
     }
     wrap.appendChild(rowsEl);
@@ -443,6 +563,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
 
   async function load() {
     const my = ++seq;
+    closeMenu();
     panel.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
     pane = opts.getActivePane();
     const top = await get<{ toplevel: string | null }>(`/git/toplevel?${qs({ pane })}`);
@@ -490,6 +611,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     isOpen: () => open,
     toggle() {
       open = !open;
+      closeMenu();
       panel.classList.toggle('show', open);
       if (open) {
         selected = '';
