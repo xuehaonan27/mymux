@@ -838,6 +838,62 @@ body.has-winalpha #hostbar {
   color: #d6a04c;
   font-style: italic;
 }
+
+/* Conflict resolution bar + region tints (git merge flow). */
+.cm-conflict-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  background: color-mix(in srgb, var(--diff-add-bg) 50%, var(--bg));
+  border-bottom: 1px solid var(--hairline);
+  font: 11px var(--mono);
+}
+.cm-conflict-hint {
+  color: #d6a04c;
+}
+.cm-conflict-btn {
+  padding: 1px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font: 10px var(--mono);
+  cursor: pointer;
+}
+.cm-conflict-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.cm-conflict-ours {
+  background: rgba(88, 139, 249, 0.08);
+}
+.cm-conflict-theirs {
+  background: var(--diff-add-bg);
+}
+
+/* Graph panel conflict banner + conflicted row. */
+.git-conflict-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(214, 160, 76, 0.5);
+  border-radius: 8px;
+  background: rgba(214, 160, 76, 0.08);
+  font: 11px var(--mono);
+}
+.git-conflict-title {
+  color: #d6a04c;
+}
+.git-conflict-actions {
+  display: flex;
+  gap: 6px;
+}
+.git-file-conflict .git-file-path {
+  color: #d6a04c;
+}
 .code-main {
   flex: 1 1 auto;
   display: flex;

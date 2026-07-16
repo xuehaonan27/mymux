@@ -14,6 +14,8 @@ export interface GitGraphOpts {
   getApiBase: () => string;
   /** Transient notices (op results, failures). */
   toast: (msg: string) => void;
+  /** Conflict jump: open a file in the code panel's editor. */
+  openInCode?: (root: string, path: string) => void;
 }
 
 export interface GitGraphPanel {
@@ -46,6 +48,10 @@ interface StashEntry {
   sel: string;
   msg: string;
 }
+interface GitStateResp {
+  state: string | null;
+  conflicts: string[];
+}
 interface ShowResp {
   hash: string;
   author: string;
@@ -74,6 +80,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
   let selected = ''; // '' = uncommitted card; else commit hash; 'stash@{n}' = stash
   let uncommitted: StatusFile[] = [];
   let stashes: StashEntry[] = [];
+  let gitState: GitStateResp = { state: null, conflicts: [] };
   let logData: LogResp | null = null;
 
   const el = (tag: string, cls?: string, text?: string): HTMLElement => {
@@ -510,6 +517,32 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
           files.length ? 'click a file for its diff · + stage / − unstage' : 'working tree clean',
         ),
       );
+      // Conflict banner: the in-progress sequencer and its driver. Conflicted
+      // rows below open in the editor instead of showing a useless diff.
+      if (gitState.state || gitState.conflicts.length) {
+        const label = gitState.state ? `${gitState.state} in progress` : 'conflicts present';
+        const banner = el('div', 'git-conflict-banner');
+        banner.appendChild(
+          el('span', 'git-conflict-title', `⚡ ${label} · ${gitState.conflicts.length} conflicted file(s)`),
+        );
+        const btns = el('span', 'git-conflict-actions');
+        const cont = el('button', 'pkgs-btn primary', 'Continue');
+        cont.title = `git ${gitState.state ?? 'merge'} --continue`;
+        cont.addEventListener('click', () => void op('/git/op', { action: 'continue' }, 'continued'));
+        const ab = el('button', 'pkgs-btn git-danger', 'Abort');
+        ab.title = 'click twice to confirm';
+        ab.addEventListener('click', () => {
+          if (ab.dataset.armed !== '1') {
+            ab.dataset.armed = '1';
+            ab.textContent = `Abort the ${gitState.state}? click again`;
+            return;
+          }
+          void op('/git/op', { action: 'abort' }, 'aborted');
+        });
+        btns.append(cont, ab);
+        banner.appendChild(btns);
+        detailEl.appendChild(banner);
+      }
       if (files.length) {
         const bulk = el('div', 'git-bulk');
         const sa = el('button', 'pkgs-btn', 'Stage all');
@@ -539,11 +572,21 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
         row.appendChild(el('span', `gbadge g${untracked ? 'new' : f.status.includes('D') ? 'del' : 'mod'}`, f.status.trim() || 'M'));
         row.appendChild(el('span', 'git-file-path', f.path));
         row.addEventListener('click', async () => {
+          // Conflicted file: resolving it beats staring at a marker-pocked
+          // diff — jump into the code panel's editor (accept widgets there).
+          if (gitState.conflicts.includes(f.path) && opts.openInCode && root) {
+            opts.openInCode(root, f.path);
+            return;
+          }
           const forStaged = staged && !unstaged;
           const diff = await getText(`/git/diff?${qs({ pane, path: f.path, staged: forStaged })}`);
           detailEl.querySelector('.git-diff')?.remove();
           detailEl.appendChild(renderUnifiedDiff(diff ?? '(no diff)'));
         });
+        if (gitState.conflicts.includes(f.path)) {
+          row.classList.add('git-file-conflict');
+          row.title = 'conflict — click to resolve in the editor';
+        }
         list.appendChild(row);
       }
       detailEl.appendChild(list);
@@ -651,15 +694,17 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       );
       return;
     }
-    const [log, status, stashList] = await Promise.all([
+    const [log, status, stashList, st] = await Promise.all([
       get<LogResp>(`/git/log?${qs({ root, all: showAll, limit: 400 })}`),
       get<StatusFile[]>(`/git/status?${qs({ root })}`),
       get<StashEntry[]>(`/git/stash/list?${qs({ root })}`),
+      get<GitStateResp>(`/git/state?${qs({ root })}`),
     ]);
     if (my !== seq) return;
     logData = log;
     uncommitted = status ?? [];
     stashes = stashList ?? [];
+    gitState = st ?? { state: null, conflicts: [] };
     const commits = log?.commits ?? [];
     // A selected row may vanish under us (popped stash, reset-away commit).
     if (

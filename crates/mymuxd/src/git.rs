@@ -508,6 +508,8 @@ pub struct WriteReq {
     rev: Option<String>,
     /// Only for reset: soft|mixed|hard (validated, no silent default).
     mode: Option<String>,
+    /// Only for /git/op: continue|abort.
+    action: Option<String>,
     pane: Option<u32>,
     /// Optional absolute root override (the panel's root switcher).
     root: Option<String>,
@@ -534,11 +536,12 @@ async fn run_op(q: &WriteReq, args: &[&str], timeout_secs: u64) -> WriteResp {
     }
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(&root).args(args);
-    let out = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        cmd.output(),
-    )
-    .await;
+    run_git(cmd, timeout_secs).await
+}
+
+/// Spawn + timeout + tail-collect, shared by run_op and the sequencer driver.
+async fn run_git(mut cmd: Command, timeout_secs: u64) -> WriteResp {
+    let out = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output()).await;
     match out {
         Err(_) => WriteResp {
             ok: false,
@@ -745,6 +748,114 @@ pub async fn stash_apply(Json(q): Json<WriteReq>) -> Json<WriteResp> {
 pub async fn stash_drop(Json(q): Json<WriteReq>) -> Json<WriteResp> {
     let Some(sel) = req_rev(&q) else { return bad_rev() };
     Json(run_op(&q, &["stash", "drop", &sel], 60).await)
+}
+
+// ---- merge state (the conflict banner + continue/abort) ----------------------
+
+const CONFLICT_CODES: [&str; 7] = ["DD", "AU", "UD", "UA", "DU", "AA", "UU"];
+
+/// Resolve a git dir entry (rebase-merge …) to an absolute path via
+/// --git-path; None when git itself fails.
+async fn git_path_abs(root: &std::path::Path, name: &str) -> Option<String> {
+    Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--path-format=absolute", "--git-path", name])
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// The in-progress sequencer, if any. Rebase first — its dirs coexist with
+/// nothing else; the *_HEAD probes come after.
+async fn op_state(root: &std::path::Path) -> Option<&'static str> {
+    for name in ["rebase-merge", "rebase-apply"] {
+        if let Some(p) = git_path_abs(root, name).await {
+            if std::path::Path::new(&p).is_dir() {
+                return Some("rebase");
+            }
+        }
+    }
+    for (head, label) in [
+        ("MERGE_HEAD", "merge"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+    ] {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "-q", "--verify", head])
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            return Some(label);
+        }
+    }
+    None
+}
+
+/// `GET /git/state?pane=&root=` — sequencer state + conflicted paths for the
+/// graph panel's conflict banner.
+pub async fn state(Query(q): Query<StatusQuery>) -> Json<serde_json::Value> {
+    let root = root_for_req(q.pane, &q.root).await;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["status", "--porcelain=v1"])
+        .output()
+        .await;
+    let conflicts: Vec<String> = out
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| l.len() >= 4 && CONFLICT_CODES.contains(&&l[..2]))
+                .map(|l| l[3..].trim().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    Json(serde_json::json!({
+        "state": op_state(&root).await,
+        "conflicts": conflicts,
+    }))
+}
+
+/// `POST /git/op {action: "continue"|"abort"}` — drive the in-progress
+/// sequencer (rebase/merge/cherry-pick/revert, whichever actually exists).
+/// Continue runs with GIT_EDITOR=true so git never blocks on an editor.
+pub async fn sequencer_op(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let root = root_for_req(q.pane, &q.root).await;
+    let verb = q.action.as_deref().unwrap_or("");
+    if verb != "continue" && verb != "abort" {
+        return Json(WriteResp {
+            ok: false,
+            out: "action must be continue|abort".into(),
+        });
+    }
+    let Some(state) = op_state(&root).await else {
+        return Json(WriteResp {
+            ok: false,
+            out: "nothing in progress".into(),
+        });
+    };
+    let sub = match state {
+        "rebase" => "rebase",
+        "merge" => "merge",
+        "cherry-pick" => "cherry-pick",
+        _ => "revert",
+    };
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(&root)
+        .arg(sub)
+        .arg(format!("--{verb}"))
+        .env("GIT_EDITOR", "true");
+    Json(run_git(cmd, 120).await)
 }
 
 // ---- blame (the code panel's gutter) -------------------------------------------

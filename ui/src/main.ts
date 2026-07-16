@@ -761,24 +761,36 @@ const codeOpts: CodePanelOpts = {
 // chunk); the wrapper keeps the synchronous interface the shell expects.
 let codeReal: CodePanel | null = null;
 let codeLoading = false;
+async function ensureCode(): Promise<CodePanel> {
+  if (!codeReal && !codeLoading) {
+    codeLoading = true;
+    const m = await import('./code');
+    codeReal = m.initCodePanel(codeOpts);
+    codeLoading = false;
+  }
+  while (!codeReal) await new Promise((r) => setTimeout(r, 50));
+  return codeReal;
+}
 const codePanel = {
   isOpen: () => codeReal?.isOpen() ?? false,
   toggle: () => {
-    if (codeReal) return codeReal.toggle();
-    if (codeLoading) return;
-    codeLoading = true;
-    void import('./code').then((m) => {
-      codeReal = m.initCodePanel(codeOpts);
-      codeReal.toggle();
-      // The panel materializes HERE (async chunk) — this is when the modal
-      // stack can truthfully record it (a synchronous noteModal at the call
-      // site would read isOpen()=false and drop the entry).
-      noteModal('code', codeReal.isOpen());
+    void ensureCode().then((c) => {
+      c.toggle();
+      // The panel materializes through the async chunk — noteModal only after
+      // the real toggle, or isOpen() reads false and the entry is dropped.
+      noteModal('code', c.isOpen());
     });
   },
   quickOpen: () => codeReal?.quickOpen(),
   escape: () => codeReal?.escape() ?? false,
   retheme: () => codeReal?.retheme(),
+  /** The git graph's conflict jump: open a file in the editor. */
+  openAt: (root: string, path: string) => {
+    void ensureCode().then((c) => {
+      c.openAt(root, path);
+      noteModal('code', true);
+    });
+  },
 };
 const procPanel = initProcPanel({
   getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
@@ -792,19 +804,23 @@ let gitReal: import('./gitgraph').GitGraphPanel | null = null;
 let gitLoading = false;
 let pendingGitShow: string | null = null; // blame jump while the chunk loads
 async function ensureGit(): Promise<import('./gitgraph').GitGraphPanel> {
-  if (gitReal) return gitReal;
-  if (!gitLoading) {
+  if (!gitReal && !gitLoading) {
     gitLoading = true;
     const m = await import('./gitgraph');
     gitReal = m.initGitGraph({
       getActivePane: () => active()?.activePane ?? null,
       getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
       toast,
+      openInCode: (root, path) => {
+        // Both overlays share the z-band: close the graph, open the editor.
+        if (gitPanel.isOpen()) gitPanel.toggle();
+        codePanel.openAt(root, path);
+      },
     });
-  } else {
-    while (gitLoading) await new Promise((r) => setTimeout(r, 50));
+    gitLoading = false;
   }
-  return gitReal!;
+  while (!gitReal) await new Promise((r) => setTimeout(r, 50));
+  return gitReal;
 }
 const gitPanel = {
   isOpen: () => gitReal?.isOpen() ?? false,

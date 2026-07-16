@@ -1,7 +1,15 @@
 import { EditorView, basicSetup } from 'codemirror';
 import { MergeView } from '@codemirror/merge';
-import { EditorState, Compartment, type Extension } from '@codemirror/state';
-import { keymap, lineNumbers, gutter, GutterMarker } from '@codemirror/view';
+import { EditorState, Compartment, StateField, type Extension, type Text, type Range } from '@codemirror/state';
+import {
+  keymap,
+  lineNumbers,
+  gutter,
+  GutterMarker,
+  Decoration,
+  WidgetType,
+  type DecorationSet,
+} from '@codemirror/view';
 import { getPrefs } from './prefs';
 import { cmThemeSlot, cmThemeFor, presetById, rethemeState } from './theme';
 import { rust } from '@codemirror/lang-rust';
@@ -193,6 +201,129 @@ function blameGutter(groups: BlameGroup[], onOpen: (h: string) => void): Extensi
   });
 }
 
+// ---- conflict-marker resolution widgets ----------------------------------------
+// VS Code's inline merge flow: a bar above each <<<<<<< block with Accept
+// Current / Incoming / Both. Blocks rescan on every edit, so a manual
+// resolution (deleting the markers) just melts the UI away.
+
+interface CBlock {
+  /** Doc offset of the "<<<<<<<" line start — the block's stable identity. */
+  from: number;
+  /** Doc offset END of the ">>>>>>>" line. */
+  to: number;
+  /** Doc offset of the "=======" line start. */
+  mid: number;
+  /** Doc offset of the "|||||||" base marker, when diff3-style is in use. */
+  base?: number;
+  oursLabel: string;
+  theirsLabel: string;
+}
+
+function scanConflicts(doc: Text): CBlock[] {
+  const blocks: CBlock[] = [];
+  let cur: { from: number; mid: number; base: number; oursLabel: string } | null = null;
+  for (let i = 1; i <= doc.lines; i++) {
+    const l = doc.line(i);
+    if (l.text.startsWith('<<<<<<<')) {
+      cur = { from: l.from, mid: -1, base: -1, oursLabel: l.text.slice(7).trim() };
+    } else if (cur && cur.mid < 0 && l.text.startsWith('|||||||')) {
+      cur.base = l.from;
+    } else if (cur && cur.mid < 0 && l.text.startsWith('=======')) {
+      cur.mid = l.from;
+    } else if (cur && cur.mid >= 0 && l.text.startsWith('>>>>>>>')) {
+      blocks.push({
+        from: cur.from,
+        to: l.to,
+        mid: cur.mid,
+        base: cur.base >= 0 ? cur.base : undefined,
+        oursLabel: cur.oursLabel,
+        theirsLabel: l.text.slice(7).trim(),
+      });
+      cur = null;
+    }
+  }
+  return blocks;
+}
+
+/** The text between two marker lines (exclusive), trailing newline trimmed. */
+function conflictRegion(doc: Text, fromLineStart: number, toLineStart: number): string {
+  const from = doc.lineAt(fromLineStart).to + 1;
+  const to = doc.lineAt(toLineStart).from - 1;
+  return to >= from ? doc.sliceString(from, to) : '';
+}
+
+function resolveConflict(view: EditorView, blockFrom: number, take: 'ours' | 'theirs' | 'both') {
+  const b = scanConflicts(view.state.doc).find((x) => x.from === blockFrom);
+  if (!b) return;
+  const doc = view.state.doc;
+  const ours = conflictRegion(doc, b.from, b.base ?? b.mid);
+  const theirs = conflictRegion(doc, b.mid, b.to);
+  const text = take === 'ours' ? ours : take === 'theirs' ? theirs : [ours, theirs].filter(Boolean).join('\n');
+  view.dispatch({ changes: { from: b.from, to: b.to, insert: text } });
+}
+
+class ConflictBar extends WidgetType {
+  constructor(readonly b: CBlock) {
+    super();
+  }
+  override eq(w: ConflictBar): boolean {
+    return w.b.from === this.b.from && w.b.oursLabel === this.b.oursLabel && w.b.theirsLabel === this.b.theirsLabel;
+  }
+  override toDOM(view: EditorView): HTMLElement {
+    const bar = document.createElement('div');
+    bar.className = 'cm-conflict-bar';
+    const hint = document.createElement('span');
+    hint.className = 'cm-conflict-hint';
+    hint.textContent = '⚡ conflict';
+    bar.appendChild(hint);
+    for (const [label, take] of [
+      [`Accept Current${this.b.oursLabel ? ` (${this.b.oursLabel})` : ''}`, 'ours'],
+      [`Accept Incoming${this.b.theirsLabel ? ` (${this.b.theirsLabel})` : ''}`, 'theirs'],
+      ['Accept Both', 'both'],
+    ] as const) {
+      const btn = document.createElement('button');
+      btn.className = 'cm-conflict-btn';
+      btn.textContent = label;
+      btn.addEventListener('mousedown', (e) => {
+        e.preventDefault(); // keep the editor's focus + selection
+        resolveConflict(view, this.b.from, take);
+      });
+      bar.appendChild(btn);
+    }
+    return bar;
+  }
+}
+
+function buildConflictBars(doc: Text): DecorationSet {
+  const specs: Range<Decoration>[] = [];
+  for (const b of scanConflicts(doc)) {
+    specs.push(Decoration.widget({ widget: new ConflictBar(b), block: true, side: -1 }).range(b.from));
+    for (let pos = b.from; pos <= b.to; ) {
+      const l = doc.lineAt(pos);
+      const t = l.text;
+      const isMarker =
+        t.startsWith('<<<<<<<') || t.startsWith('=======') || t.startsWith('>>>>>>>') || t.startsWith('|||||||');
+      const region = isMarker
+        ? ''
+        : l.from < (b.base ?? b.mid)
+          ? 'cm-conflict-ours'
+          : l.from > b.mid
+            ? 'cm-conflict-theirs'
+            : '';
+      if (region) specs.push(Decoration.line({ class: region }).range(l.from));
+      pos = l.to + 1;
+    }
+  }
+  return Decoration.set(specs);
+}
+
+const conflictBars = StateField.define<DecorationSet>({
+  // Block widgets may only come from state fields (plugins are inline-only).
+  create: (s) => buildConflictBars(s.doc),
+  update: (v, tr) => (tr.docChanged ? buildConflictBars(tr.state.doc) : v),
+  provide: (f) => EditorView.decorations.from(f),
+});
+
 // Highlighting covers every language the package index installs a server
 // for (go, c/cpp, bash, yaml…) plus the daily config/web formats — official
 // @codemirror/lang-* packages where they exist, CM5 legacy-modes otherwise
@@ -288,6 +419,9 @@ export interface CodePanel {
   escape(): boolean;
   /** Re-apply the current theme preset to every editor and buffer. */
   retheme(): void;
+  /** Open the panel at (pane-root session, path) — the git graph's conflict
+   * jump-in. */
+  openAt(root: string, path: string): void;
 }
 
 // One code view per pane. The tree, the changes list and the editor are all
@@ -598,6 +732,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
           { key: 'Mod-s', preventDefault: true, run: () => (void save(), true) },
           { key: 'Mod-.', preventDefault: true, run: () => (void openCodeActions(), true) },
         ]),
+        conflictBars, // no-op unless the doc actually carries conflict markers
         EditorView.updateListener.of((u) => {
           if (u.docChanged) {
             renderHeader();
@@ -1177,6 +1312,14 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
           if (b.kind === 'text') b.state = rethemeState(b.state, preset);
         }
       }
+    },
+    openAt(root: string, path: string) {
+      if (!open) {
+        open = true;
+        panel.classList.add('show');
+      }
+      showSession(opts.getActivePane(), root);
+      void openFile(path);
     },
     toggle() {
       if (open) {

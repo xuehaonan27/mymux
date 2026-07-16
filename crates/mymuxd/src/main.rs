@@ -162,6 +162,8 @@ async fn run() {
         .route("/git/stash/pop", post(git::stash_pop))
         .route("/git/stash/apply", post(git::stash_apply))
         .route("/git/stash/drop", post(git::stash_drop))
+        .route("/git/state", get(git::state))
+        .route("/git/op", post(git::sequencer_op))
         .route("/lsp", get(lsp::ws_handler))
         .route("/lsp/info", get(lsp::info))
         .route("/lsp/install", post(lsp::install))
