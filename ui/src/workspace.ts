@@ -68,6 +68,8 @@ export interface WorkspaceHooks {
   onError?(w: Workspace, msg: string): void;
   /** Open the host manager (banner escape hatch; absent in the browser). */
   onOpenHosts?(): void;
+  /** Open the raw terminal-history pager for a pane (scroll-top chip). */
+  onOpenHistory?(w: Workspace, pane: number): void;
 }
 
 interface Pane {
@@ -406,6 +408,25 @@ export class Workspace {
     });
     term.open(el);
     term.onData((d) => this.sendInput(id, d));
+
+    // Scroll-top chip: the xterm buffer starts here, but the raw history log
+    // goes way further back — offer the pager when the user hits the top.
+    if (this.hooks.onOpenHistory) {
+      const chip = document.createElement('button');
+      chip.className = 'term-older';
+      chip.textContent = '⇧ older output';
+      chip.title = 'view the raw terminal history log';
+      chip.style.display = 'none';
+      chip.addEventListener('mousedown', (e) => e.stopPropagation());
+      chip.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.hooks.onOpenHistory?.(this, id);
+      });
+      el.appendChild(chip);
+      term.onScroll((ydisp: number) => {
+        chip.style.display = ydisp === 0 ? '' : 'none';
+      });
+    }
 
     const pane: Pane = { term, el };
     this.panes.set(id, pane);

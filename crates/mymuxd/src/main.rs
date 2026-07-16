@@ -13,6 +13,7 @@ mod persist;
 mod pkgs;
 mod proc;
 mod state;
+mod termhist;
 mod tmux;
 mod ws;
 
@@ -184,6 +185,7 @@ async fn run() {
         .route("/pkgs/remove", post(pkgs::remove))
         .route("/proc/tree", get(proc::tree))
         .route("/proc/kill", post(proc::kill))
+        .route("/termhistory", get(termhist::history))
         .with_state(hub)
         .layer(axum::middleware::from_fn(origin_guard))
         .layer(cors);

@@ -452,6 +452,9 @@ function ensureWorkspace(id: string, label: string, port: number): Workspace {
       onError(_w, msg) {
         toast(msg, 6000); // errors the user must act on linger longer
       },
+      onOpenHistory(w, pane) {
+        histPanel.open(w, pane);
+      },
       onOpenHosts: isTauri ? () => hostManager?.open() : undefined,
     },
   });
@@ -866,6 +869,41 @@ function toggleGitGraph() {
   setLeader(false);
 }
 registerModal('gitgraph', { isOpen: () => gitPanel.isOpen(), close: () => toggleGitGraph() });
+
+// The terminal-history pager (ui/src/termhist.ts), lazy like the graph. The
+// pane's raw history log lives on ITS host's daemon — so apiBase is pinned
+// to the workspace the chip was clicked in, not the active one.
+let histReal: import('./termhist').TermHistPanel | null = null;
+let histLoading = false;
+let histWs: Workspace | null = null;
+async function ensureHist(): Promise<import('./termhist').TermHistPanel> {
+  if (!histReal && !histLoading) {
+    histLoading = true;
+    const m = await import('./termhist');
+    histReal = m.initTermHist({
+      getApiBase: () => histWs?.apiBase ?? active()?.apiBase ?? 'http://127.0.0.1:8088',
+      toast,
+    });
+    histLoading = false;
+  }
+  while (!histReal) await new Promise((r) => setTimeout(r, 50));
+  return histReal;
+}
+const histPanel = {
+  open: (w: Workspace, pane: number) => {
+    histWs = w;
+    void ensureHist().then((h) => {
+      h.open(pane);
+      noteModal('termhist', true);
+    });
+  },
+  isOpen: () => histReal?.isOpen() ?? false,
+  close: () => {
+    histReal?.close();
+    noteModal('termhist', false);
+  },
+};
+registerModal('termhist', { isOpen: () => histPanel.isOpen(), close: () => histPanel.close() });
 // The overlays are full-screen and share a z-band, so they're mutually exclusive.
 function closeOtherPanels(keep: 'code' | 'proc' | 'pkgs') {
   if (keep !== 'code' && codePanel.isOpen()) codePanel.toggle();
