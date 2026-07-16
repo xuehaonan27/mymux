@@ -34,8 +34,12 @@ data index + the on-disk contract + mymux-native kinds (viewer, agent-adapter…
   prefixes, `X-File-Size`, 50 MiB cap, safe_path). Binary/too-large files now
   render (images inline with dimensions + transparency checkerboard; anything
   else hex-dumps its first 4 KiB); the placeholder only remains for real
-  errors (404 …). Markdown PREVIEW deliberately deferred: needs a sanitizer
-  chain to be XSS-safe in the Tauri webview, low value while md is editable.
+  errors (404 …). ~~Markdown PREVIEW deliberately deferred~~ — **DONE
+  2026-07-16** (batch M): per-buffer Prev toggle; markdown-it (`html:false`)
+  → DOMPurify allowlist → relative resources rewritten to /fs/raw in a
+  detached fragment (the live DOM never sees unscrubbed markup); http(s)
+  links get rel=noopener; absolute-path/odd-scheme refs dropped. Live
+  doc-sourced re-render on edits (400ms debounce). Harness: ui/ux/mdcheck.mjs.
 - ~~Dynamic sources (no more hardcoded-only recipes)~~ — **DONE 2026-07-05**:
   `mymux-pkg search` (curated + Open VSX API + npm registry, network from the
   daemon host), `install openvsx:ns.name[@ver]` / `install npm:pkg[@ver]`
@@ -134,6 +138,41 @@ principle):
 - ~~Staged vs unstaged diff toggle; jump from a diff to editing inline~~ —
   **DONE 2026-07-15**: diff controls have unstaged|staged (daemon already had
   the flag) and an "open in editor" jump that lands the file in a text buffer.
+
+## Git tooling (graph panel + editor) — SHIPPED 2026-07-16
+Twelve batches (b1-b6 + A-J), each independently verified headless
+(ui/ux/git{check,opscheck,menucheck,stashcheck,conflictcheck,searchcheck,
+pagecheck,refcheck,historycheck,comparecheck,amendcheck,subcheck,
+subinitcheck,hunkcheck,blamecheck}.mjs). The panel is deliberately
+PLUGIN-SHAPED (narrow `initGitGraph` opts, lazy dynamic import) — the future
+ui-module package kind lifts it mechanically.
+- **Graph core**: daemon `/git/log` (topology, branches list, branch-filter
+  rev, --follow path mode, limit/skip pagination), `/git/show`, `/git/compare`
+  (A..B), `/git/blame` (--line-porcelain groups). UI: swim-lane graph with an
+  uncommitted pseudo-card + stash pseudo-rows, detail column (commit/stash/
+  compare/file-history), 200-commit pages via IntersectionObserver, branch
+  dropdown + free-text filter (soft reloads keep focus).
+- **Write ops**: stage/unstage/commit(+amend)/fetch/pull/push/rebase,
+  cherry-pick/revert/checkout/reset(soft|mixed|hard), branch create/delete
+  (safe -d), tag create/delete, merge, stash push/apply/pop/drop, per-file
+  discard (probed restore|clean), hunk/line staging (client-rebuilt reduced
+  patches → `git apply --cached`, reverse from the staged side).
+- **Conflicts**: `GET /git/state` (rebase/merge/cherry-pick/revert detectors +
+  conflict paths), `POST /git/op` (continue/abort, GIT_EDITOR=true); banner in
+  the uncommitted card; conflicted files jump into the editor's <<<<<<<
+  widget bars (Accept Current/Incoming/Both, diff3-aware, StateField-hosted).
+- **Blame**: per-run annotations (heat-colored by age), hover card, current-
+  line ghost, click-through to the graph.
+- **Submodules**: gitlinks flagged in /git/status (.gitmodules re-rooted at
+  the pane prefix), S badges, click enters the submodule as the panel root;
+  `GET /git/submodules` + `submodule update --init` one-click from the tree.
+- Editor continuity: split diff dark-theme remap onto the unified palette,
+  scroll-top history pager (batch L), markdown preview (batch M) sit in the
+  same header row.
+Open next-level items, not started: interactive rebase (deliberately off
+scope so far), remote-branch deletion/push-with-upstream-picker, commit
+message editing on amend, merge-base diffing in compare mode, repo-side
+commit search (--grep server mode beyond the loaded window).
 
 ## Agents (M3)
 - ~~Agent attention notifications~~ — **DONE 2026-07-15**: a `bell` toggle in
@@ -234,8 +273,18 @@ principle):
   host-manager status lines (incl. `installing`), per-host reconnect banners,
   and UI toasts for daemon-reported errors (2026-07-15) cover it; the "load
   your key" guidance is moot — there is no agent to load keys into.
-- Optional: a dedicated persistent ControlMaster (separate from the forward) so a
-  forward restart never re-auths even without an agent.
+- ~~Optional: a dedicated persistent ControlMaster (separate from the forward) so a
+  forward restart never re-auths even without an agent.~~ — **DONE 2026-07-16**
+  (batch N): `Master` in mymux-connect — one russh connection cached per host
+  drive; forward cycles, exec probe/upload/install, and uninstall all lease
+  channels off it (Arc<Handle>, &self channel APIs do the multiplexing;
+  lease() proves liveness via a session-channel probe, single-flight).
+  inactivity_timeout removed so an idle master survives between cycles.
+  src-tauri `Active` holds it (uninstall rides the live master when
+  connected). Verified in a throwaway-sshd harness: 4 serial + 4 parallel
+  execs = EXACTLY 1 'Accepted publickey' in the sshd VERBOSE log
+  (tests/multiplex.rs). **Tauri-side wiring builds only on the Mac (dbus) —
+  Mac verify pending.**
 
 ## Replace tmux with a native engine — declared endgame (2026-07-03)
 Since external-tmux interop is rejected, tmux is a pure implementation detail —
@@ -314,11 +363,24 @@ Native ∞ windows are the default; keep closing the gap to a great daily driver
   ptyd (`$XDG_STATE_HOME/mymux/history/<short>-<pid>.log`, ANSI included,
   64 MB cap + one rotation, `MYMUX_HISTORY=0` opt-out, `MYMUX_HISTORY_CAP`
   tunable; `mymux-attach hist [pane]` locates the files — numeric lookup
-  works without ptyd, and logs outlive panes/ptyd). In-app paging of older
-  scrollback stays blocked on xterm.js prepend; the log is the answer until
-  a self-built renderer exists.
-- Alt-screen/agent heuristics for native panes (ptyd could report alt state
-  with output events; hooks already cover claude/codex).
+  works without ptyd, and logs outlive panes/ptyd). ~~In-app paging of older
+  scrollback~~ — **DONE 2026-07-16** (batch L, without touching xterm.js's
+  prepend model): a scroll-top chip (`term.onScroll(ydisp===0)`) per pane
+  opens a read-only pager overlay (modal-stack member) over `GET
+  /termhistory` (the raw log, rotated .1 logically first; offset = window
+  end, tail by default); plain-text render (ANSI stripped, CRLF normalized,
+  \r-rewrites collapsed), older pages prepend preserving the viewport.
+  Harness: ui/ux/termhistcheck.mjs.
+- ~~Alt-screen/agent heuristics for native panes~~ — **DONE 2026-07-16**
+  (batch K): ptyd's PaneGrid tracks the alternate screen authoritatively
+  (CSI ?1047/1048/1049 h|l, chunk-split safe 7-byte carry) and broadcasts
+  flips (`Ev::Alt` → `alt_on/off` JSON → `PtydEvent::Alt` → `Hub::note_alt`);
+  `PaneInfo.alt` re-seeds adopted panes on a mymuxd restart (old ptyd →
+  `None`, byte-scan legacy path). Companion fix the e2e surfaced: attention
+  bells now parse AROUND OSC sequences — a fancy prompt's OSC-title BEL
+  terminator no longer keeps `last_bell` fresh (4 unit tests). ptyd picks
+  the new code up at its next natural restart, per install-systemd.sh's
+  policy. Harness: altcheck.mjs (sandboxed MYMUX_PTYD_SOCK pair).
 
 ## Multi-host — SHIPPED 2026-07-03; remaining polish
 - ~~Remember open hosts~~ — **DONE 2026-07-03** (full-set restore):
