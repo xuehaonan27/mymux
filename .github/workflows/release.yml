@@ -44,3 +44,42 @@ jobs:
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           bash scripts/ci-publish-release.sh
+
+  # macOS client package: the .dmg mac users actually install. Public repo →
+  # macos-latest is free too. Serialised behind the daemon job so the release
+  # it uploads into already exists (the daemon step creates it).
+  client-dmg:
+    needs: daemon-matrix
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: "toolchain: rust + tauri-cli"
+        run: |
+          set -x
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          fi
+          export PATH="$HOME/.cargo/bin:$PATH"
+          if ! cargo tauri --version >/dev/null 2>&1; then
+            cargo install tauri-cli --locked --version '^2'
+          fi
+      - name: build mymux.dmg (ad-hoc signed by cargo tauri build)
+        env:
+          PATH: ${{ env.HOME }}/.cargo/bin:$PATH
+        run: cargo tauri build
+      - name: upload .dmg to the release (gh on runners reads GH_TOKEN)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -e
+          shopt -s nullglob
+          dmgs=( src-tauri/target/release/bundle/dmg/*.dmg )
+          [ ${#dmgs[@]} -gt 0 ] || { echo "no .dmg produced"; exit 1; }
+          for f in "${dmgs[@]}"; do
+            gh release upload "$TAG" "$f" --clobber
+          done
