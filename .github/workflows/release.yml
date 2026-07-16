@@ -1,0 +1,46 @@
+# Release pipeline (GitHub Actions), mirroring .gitea/workflows/release.yml.
+# Public repo → no billing concerns. Only this file lives under .github/:
+# gitea reads .gitea/workflows, github reads this one — same thin scripts.
+name: release
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+env:
+  PROVIDER: github
+  GITEA_REPO: xuehaonan27/mymux
+  GITEA_BASE: https://github.com
+
+jobs:
+  daemon-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "toolchain: rust"
+        run: |
+          set -x
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          export PATH="$HOME/.cargo/bin:$PATH"
+          # No sudo/apt anywhere: musl is linked via cargo-zigbuild (zig is
+          # bootstrapped, sha256-pinned, into ~/.cache/mymux-ci).
+          rustup toolchain install stable --profile minimal
+
+      - name: build the daemon matrix (x86_64 + aarch64, musl-static)
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          bash scripts/ci-build-daemon-matrix.sh
+
+      - name: publish release ${{ github.ref_name }}
+        env:
+          TAG: ${{ github.ref_name }}
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          bash scripts/ci-publish-release.sh

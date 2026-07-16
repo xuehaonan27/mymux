@@ -1,23 +1,43 @@
 #!/usr/bin/env bash
-# ci-publish-release.sh — create a Gitea release for the matrix artifacts and
-# upload them. The TAG is created SERVER-SIDE by the release API
-# (target_commitish) — no local git mutation at all.
+# ci-publish-release.sh — create a release for the matrix artifacts and upload
+# them. Tag is created SERVER-SIDE by the release API (target_commitish) — no
+# local git mutation at all.
 #
 # Usage:
 #   TAG=v0.1.0-abc1234 scripts/ci-publish-release.sh
 #
 # Inputs (env):
 #   TAG           — release tag (required; e.g. v0.1.0-<sha7>)
-#   GITEA_REPO    — owner/name (default: XueHaonan/mymux)
-#   GITEA_BASE    — instance URL (default: https://gitea.aka.cy)
-#   GITEA_TOKEN   — api token (falls back to .secret/gitea_token.env)
+#   PROVIDER      — gitea (default) | github
+#   GITEA_REPO    — owner/name (defaults: XueHaonan/mymux on gitea,
+#                   xuehaonan27/mymux on github)
+#   GITEA_BASE    — instance URL (default: https://gitea.aka.cy /
+#                   https://github.com)
+#   GITEA_TOKEN   — api token (falls back to .secret/gitea_token.env locally;
+#                   CI passes ${ secrets.GITEA_TOKEN/GITHUB_TOKEN })
 #   ART           — artifacts dir (default: release/artifacts)
 #   DRY_RUN=1     — print the plan, write nothing
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ART="${ART:-$ROOT/release/artifacts}"
-GITEA="${GITEA_BASE:-https://gitea.aka.cy}"
-REPO="${GITEA_REPO:-XueHaonan/mymux}"
+PROVIDER="${PROVIDER:-gitea}"
+case "$PROVIDER" in
+    gitea)
+        GITEA="${GITEA_BASE:-https://gitea.aka.cy}"
+        REPO="${GITEA_REPO:-XueHaonan/mymux}"
+        API_HOST="$GITEA"
+        API_PREFIX="/api/v1/repos/$REPO"
+        UPLOAD_HOST="$GITEA"
+        ;;
+    github)
+        GITEA="${GITEA_BASE:-https://github.com}"
+        REPO="${GITEA_REPO:-xuehaonan27/mymux}"
+        API_HOST="https://api.github.com"
+        API_PREFIX="/repos/$REPO"
+        UPLOAD_HOST="https://uploads.github.com"
+        ;;
+    *) die() { printf 'mymux-ci: %s\n' "$*" >&2; exit 1; }; die "PROVIDER must be gitea|github (got $PROVIDER)" ;;
+esac
 TAG="${TAG:?TAG is required (e.g. TAG=v0.1.0-$(git -C "$ROOT" rev-parse --short HEAD))}"
 note() { printf 'mymux-ci: %s\n' "$*"; }
 die() { printf 'mymux-ci: %s\n' "$*" >&2; exit 1; }
@@ -30,7 +50,7 @@ fi
 [ -n "${GITEA_TOKEN:-}" ] || die "GITEA_TOKEN missing"
 AUTH=(-H "Authorization: token $GITEA_TOKEN")
 JSON=(-H 'content-type: application/json')
-API="$GITEA/api/v1/repos/$REPO"
+API="$API_HOST$API_PREFIX"
 
 # 1. Roll the release's download base into bundles.json BEFORE uploading it.
 TAGBASE="$GITEA/$REPO/releases/download/$TAG"
@@ -75,7 +95,14 @@ for a in json.load(sys.stdin):
     if [ -n "$AID" ]; then
         curl -sf -X DELETE "${AUTH[@]}" "$API/releases/$ID/assets/$AID" >/dev/null
     fi
-    curl -sf -X POST "${AUTH[@]}" -F "attachment=@$ART/$f" "$API/releases/$ID/assets?name=$f" >/dev/null
+    if [ "$PROVIDER" = "github" ]; then
+        # GitHub: raw bytes with an octet-stream header onto the UPLOADS host.
+        curl -sf -X POST "${AUTH[@]}" -H 'content-type: application/octet-stream' \
+            --data-binary "@$ART/$f" "$UPLOAD_HOST$API_PREFIX/releases/$ID/assets?name=$f" >/dev/null
+    else
+        # Gitea: multipart attachment, same URL shape via the API host.
+        curl -sf -X POST "${AUTH[@]}" -F "attachment=@$ART/$f" "$UPLOAD_HOST$API_PREFIX/releases/$ID/assets?name=$f" >/dev/null
+    fi
     note "uploaded $f"
 done
 
