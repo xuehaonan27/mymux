@@ -25,6 +25,7 @@ env:
 jobs:
   daemon-matrix:
     runs-on: [k3s-runner]
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -33,13 +34,16 @@ jobs:
       # assumed: installed on the fly when missing).
       - name: "toolchain: rust + musl-tools"
         run: |
-          set -e
+          set -x
+          export DEBIAN_FRONTEND=noninteractive
           if ! command -v rustup >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           fi
           export PATH="$HOME/.cargo/bin:$PATH"
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq musl-tools
+          # never hang here again: stale dpkg locks and slow mirrors FAIL,
+          # narrated — they don't sit quietly forever.
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+          sudo apt-get install -y -o DPkg::Lock::Timeout=120 -o Acquire::Retries=3 musl-tools
           rustup toolchain install stable --profile minimal
 
       - name: build the daemon matrix (x86_64 + aarch64, musl-static)
