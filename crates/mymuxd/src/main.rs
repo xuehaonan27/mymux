@@ -152,6 +152,7 @@ async fn run() {
         .route("/git/commit", post(git::commit))
         .route("/git/amend", post(git::amend))
         .route("/git/discard", post(git::discard))
+        .route("/git/apply", post(git::apply_patch))
         .route("/git/submodules", get(git::submodules))
         .route("/git/submodule/update", post(git::submodule_update))
         .route("/git/fetch", post(git::fetch))

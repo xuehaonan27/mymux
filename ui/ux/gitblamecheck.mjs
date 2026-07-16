@@ -87,15 +87,20 @@ await page.click('#code-blame');
 await page.waitForTimeout(1000);
 check('blame after save works', (await page.locator('.cm-blame').count()) >= 1);
 
-// 5. Extras: current-line ghost follows the cursor.
+// 5. Extras: current-line ghost follows the cursor. (Deterministic cursor
+// placement: Ctrl+Home → line 1 → ArrowDown → line 2; a mid-doc click could
+// land on the blame-uncovered trailing newline and flake.)
 await page.click('.cm-content');
+await page.keyboard.press('Control+Home');
 await page.waitForTimeout(400);
 check('current-line ghost shows', (await page.locator('.cm-blame-ghost').count()) === 1);
 const ghostText = (await page.locator('.cm-blame-ghost').textContent()) ?? '';
 check('ghost annotates author·summary·date', /· .* ago/.test(ghostText), ghostText);
 await page.keyboard.press('ArrowDown');
-await page.waitForTimeout(300);
+await page.waitForTimeout(400);
+const ghostText2 = (await page.locator('.cm-blame-ghost').count() ? await page.locator('.cm-blame-ghost').textContent() : '') ?? '';
 check('ghost follows the cursor (still exactly one)', (await page.locator('.cm-blame-ghost').count()) === 1);
+check('ghost updated for the new line', ghostText2.length > 0 && ghostText2 !== ghostText, `${ghostText} → ${ghostText2}`);
 
 // 6. Heatmap: markers across differently-aged groups get different colors.
 const colors = await page.evaluate(() =>

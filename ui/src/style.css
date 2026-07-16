@@ -1046,6 +1046,32 @@ body.has-winalpha #hostbar {
   background: var(--diff-add-bg);
   color: var(--diff-add-fg);
 }
+/* Hunk/line staging: selectable +/- rows, hunk-level action buttons. */
+.dl.sline {
+  cursor: pointer;
+  user-select: none;
+}
+.dl.sline:hover {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.dl.sline.sel {
+  box-shadow: inset 2px 0 0 var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.dl-hunk-btn {
+  margin-left: 10px;
+  padding: 0 7px;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  font: 10px var(--mono);
+  cursor: pointer;
+}
+.dl-hunk-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
 .ddel {
   background: var(--diff-del-bg);
   color: var(--diff-del-fg);

@@ -437,6 +437,60 @@ const conflictBars = StateField.define<DecorationSet>({
   provide: (f) => EditorView.decorations.from(f),
 });
 
+/** Rebuild a REDUCED unified patch from a file's diff, keeping only the
+ * chosen +/- lines (unchosen '+' dropped, unchosen '-' rewritten as context
+ * — git add -p's edit-hunk semantics; counts recomputed, starts kept so
+ * `git apply --cached` applies it cleanly). */
+function buildPatch(lines: string[], chosen: Set<number>): string {
+  const firstHunk = lines.findIndex((l) => l.startsWith('@@'));
+  if (firstHunk < 0) return '';
+  const out = lines.slice(0, firstHunk);
+  let i = firstHunk;
+  while (i < lines.length) {
+    const head = lines[i];
+    if (!head.startsWith('@@')) {
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    const body: { idx: number; text: string }[] = [];
+    while (j < lines.length && !lines[j].startsWith('@@') && !lines[j].startsWith('diff --git')) {
+      if (lines[j] !== '') body.push({ idx: j, text: lines[j] });
+      j++;
+    }
+    let anyChosen = false;
+    const kept: string[] = [];
+    for (const l of body) {
+      const c = l.text[0];
+      if (c === '+') {
+        if (chosen.has(l.idx)) {
+          kept.push(l.text);
+          anyChosen = true;
+        }
+      } else if (c === '-') {
+        if (chosen.has(l.idx)) {
+          kept.push(l.text);
+          anyChosen = true;
+        } else {
+          kept.push(' ' + l.text.slice(1));
+        }
+      } else {
+        kept.push(l.text); // context + "\ No newline" tails
+      }
+    }
+    if (anyChosen) {
+      const m = /@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/.exec(head);
+      const start = m ? m[1] : '0';
+      const oldCount = kept.filter((l) => l[0] === ' ' || l[0] === '-').length;
+      const newCount = kept.filter((l) => l[0] === ' ' || l[0] === '+').length;
+      out.push(`@@ -${start},${oldCount} +${start},${newCount} @@`);
+      out.push(...kept);
+    }
+    i = j;
+  }
+  return out.join('\n') + '\n';
+}
+
 // Highlighting covers every language the package index installs a server
 // for (go, c/cpp, bash, yaml…) plus the daily config/web formats — official
 // @codemirror/lang-* packages where they exist, CM5 legacy-modes otherwise
@@ -1096,29 +1150,112 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
         highlightChanges: true,
         collapseUnchanged: { margin: 3, minSize: 4 },
       });
+    } else if (text !== '(no textual diff)') {
+      renderStageableUnified(text, path, staged, ctl);
     } else {
-      for (const line of text.split('\n')) {
-        const el = document.createElement('div');
-        const c = line[0];
-        el.className =
-          'dl ' +
-          (line.startsWith('@@')
-            ? 'dhunk'
-            : /^(diff |index |--- |\+\+\+ |new file|deleted )/.test(line)
-              ? 'dmeta'
-              : c === '+'
-                ? 'dadd'
-                : c === '-'
-                  ? 'ddel'
-                  : '');
-        el.textContent = line || ' ';
-        diffEl.appendChild(el);
-      }
+      const el = document.createElement('div');
+      el.className = 'dl';
+      el.textContent = text;
+      diffEl.appendChild(el);
     }
     editorParent.style.display = 'none';
     diffEl.style.display = '';
     viewerEl.style.display = 'none';
     phEl.style.display = '';
+  }
+
+  /** Unified diff with hunk/line-level staging: every '+'/'-' row toggles
+   * into a selection on click, every @@ carries a whole-hunk action, and the
+   * ctl row drives "N selected". Rebuilds a REDUCED patch (unchosen '+'
+   * dropped, unchosen '-' rewritten as context — the git add -p edit
+   * semantics) and applies it via /git/apply (--cached; --reverse from the
+   * staged side). */
+  function renderStageableUnified(text: string, path: string, staged: boolean, ctl: HTMLElement) {
+    const s = current;
+    if (!s) return;
+    const lines = text.split('\n');
+    const word = staged ? 'unstage' : 'stage';
+    const sel = new Set<number>();
+    const selBtn = document.createElement('button');
+    selBtn.className = 'diff-ctl-btn';
+    selBtn.style.display = 'none';
+    const clearBtn = document.createElement('button');
+    clearBtn.className = 'diff-ctl-btn';
+    clearBtn.style.display = 'none';
+    clearBtn.textContent = 'clear';
+    clearBtn.addEventListener('click', () => {
+      sel.clear();
+      diffEl.querySelectorAll('.dl.sline.sel').forEach((x) => x.classList.remove('sel'));
+      refreshSelCtl();
+    });
+    ctl.append(selBtn, clearBtn);
+    const refreshSelCtl = () => {
+      selBtn.style.display = sel.size ? '' : 'none';
+      clearBtn.style.display = sel.size ? '' : 'none';
+      selBtn.textContent = sel.size ? `${word} ${sel.size} selected` : '';
+    };
+    let inHunks = false;
+    let hunkBody: number[] = [];
+    lines.forEach((line, idx) => {
+      const isHunk = line.startsWith('@@');
+      const isMeta =
+        /^(diff |index |--- |\+\+\+ |new file|deleted |similarity |rename )/.test(line);
+      const row = document.createElement('div');
+      row.className =
+        'dl ' +
+        (isHunk ? 'dhunk' : isMeta ? 'dmeta' : inHunks && line[0] === '+' ? 'dadd' : inHunks && line[0] === '-' ? 'ddel' : '');
+      row.textContent = line || ' ';
+      if (isHunk) {
+        inHunks = true;
+        hunkBody = [];
+        const hb = document.createElement('button');
+        hb.className = 'dl-hunk-btn';
+        hb.textContent = `${word} hunk`;
+        const idxs = hunkBody;
+        hb.addEventListener('click', (e) => {
+          e.stopPropagation();
+          void applyLines(new Set(idxs));
+        });
+        row.appendChild(hb);
+      } else if (!isMeta && inHunks && (line[0] === '+' || line[0] === '-')) {
+        hunkBody.push(idx);
+        row.classList.add('sline');
+        row.title = `click to ${word === 'stage' ? 'select' : 'select'} — ${word} selected ranges below`;
+        row.addEventListener('click', () => {
+          if (sel.has(idx)) sel.delete(idx);
+          else sel.add(idx);
+          row.classList.toggle('sel');
+          refreshSelCtl();
+        });
+      }
+      diffEl.appendChild(row);
+    });
+    selBtn.addEventListener('click', () => {
+      const chosen = new Set(sel);
+      sel.clear();
+      void applyLines(chosen);
+    });
+    async function applyLines(chosen: Set<number>) {
+      const sess = s;
+      if (!chosen.size || !sess) return;
+      const patch = buildPatch(lines, chosen);
+      let ok = false;
+      try {
+        const r = await fetch(`${apiBase()}/git/apply`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ pane: sess.pane ?? undefined, root: sess.root ?? undefined, patch, reverse: staged }),
+        });
+        const res = (await r.json()) as { ok: boolean; out: string };
+        ok = r.ok && res.ok;
+        if (!ok) flashHint(res.out.split('\n')[0] || 'apply failed');
+      } catch {
+        flashHint('daemon unreachable');
+      }
+      if (!ok) return;
+      loadChanges();
+      await showDiff(path, staged, 'unified');
+    }
   }
 
   function treeItem(path: string, name: string, dir: boolean, depth: number): HTMLElement {

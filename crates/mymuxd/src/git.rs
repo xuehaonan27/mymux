@@ -636,6 +636,10 @@ pub struct WriteReq {
     action: Option<String>,
     /// Only for branch/tag create: the commit to point at (absent = HEAD).
     at: Option<String>,
+    /// Only for /git/apply: the reduced unified diff to apply --cached.
+    patch: Option<String>,
+    /// Only for /git/apply: true = unstage (--reverse).
+    reverse: Option<bool>,
     pane: Option<u32>,
     /// Optional absolute root override (the panel's root switcher).
     root: Option<String>,
@@ -780,6 +784,65 @@ pub async fn discard(Json(q): Json<WriteReq>) -> Json<WriteResp> {
             )
             .await,
         )
+    }
+}
+
+/// `POST /git/apply {patch, reverse?}` — hunk/line-level (un)staging: the
+/// panel rebuilds a reduced unified diff and we `git apply --cached` it
+/// (reverse = unstaging). Stdin-fed, no shell, 120s.
+pub async fn apply_patch(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let root = root_for_req(q.pane, &q.root).await;
+    let Some(patch) = q.patch.clone().filter(|p| !p.trim().is_empty() && p.len() <= 8_000_000)
+    else {
+        return Json(WriteResp {
+            ok: false,
+            out: "empty (or oversized) patch".into(),
+        });
+    };
+    let reverse = q.reverse.unwrap_or(false);
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(&root).arg("apply");
+    cmd.arg("--cached").arg("--whitespace=nowarn");
+    if reverse {
+        cmd.arg("--reverse");
+    }
+    cmd.arg("-");
+    cmd.stdin(std::process::Stdio::piped());
+    let child = cmd.spawn();
+    let Ok(mut child) = child else {
+        return Json(WriteResp {
+            ok: false,
+            out: "git failed to start".into(),
+        });
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(patch.as_bytes()).await;
+        let _ = stdin.shutdown().await;
+    }
+    let out = tokio::time::timeout(std::time::Duration::from_secs(120), child.wait_with_output()).await;
+    match out {
+        Err(_) => Json(WriteResp {
+            ok: false,
+            out: "timed out after 120s".into(),
+        }),
+        Ok(Err(e)) => Json(WriteResp {
+            ok: false,
+            out: format!("git apply failed: {e}"),
+        }),
+        Ok(Ok(o)) => {
+            let tail: String = String::from_utf8_lossy(&o.stderr)
+                .lines()
+                .chain(String::from_utf8_lossy(&o.stdout).lines())
+                .filter(|l| !l.trim().is_empty())
+                .take(8)
+                .collect::<Vec<_>>()
+                .join("\n");
+            Json(WriteResp {
+                ok: o.status.success(),
+                out: tail,
+            })
+        }
     }
 }
 
