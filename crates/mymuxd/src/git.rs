@@ -14,6 +14,9 @@ pub struct GitFile {
     /// Two-char porcelain status, e.g. " M", "A ", "??", "R ".
     status: String,
     path: String,
+    /// True for gitlinks (submodule boundaries) — the UI navigates INTO them
+    /// instead of diffing them like a plain file.
+    submodule: bool,
 }
 
 #[derive(Deserialize)]
@@ -37,7 +40,7 @@ pub async fn status(Query(q): Query<StatusQuery>) -> Json<Vec<GitFile>> {
         return Json(vec![]);
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let files = text
+    let mut files: Vec<GitFile> = text
         .lines()
         .filter_map(|l| {
             if l.len() < 4 {
@@ -46,10 +49,57 @@ pub async fn status(Query(q): Query<StatusQuery>) -> Json<Vec<GitFile>> {
             Some(GitFile {
                 status: l[..2].to_string(),
                 path: l[3..].trim().to_string(),
+                submodule: false,
             })
         })
         .collect();
+    // Mark gitlinks. .gitmodules lives at the toplevel while status paths are
+    // prefix-relative, so re-root the submodule paths at the current prefix.
+    if let Some(subs) = submodule_paths(&root).await {
+        if !subs.is_empty() {
+            for f in &mut files {
+                f.submodule = subs.contains(&f.path);
+            }
+        }
+    }
     Json(files)
+}
+
+/// Submodule paths relative to the CURRENT root (status/diff path style):
+/// .gitmodules values are toplevel-relative, so strip the pane's prefix (""
+/// at the toplevel; a subdir prefix keeps out-of-view subs from matching).
+/// None outside a work tree; Some(vec![]) when there's no .gitmodules.
+async fn submodule_paths(root: &std::path::Path) -> Option<Vec<String>> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--show-toplevel", "--show-prefix"])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let top = lines.next()?.trim().to_string();
+    let prefix = lines.next().unwrap_or("").trim().to_string();
+    let cfgs = Command::new("git")
+        .arg("-C")
+        .arg(&top)
+        .args(["config", "-f", ".gitmodules", "--get-regexp", "\\.path$"])
+        .output()
+        .await
+        .ok()?;
+    if !cfgs.status.success() {
+        return Some(vec![]); // no .gitmodules
+    }
+    let subs = String::from_utf8_lossy(&cfgs.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .filter_map(|p| p.strip_prefix(prefix.as_str()).map(str::to_string))
+        .collect();
+    Some(subs)
 }
 
 /// `GET /git/files?pane=<id>` — tracked + untracked (non-ignored) files, for

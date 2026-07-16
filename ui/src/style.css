@@ -916,6 +916,11 @@ body.has-winalpha #hostbar {
 .gmod {
   color: #d6a04c;
 }
+/* Submodule (gitlink) rows in the changes list — purple, like the stash
+   badge in the graph. */
+.gsub {
+  color: #b98ae6;
+}
 .gdel {
   color: #f85149;
 }

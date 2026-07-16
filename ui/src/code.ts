@@ -46,6 +46,8 @@ interface FsEntry {
 interface GitFile {
   status: string;
   path: string;
+  /** Gitlink (submodule boundary): click enters it, never file-diffs it. */
+  submodule?: boolean;
 }
 
 const paneQ = (pane: number | null) => (pane != null ? `pane=${pane}&` : '');
@@ -912,9 +914,27 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       badge.textContent = st || '·';
       row.appendChild(badge);
       row.appendChild(document.createTextNode(' ' + f.path));
-      row.addEventListener('click', () => void showDiff(f.path));
+      if (f.submodule) {
+        // A gitlink: its "diff" is just two commit hashes. The useful action
+        // is entering the submodule as the panel's root (its own status /
+        // diffs / files then work, git resolves the nested repo itself).
+        badge.className = 'gbadge gsub';
+        badge.textContent = 'S';
+        row.title = 'submodule — click to switch root into it';
+        row.addEventListener('click', () => void enterSubmodule(f.path));
+      } else {
+        row.addEventListener('click', () => void showDiff(f.path));
+      }
       changesEl.appendChild(row);
     }
+  }
+
+  async function enterSubmodule(subPath: string) {
+    const s = current;
+    if (!s) return;
+    const top = await gitToplevel(s.pane, s.root);
+    if (!top || current !== s) return;
+    switchRoot(`${top}/${subPath}`);
   }
 
   // Swap the whole view to a pane's session: snapshot the outgoing editor, then
