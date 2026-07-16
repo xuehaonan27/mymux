@@ -19,7 +19,7 @@ on:
   workflow_dispatch: {}
 
 env:
-  GITEA_REPO: XueHaonan/mymux
+  GITEA_REPO: doublefire.chen/mymux
   GITEA_BASE: https://gitea.aka.cy
 
 jobs:
@@ -52,7 +52,10 @@ jobs:
       - name: publish release ${{ github.ref_name }}
         env:
           TAG: ${{ github.ref_name }}
-          GITEA_TOKEN: ${{ secrets.MYMUX_RELEASE_TOKEN }}
+          # The instance injects GITEA_TOKEN automatically (write perms into
+          # the RUNNING repo — that's why artifacts land here, not in
+          # XueHaonan/mymux; MYMUX_RELEASE_TOKEN is a user-token fallback).
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           bash scripts/ci-publish-release.sh
