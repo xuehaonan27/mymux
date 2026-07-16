@@ -54,4 +54,3 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           bash scripts/ci-publish-release.sh
 
-# first-fire probe 2026-07-16 (harmless; verifies tag-event wiring)
