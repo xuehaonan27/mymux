@@ -86,6 +86,11 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
   let stashes: StashEntry[] = [];
   let gitState: GitStateResp = { state: null, conflicts: [] };
   let logData: LogResp | null = null;
+  // History pagination: PAGE-sized fetches, more underneath via a scroll
+  // sentinel. loadedAll = the server answered short (no older commits).
+  const PAGE = 200;
+  let loadedAll = false;
+  let paging = false;
 
   const el = (tag: string, cls?: string, text?: string): HTMLElement => {
     const e = document.createElement(tag);
@@ -427,6 +432,9 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       rowsEl.appendChild(row);
     }
     wrap.appendChild(rowsEl);
+    if (!loadedAll) {
+      wrap.appendChild(el('div', 'git-more', paging ? 'loading older commits…' : '· scroll for older commits ·'));
+    }
     return wrap;
   }
 
@@ -756,13 +764,65 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     ]);
   }
 
-  /** Rebuild just the graph side (search typing): the toolbar and its focus
-   * stay put; selection survives (guarded against the FULL set on load). */
-  function softReload() {
+  /** The bottom sentinel: when it scrolls into view, pull the next page.
+   * Auto-chains while the viewport isn't full yet. */
+  function attachPager(main: HTMLElement) {
+    const foot = main.querySelector('.git-more');
+    const graphEl = main.querySelector('.git-graph');
+    if (!foot || !graphEl) return;
+    new IntersectionObserver(
+      (entries, obs) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          obs.disconnect();
+          void loadMore();
+        }
+      },
+      { root: graphEl },
+    ).observe(foot);
+  }
+
+  /** Fetch the next PAGE of commits under the SAME branch filter and merge
+   * (hash-deduped) — keeps the user's scroll position and selection. */
+  async function loadMore() {
+    if (paging || loadedAll) return;
+    paging = true;
+    const my = seq;
+    const logParams: Record<string, string | number | boolean> = {
+      root: root ?? '',
+      limit: PAGE,
+      skip: logData?.commits.length ?? 0,
+    };
+    if (branchFilter === '') logParams.all = true;
+    else if (branchFilter === '~current') logParams.all = false;
+    else logParams.rev = branchFilter;
+    const more = await get<LogResp>(`/git/log?${qs(logParams)}`);
+    paging = false;
+    if (my !== seq) return; // a full reload happened under us
+    const fresh = more?.commits ?? [];
+    if (!more || fresh.length < PAGE) loadedAll = true;
+    if (fresh.length && logData) {
+      const seen = new Set(logData.commits.map((c) => c.hash));
+      logData.commits = [...logData.commits, ...fresh.filter((c) => !seen.has(c.hash))];
+      softReload(true);
+    } else if (loadedAll) {
+      softReload(true); // drop the sentinel
+    }
+  }
+
+  /** Rebuild just the graph side (search typing / paging): the toolbar and
+   * its focus stay put; selection survives (guarded on load). */
+  function softReload(preserveScroll = false) {
+    const oldGraph = panel.querySelector('.git-graph');
+    const st = preserveScroll ? (oldGraph?.scrollTop ?? 0) : 0;
     const main = el('div', 'git-main');
     main.appendChild(renderGraph(buildRows()));
     main.appendChild(detailEl);
     panel.querySelector('.git-main')?.replaceWith(main);
+    if (preserveScroll) {
+      const g = panel.querySelector('.git-graph');
+      if (g) g.scrollTop = st;
+    }
+    attachPager(main);
     void renderDetail();
   }
 
@@ -780,7 +840,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       );
       return;
     }
-    const logParams: Record<string, string | number | boolean> = { root, limit: 400 };
+    const logParams: Record<string, string | number | boolean> = { root, limit: PAGE };
     if (branchFilter === '') logParams.all = true;
     else if (branchFilter === '~current') logParams.all = false;
     else logParams.rev = branchFilter;
@@ -796,6 +856,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     stashes = stashList ?? [];
     gitState = st ?? { state: null, conflicts: [] };
     const commits = log?.commits ?? [];
+    loadedAll = !log || commits.length < PAGE;
     // A selected row may vanish under us (popped stash, reset-away commit).
     if (
       selected &&
@@ -808,6 +869,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     main.appendChild(renderGraph(buildRows()));
     main.appendChild(detailEl);
     panel.replaceChildren(toolbar(), main);
+    attachPager(main);
     await renderDetail();
   }
 

@@ -1755,6 +1755,13 @@ body.has-winalpha #hostbar {
 .git-search:focus {
   border-color: var(--accent);
 }
+.git-more {
+  padding: 10px;
+  text-align: center;
+  color: var(--text-dim);
+  font: 10px var(--mono);
+  user-select: none;
+}
 .git-main {
   flex: 1;
   min-height: 0;
