@@ -140,14 +140,18 @@ Linux box (no webkit2gtk, no display).
 scripts/build-release.sh
 ```
 
-It produces the daemon bundle (delegating its build to
+  It produces the daemon bundle (delegating its build to
 `$MYMUX_BUILD_HOST`/`~/.config/mymux/build-host` when the local box has no
 musl toolchain — the Mac case; skipped entirely when the bundle already
 matches the commit), builds the UI, runs `cargo tauri build` (ad-hoc signed),
 and drops `mymux.dmg` into `dist/`. **That dmg is the whole product**: install
 it, open, add a host, type the passphrase — the app pushes and installs the
-daemon bundle itself, zero-touch. First launch of an ad-hoc-signed app needs
-one right-click → Open (or `xattr -dr com.apple.quarantine` on the .app).
+daemon bundle itself, zero-touch. **Or just wait for CI**: every `v*` tag
+builds it on GitHub's free `macos-latest` runner and attaches
+`mymux_<version>_aarch64.dmg` to that tag's GitHub Release (job gated on the
+daemon matrix, ad-hoc signed by `cargo tauri build`, same artifact shape).
+First launch of an ad-hoc-signed app needs one right-click → Open (or
+`xattr -dr com.apple.quarantine` on the .app).
 
 For just the bundle on its own: `scripts/build-daemon-bundle.sh` (same
 delegation). Without the bundle the app still works — the zero-touch install
