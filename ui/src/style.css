@@ -804,6 +804,40 @@ body.has-winalpha #hostbar {
   color: var(--text-dim);
   border-bottom: 1px solid var(--hairline);
 }
+#code-blame {
+  margin-left: auto;
+  padding: 1px 10px;
+}
+#code-blame.on {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* Blame gutter (batch 6): one annotation per same-commit run. */
+.cm-blame-gutter {
+  min-width: 120px;
+  background: color-mix(in srgb, var(--side-bg, #0d1117) 88%, transparent);
+  border-right: 1px solid var(--hairline);
+}
+.cm-blame {
+  padding: 0 8px;
+  font: 10px var(--mono);
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 130px;
+}
+.cm-blame.link {
+  cursor: pointer;
+}
+.cm-blame.link:hover {
+  color: var(--accent);
+}
+.cm-blame.wip {
+  color: #d6a04c;
+  font-style: italic;
+}
 .code-main {
   flex: 1 1 auto;
   display: flex;

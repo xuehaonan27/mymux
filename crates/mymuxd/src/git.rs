@@ -697,6 +697,112 @@ pub async fn stash_drop(Json(q): Json<WriteReq>) -> Json<WriteResp> {
     Json(run_op(&q, &["stash", "drop", &sel], 60).await)
 }
 
+// ---- blame (the code panel's gutter) -------------------------------------------
+
+#[derive(Deserialize)]
+pub struct BlameQuery {
+    #[serde(default)]
+    path: String,
+    pane: Option<u32>,
+    root: Option<String>,
+}
+
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct BlameGroup {
+    /// 1-based first covered line.
+    line: u32,
+    count: u32,
+    hash: String,
+    author: String,
+    /// author-time epoch seconds.
+    time: u64,
+    summary: String,
+}
+
+/// Parse `--line-porcelain` rows: every blamed line comes as a header
+/// (`sha orig final`), full metadata, then one TAB-prefixed content line.
+/// Consecutive lines from the same commit merge into one group.
+fn parse_blame(text: &str) -> Vec<BlameGroup> {
+    let mut groups: Vec<BlameGroup> = Vec::new();
+    let mut final_no = 0u32;
+    let mut hash = String::new();
+    let mut author = String::new();
+    let mut time = 0u64;
+    let mut summary = String::new();
+    for l in text.lines() {
+        if l.starts_with('\t') {
+            // Content line: emit under the current header's metadata.
+            if let Some(g) = groups.last_mut() {
+                if g.hash == hash && g.line + g.count == final_no {
+                    g.count += 1;
+                    continue;
+                }
+            }
+            groups.push(BlameGroup {
+                line: final_no,
+                count: 1,
+                hash: hash.clone(),
+                author: author.clone(),
+                time,
+                summary: summary.clone(),
+            });
+            continue;
+        }
+        let mut it = l.split_whitespace();
+        if let (Some(sha), Some(_orig), Some(fin)) = (it.next(), it.next(), it.next()) {
+            if sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+                if let Ok(n) = fin.parse::<u32>() {
+                    hash = sha.to_string();
+                    final_no = n;
+                    author.clear();
+                    time = 0;
+                    summary.clear();
+                    continue;
+                }
+            }
+        }
+        if let Some(a) = l.strip_prefix("author ") {
+            author = a.to_string();
+        } else if let Some(t) = l.strip_prefix("author-time ") {
+            time = t.trim().parse().unwrap_or(0);
+        } else if let Some(s) = l.strip_prefix("summary ") {
+            summary = s.to_string();
+        }
+    }
+    groups
+}
+
+/// `GET /git/blame?pane=&root=&path=` — per-line author groups for the code
+/// panel's blame gutter. 404 when the file is untracked (or outside a repo).
+pub async fn blame(Query(q): Query<BlameQuery>) -> Result<Json<serde_json::Value>, StatusCode> {
+    if q.path.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let root = root_for_req(q.pane, &q.root).await;
+    safe_path(&root, &q.path, false).ok_or(StatusCode::FORBIDDEN)?;
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["blame", "--line-porcelain", "--", &q.path])
+            .output(),
+    )
+    .await;
+    let Ok(Ok(out)) = out else {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+    if !out.status.success() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if out.stdout.len() > 8 * 1024 * 1024 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    Ok(Json(serde_json::json!({
+        "groups": parse_blame(&String::from_utf8_lossy(&out.stdout)),
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,5 +841,28 @@ mod tests {
         assert!(!valid_rev("--help"));
         assert!(!valid_rev(""));
         assert!(!valid_rev("-n 1"));
+    }
+
+    #[test]
+    fn blame_rows_parse() {
+        // Two commits, three lines; the second commit's lines are contiguous
+        // and must merge into one group. --line-porcelain repeats full
+        // metadata per line.
+        let h1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let h2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let text = format!(
+            "{h1} 1 1\nauthor A One\nauthor-time 1700000000\nsummary init\n\tline one\n\
+             {h2} 1 2\nauthor B Two\nauthor-time 1700000100\nsummary feat x\n\tline two\n\
+             {h2} 2 3\nauthor B Two\nauthor-time 1700000100\nsummary feat x\n\tline three\n"
+        );
+        let groups = parse_blame(&text);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].line, 1);
+        assert_eq!(groups[0].count, 1);
+        assert_eq!(groups[0].author, "A One");
+        assert_eq!(groups[1].line, 2);
+        assert_eq!(groups[1].count, 2);
+        assert_eq!(groups[1].summary, "feat x");
+        assert_eq!(groups[1].time, 1700000100);
     }
 }

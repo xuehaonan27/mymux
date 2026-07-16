@@ -1,7 +1,7 @@
 import { EditorView, basicSetup } from 'codemirror';
 import { MergeView } from '@codemirror/merge';
-import { EditorState, type Extension } from '@codemirror/state';
-import { keymap, lineNumbers } from '@codemirror/view';
+import { EditorState, Compartment, type Extension } from '@codemirror/state';
+import { keymap, lineNumbers, gutter, GutterMarker } from '@codemirror/view';
 import { getPrefs } from './prefs';
 import { cmThemeSlot, cmThemeFor, presetById, rethemeState } from './theme';
 import { rust } from '@codemirror/lang-rust';
@@ -118,6 +118,79 @@ async function gitBlob(
   return r.ok ? r.text() : null;
 }
 
+// ---- blame gutter ------------------------------------------------------------
+
+interface BlameGroup {
+  /** 1-based first covered line. */
+  line: number;
+  count: number;
+  hash: string;
+  author: string;
+  time: number; // author-time epoch seconds
+  summary: string;
+}
+
+/** Blame view lives in a Compartment so toggling never rebuilds the buffer's
+ * state (undo history survives); the snapshot in Buffer.state carries it. */
+const blameSlot = new Compartment();
+
+const relDate = (t: number) => {
+  const sec = Math.max(1, Date.now() / 1000 - t);
+  const day = sec / 86_400;
+  if (day >= 365) return `${Math.floor(day / 365)}y ago`;
+  if (day >= 30) return `${Math.floor(day / 30)}mo ago`;
+  if (day >= 1) return `${Math.floor(day)}d ago`;
+  const hr = sec / 3600;
+  if (hr >= 1) return `${Math.floor(hr)}h ago`;
+  return `${Math.max(1, Math.floor(sec / 60))}m ago`;
+};
+
+/** One annotation per contiguous same-commit run, Git-Lens-gutter style;
+ * click jumps to the commit in the git graph. */
+class BlameMarker extends GutterMarker {
+  constructor(
+    readonly g: BlameGroup,
+    readonly onOpen: ((h: string) => void) | null,
+  ) {
+    super();
+  }
+  override eq(other: BlameMarker): boolean {
+    return other.g === this.g;
+  }
+  override toDOM(): Node {
+    const d = document.createElement('div');
+    d.className = 'cm-blame';
+    const g = this.g;
+    if (g.hash.startsWith('0000000')) {
+      d.classList.add('wip');
+      d.textContent = 'uncommitted';
+      return d;
+    }
+    d.classList.add('link');
+    d.textContent = `${g.author} · ${relDate(g.time)}`;
+    d.title = `${g.hash.slice(0, 10)} — ${g.summary}\n${g.author} · ${relDate(g.time)}\nclick to open in the git graph`;
+    if (this.onOpen) {
+      d.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.onOpen!(g.hash);
+      });
+    }
+    return d;
+  }
+}
+
+function blameGutter(groups: BlameGroup[], onOpen: (h: string) => void): Extension {
+  const starts = new Map<number, BlameGroup>();
+  for (const g of groups) starts.set(g.line, g);
+  return gutter({
+    class: 'cm-blame-gutter',
+    lineMarker: (view, line) => {
+      const g = starts.get(view.state.doc.lineAt(line.from).number);
+      return g ? new BlameMarker(g, onOpen) : null;
+    },
+  });
+}
+
 // Highlighting covers every language the package index installs a server
 // for (go, c/cpp, bash, yaml…) plus the daily config/web formats — official
 // @codemirror/lang-* packages where they exist, CM5 legacy-modes otherwise
@@ -229,6 +302,8 @@ type Buffer =
       savedDoc: string; // last saved contents (dirty = editor doc differs)
       state: EditorState; // doc + history + selection
       dirty: boolean; // cached for background buffers; live one uses isDirty()
+      /** Non-null while the blame gutter is on for this buffer. */
+      blame?: BlameGroup[] | null;
     }
   | { kind: 'viewer' };
 interface Session {
@@ -252,6 +327,8 @@ export interface CodePanelOpts {
   getScope: () => string;
   /** The default root before any manual switch: the pane's cwd or its repo. */
   getDefaultRoot: () => 'pane' | 'repo';
+  /** Blame-gutter click-through: open this commit in the git graph. */
+  onBlameHash?: (hash: string) => void;
 }
 
 /** The ⌘E code overlay, rooted at the focused pane's cwd. */
@@ -274,7 +351,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       <div class="code-tree" id="code-tree"></div>
     </div>
     <div class="code-main">
-      <div class="code-hd"><span id="code-path">no file open</span><span id="code-hint" title="⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close">⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close</span></div>
+      <div class="code-hd"><span id="code-path">no file open</span><button id="code-blame" class="pkgs-btn" title="git blame gutter (needs a saved file)">Blame</button><span id="code-hint" title="⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close">⌘P open · ⌘S save · ⌘. fix · F12 def · F2 rename · esc/⌘E close</span></div>
       <div class="code-bufs" id="code-bufs"></div>
       <div class="code-editor" id="code-editor"></div>
       <div class="code-diff" id="code-diff"></div>
@@ -361,6 +438,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       pathEl.textContent = 'no file open';
       pathEl.style.color = '';
       renderBufs();
+      renderBlameBtn();
       return;
     }
     if (curBuf()?.kind !== 'viewer') {
@@ -369,6 +447,73 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       pathEl.style.color = d ? '#d6a04c' : '';
     }
     renderBufs();
+    renderBlameBtn();
+  }
+
+  // The Blame toggle mirrors the live buffer's gutter state (and hides for
+  // viewers / the empty state).
+  const blameBtn = panel.querySelector('#code-blame') as HTMLButtonElement;
+  blameBtn.addEventListener('click', () => void toggleBlame());
+  function renderBlameBtn() {
+    const b = curBuf();
+    blameBtn.classList.toggle('on', !!(b && b.kind === 'text' && b.blame));
+    blameBtn.style.display = b && b.kind === 'text' ? '' : 'none';
+  }
+
+  /** Toggle the per-buffer blame gutter. Kept off dirty buffers: blame line
+   * numbers would lie against unsaved edits. */
+  async function toggleBlame() {
+    const s = current;
+    const b = curBuf();
+    if (!s || !s.path || !b || b.kind !== 'text' || !editor) return;
+    const path = s.path;
+    if (b.blame) {
+      b.blame = null;
+      editor.dispatch({ effects: blameSlot.reconfigure([]) });
+      renderBlameBtn();
+      return;
+    }
+    if (isDirty()) {
+      flashHint('save the file before blaming (⌘S)');
+      return;
+    }
+    const top = await gitToplevel(s.pane, s.root);
+    if (!top) {
+      flashHint('not a git repo');
+      return;
+    }
+    const absRoot = (s.root ?? s.fsRoot)?.replace(/\/+$/, '');
+    if (!absRoot) {
+      flashHint('root not resolved yet — try again');
+      return;
+    }
+    const abs = `${absRoot}/${path}`;
+    if (!abs.startsWith(`${top}/`)) {
+      flashHint('file is outside the repo');
+      return;
+    }
+    const rel = abs.slice(top.length + 1);
+    let groups: BlameGroup[];
+    try {
+      const r = await fetch(
+        `${apiBase()}/git/blame?${paneQ(s.pane)}path=${encodeURIComponent(rel)}&root=${encodeURIComponent(top)}`,
+      );
+      if (!r.ok) {
+        flashHint(r.status === 404 ? 'no blame yet (untracked file?)' : `blame failed (${r.status})`);
+        return;
+      }
+      groups = ((await r.json()) as { groups: BlameGroup[] }).groups;
+    } catch {
+      flashHint('blame failed (daemon unreachable)');
+      return;
+    }
+    // The buffer may have switched while we fetched.
+    if (current !== s || s.path !== path || !editor) return;
+    b.blame = groups;
+    editor.dispatch({
+      effects: blameSlot.reconfigure(blameGutter(groups, (h) => opts.onBlameHash?.(h))),
+    });
+    renderBlameBtn();
   }
 
   // Open-buffer chips: click to switch, ✕ to close. A dirty buffer's ✕ needs
@@ -445,13 +590,28 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
         editorTheme,
         themed(),
         langFor(path),
+        blameSlot.of([]), // the blame gutter toggles in here, never a rebuild
         ...(lsp ? [lsp] : []),
         keymap.of([
           { key: 'Mod-s', preventDefault: true, run: () => (void save(), true) },
           { key: 'Mod-.', preventDefault: true, run: () => (void openCodeActions(), true) },
         ]),
         EditorView.updateListener.of((u) => {
-          if (u.docChanged) renderHeader();
+          if (u.docChanged) {
+            renderHeader();
+            // Edits misalign blame line numbers — drop the gutter (and its
+            // buffer flag) on the first change rather than annotating lies.
+            const buf = current?.buffers.get(path);
+            if (buf?.kind === 'text' && buf.blame) {
+              buf.blame = null;
+              renderBlameBtn();
+              setTimeout(() => {
+                if (editor && current?.path === path) {
+                  editor.dispatch({ effects: blameSlot.reconfigure([]) });
+                }
+              }, 0);
+            }
+          }
         }),
       ],
     });

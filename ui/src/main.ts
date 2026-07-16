@@ -750,6 +750,12 @@ const codeOpts: CodePanelOpts = {
   getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
   getScope: () => active()?.id ?? 'local',
   getDefaultRoot: () => getPrefs().codeRoot,
+  // The git panel sits UNDER the code panel in the z-band, so the jump to the
+  // graph closes the code panel first (its buffers persist — blame included).
+  onBlameHash: (hash) => {
+    if (codePanel.isOpen()) codePanel.toggle();
+    gitPanel.show(hash);
+  },
 };
 // CodeMirror is heavy, so the code panel loads on first use (vite splits the
 // chunk); the wrapper keeps the synchronous interface the shell expects.
@@ -784,20 +790,39 @@ const pkgsPanel = initPkgsPanel({
 // lazy dynamic import, same contract shape as the code panel's wrapper.
 let gitReal: import('./gitgraph').GitGraphPanel | null = null;
 let gitLoading = false;
+let pendingGitShow: string | null = null; // blame jump while the chunk loads
+async function ensureGit(): Promise<import('./gitgraph').GitGraphPanel> {
+  if (gitReal) return gitReal;
+  if (!gitLoading) {
+    gitLoading = true;
+    const m = await import('./gitgraph');
+    gitReal = m.initGitGraph({
+      getActivePane: () => active()?.activePane ?? null,
+      getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
+      toast,
+    });
+  } else {
+    while (gitLoading) await new Promise((r) => setTimeout(r, 50));
+  }
+  return gitReal!;
+}
 const gitPanel = {
   isOpen: () => gitReal?.isOpen() ?? false,
   toggle: () => {
-    if (gitReal) return gitReal.toggle();
-    if (gitLoading) return;
-    gitLoading = true;
-    void import('./gitgraph').then((m) => {
-      gitReal = m.initGitGraph({
-        getActivePane: () => active()?.activePane ?? null,
-        getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
-        toast,
-      });
-      gitReal.toggle();
-      noteModal('gitgraph', gitReal.isOpen());
+    void ensureGit().then((g) => {
+      g.toggle();
+      noteModal('gitgraph', g.isOpen());
+    });
+  },
+  /** Blame click-through: open the graph ON this commit (the code panel is
+   * above us in the z-band, so it must close first — the caller does that). */
+  show: (hash: string) => {
+    pendingGitShow = hash;
+    void ensureGit().then((g) => {
+      const h = pendingGitShow;
+      pendingGitShow = null;
+      g.show(h ?? hash);
+      noteModal('gitgraph', g.isOpen());
     });
   },
 };

@@ -19,6 +19,8 @@ export interface GitGraphOpts {
 export interface GitGraphPanel {
   toggle(): void;
   isOpen(): boolean;
+  /** Open (if needed) with this commit selected — the blame gutter's jump-in. */
+  show(hash: string): void;
 }
 
 interface LogCommit {
@@ -716,6 +718,14 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
         selected = '';
         void load();
       }
+    },
+    show(hash: string) {
+      selected = hash;
+      if (!open) {
+        open = true;
+        panel.classList.add('show');
+      }
+      void load();
     },
   };
 }
