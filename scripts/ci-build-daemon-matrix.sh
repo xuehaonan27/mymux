@@ -152,7 +152,7 @@ for key in ("linux-x86_64", "linux-aarch64"):
             h.update(chunk)
     assets[key] = {"name": f"{key}.tar.gz", "sha256": h.hexdigest(), "size": os.path.getsize(p)}
 manifest = {
-    "channel": "gitea",
+    "channel": os.environ.get("PROVIDER", "gitea"),
     "version": os.environ["VERSION"],
     "baseUrl": os.environ.get("BASE_URL", ""),
     "assets": assets,

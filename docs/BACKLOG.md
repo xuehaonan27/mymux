@@ -259,12 +259,15 @@ commit search (--grep server mode beyond the loaded window).
   verification, and relays it through the existing SSH master into the
   established upload/install flow (`MYMUX_BUNDLE_MIRROR` swaps the URL host
   for internal mirrors; the legacy embedded x86_64 bundle stays as the
-  airgapped fallback). Workflow `.gitea/workflows/release.yml` runs on the
-  `rui.ke` label (per user: the slow runner's name, not nl). Non-Mac client
-  platforms (Windows, Android, iOS) no longer pay daemon-megabytes either —
-  fetching at deploy time is the point. Remaining: first tagged release,
-  `scripts/build-release.sh` rewired to consume the pipeline, committed
-  bundles.json refresh policy, Developer ID signing.
+  airgapped fallback). **First tagged release SHIPPED 2026-07-16 via GitHub
+  Releases** (`v0.1.0-c3ac761` on github.com/xuehaonan27/mymux — public repo
+  = free runners; provider-aware `ci-publish-release.sh` handles both hosts:
+  gitea multipart vs GitHub raw-bytes asset upload). The gitea route stays
+  primed (`.gitea/workflows/release.yml` on label `k3s-runner`) for when the
+  instance's queue/dispatch is healthy again; the self-hosted route's
+  remaining steps: colleague seeds `MYMUX_RELEASE_TOKEN` and instance queue
+  health. Published-tag flow for realses: tag `v*` on either remote; first
+  dispatch on doublefire.chen used `workflow_dispatch` (kept enabled).
 - ~~Remote uninstall from the app~~ — **DONE 2026-07-15**: the host manager
   gains a ⌫ action per host: `scripts/mymux-uninstall-remote.sh` (embedded,
   driven over the same russh exec channel) runs `--probe` first — a read-only,
