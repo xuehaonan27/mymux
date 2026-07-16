@@ -45,9 +45,14 @@ check('annotation looks like "author · date"', /· .*(ago|m$)/.test(firstText ?
 check('toggle button is lit', (await page.locator('#code-blame.on').count()) === 1);
 
 // 2. Click the first annotation → code closes, graph opens on that commit.
-const title = (await page.locator('.cm-blame.link').first().getAttribute('title')) ?? '';
-const hash10 = title.slice(0, 10);
-check('marker title carries a hash', /^[0-9a-f]{10}/.test(hash10), title);
+// (The hash comes from the hover card now — no native title tooltip.)
+await page.locator('.cm-blame.link').first().hover();
+await page.waitForTimeout(400);
+const cardHead = (await page.locator('.cm-blame-card-head').textContent()) ?? '';
+const hash10 = (cardHead.match(/[0-9a-f]{10}/) ?? [''])[0];
+check('hover card carries the commit hash', /^[0-9a-f]{10}$/.test(hash10), cardHead);
+await page.mouse.move(720, 500);
+await page.waitForTimeout(500);
 await page.locator('.cm-blame.link').first().click();
 await page.waitForTimeout(1500);
 check('code panel closed for the jump', (await page.locator('.code-panel.show').count()) === 0);
@@ -81,6 +86,32 @@ await page.waitForTimeout(900);
 await page.click('#code-blame');
 await page.waitForTimeout(1000);
 check('blame after save works', (await page.locator('.cm-blame').count()) >= 1);
+
+// 5. Extras: current-line ghost follows the cursor.
+await page.click('.cm-content');
+await page.waitForTimeout(400);
+check('current-line ghost shows', (await page.locator('.cm-blame-ghost').count()) === 1);
+const ghostText = (await page.locator('.cm-blame-ghost').textContent()) ?? '';
+check('ghost annotates author·summary·date', /· .* ago/.test(ghostText), ghostText);
+await page.keyboard.press('ArrowDown');
+await page.waitForTimeout(300);
+check('ghost follows the cursor (still exactly one)', (await page.locator('.cm-blame-ghost').count()) === 1);
+
+// 6. Heatmap: markers across differently-aged groups get different colors.
+const colors = await page.evaluate(() =>
+  [...document.querySelectorAll('.cm-blame.link')].map((m) => m.style.color),
+);
+check('heat colors differ by age', new Set(colors).size >= 2, colors.join('|'));
+
+// 7. Hover card: shows hash/summary/author meta, hides on mouse-away.
+await page.locator('.cm-blame.link').first().hover();
+await page.waitForTimeout(400);
+check('hover card appears', (await page.locator('.cm-blame-card').count()) === 1);
+const cardText = (await page.locator('.cm-blame-card').textContent()) ?? '';
+check('card carries hash + author', /[0-9a-f]{10}/.test(cardText) && cardText.includes(' · '), cardText.slice(0, 120));
+await page.mouse.move(720, 500);
+await page.waitForTimeout(600);
+check('card hides after mouse-away', (await page.locator('.cm-blame-card').count()) === 0);
 
 await page.screenshot({ path: 'shots/git-blame.png' });
 await browser.close();

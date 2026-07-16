@@ -841,6 +841,47 @@ body.has-winalpha #hostbar {
   color: #d6a04c;
   font-style: italic;
 }
+/* Blame hover card + current-line ghost. */
+.cm-blame-card {
+  position: fixed;
+  z-index: 45;
+  min-width: 260px;
+  max-width: 420px;
+  padding: 8px 10px;
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow);
+  font: 11px var(--mono);
+}
+.cm-blame-card-head {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cm-blame-card-meta {
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+.cm-blame-card-open {
+  margin-top: 6px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+  font: 10px var(--mono);
+  cursor: pointer;
+}
+.cm-blame-ghost {
+  color: var(--text-dim);
+  opacity: 0.65;
+  font-style: italic;
+  pointer-events: none;
+}
 
 /* Conflict resolution bar + region tints (git merge flow). */
 .cm-conflict-bar {

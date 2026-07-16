@@ -6,6 +6,8 @@ import {
   lineNumbers,
   gutter,
   GutterMarker,
+  ViewPlugin,
+  ViewUpdate,
   Decoration,
   WidgetType,
   type DecorationSet,
@@ -154,22 +156,89 @@ const relDate = (t: number) => {
   if (hr >= 1) return `${Math.floor(hr)}h ago`;
   return `${Math.max(1, Math.floor(sec / 60))}m ago`;
 };
+const fullDate = (t: number) => {
+  const d = new Date(t * 1000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
+/** Heat coloring: newest commit in THIS file's blame → warm accent, oldest →
+ * text-dim. Returns a color-mix string for the marker's inline style. */
+function heatColor(groups: BlameGroup[], t: number): string {
+  let lo = Infinity;
+  let hi = 0;
+  for (const g of groups) {
+    if (g.time < lo) lo = g.time;
+    if (g.time > hi) hi = g.time;
+  }
+  const span = hi - lo;
+  const f = span <= 0 ? 1 : (t - lo) / span; // 0 = oldest, 1 = newest
+  return `color-mix(in srgb, #e8b04c ${Math.round(20 + f * 80)}%, var(--text-dim))`;
+}
+
+// Hover detail card — single instance, body-appended (escapes the gutters),
+// stays alive while the pointer is on it (its link is the same jump as the
+// marker click).
+let blameCard: HTMLElement | null = null;
+let blameCardTimer = 0;
+function hideBlameCard(delay = 220) {
+  window.clearTimeout(blameCardTimer);
+  blameCardTimer = window.setTimeout(() => {
+    blameCard?.remove();
+    blameCard = null;
+  }, delay);
+}
+function showBlameCard(anchor: HTMLElement, g: BlameGroup, onOpen: ((h: string) => void) | null) {
+  window.clearTimeout(blameCardTimer);
+  blameCard?.remove();
+  const c = document.createElement('div');
+  c.className = 'cm-blame-card';
+  const head = document.createElement('div');
+  head.className = 'cm-blame-card-head';
+  head.textContent = `${g.hash.slice(0, 10)}  ${g.summary}`;
+  const meta = document.createElement('div');
+  meta.className = 'cm-blame-card-meta';
+  meta.textContent = `${g.author} · ${fullDate(g.time)} (${relDate(g.time)}) · ${g.count} line(s)`;
+  c.append(head, meta);
+  if (onOpen && !g.hash.startsWith('0000000')) {
+    const link = document.createElement('button');
+    link.className = 'cm-blame-card-open';
+    link.textContent = 'open in the git graph →';
+    link.addEventListener('click', (e) => {
+      e.stopPropagation();
+      hideBlameCard(0);
+      onOpen(g.hash);
+    });
+    c.appendChild(link);
+  }
+  c.addEventListener('mouseenter', () => window.clearTimeout(blameCardTimer));
+  c.addEventListener('mouseleave', () => hideBlameCard());
+  document.body.appendChild(c);
+  const r = anchor.getBoundingClientRect();
+  c.style.left = `${Math.min(r.right + 8, innerWidth - c.offsetWidth - 12)}px`;
+  c.style.top = `${Math.max(8, Math.min(r.top, innerHeight - c.offsetHeight - 12))}px`;
+  blameCard = c;
+}
 
 /** One annotation per contiguous same-commit run, Git-Lens-gutter style;
- * click jumps to the commit in the git graph. */
+ * heat-colored by age, hover card for details, click jumps to the graph. */
 class BlameMarker extends GutterMarker {
+  readonly color: string;
   constructor(
     readonly g: BlameGroup,
     readonly onOpen: ((h: string) => void) | null,
+    color: string,
   ) {
     super();
+    this.color = color;
   }
   override eq(other: BlameMarker): boolean {
-    return other.g === this.g;
+    return other.g === this.g && other.color === this.color;
   }
   override toDOM(): Node {
     const d = document.createElement('div');
     d.className = 'cm-blame';
+    d.style.color = this.color;
     const g = this.g;
     if (g.hash.startsWith('0000000')) {
       d.classList.add('wip');
@@ -178,27 +247,71 @@ class BlameMarker extends GutterMarker {
     }
     d.classList.add('link');
     d.textContent = `${g.author} · ${relDate(g.time)}`;
-    d.title = `${g.hash.slice(0, 10)} — ${g.summary}\n${g.author} · ${relDate(g.time)}\nclick to open in the git graph`;
     if (this.onOpen) {
       d.addEventListener('click', (e) => {
         e.stopPropagation();
         this.onOpen!(g.hash);
       });
     }
+    d.addEventListener('mouseenter', () => showBlameCard(d, g, this.onOpen));
+    d.addEventListener('mouseleave', () => hideBlameCard());
     return d;
   }
+}
+
+/** Ghost text at the end of the CURSOR's line ("author · date"), like Git
+ * Lens's current-line annotation. */
+class GhostBlame extends WidgetType {
+  constructor(readonly g: BlameGroup) {
+    super();
+  }
+  override eq(other: GhostBlame): boolean {
+    return other.g === this.g;
+  }
+  override toDOM(): HTMLElement {
+    const s = document.createElement('span');
+    s.className = 'cm-blame-ghost';
+    s.textContent = `  ${this.g.author} · ${this.g.summary} · ${relDate(this.g.time)}`;
+    return s;
+  }
+}
+
+function currentLineBlame(groups: BlameGroup[]): Extension {
+  const byLine = new Map<number, BlameGroup>();
+  for (const g of groups) for (let i = 0; i < g.count; i++) byLine.set(g.line + i, g);
+  return ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet;
+      constructor(view: EditorView) {
+        this.decorations = this.build(view);
+      }
+      update(u: ViewUpdate) {
+        if (u.selectionSet || u.docChanged) this.decorations = this.build(u.view);
+      }
+      build(view: EditorView): DecorationSet {
+        const line = view.state.doc.lineAt(view.state.selection.main.head);
+        const g = byLine.get(line.number);
+        if (!g) return Decoration.none;
+        return Decoration.set([Decoration.widget({ widget: new GhostBlame(g), side: 1 }).range(line.to)]);
+      }
+    },
+    { decorations: (v) => v.decorations },
+  );
 }
 
 function blameGutter(groups: BlameGroup[], onOpen: (h: string) => void): Extension {
   const starts = new Map<number, BlameGroup>();
   for (const g of groups) starts.set(g.line, g);
-  return gutter({
-    class: 'cm-blame-gutter',
-    lineMarker: (view, line) => {
-      const g = starts.get(view.state.doc.lineAt(line.from).number);
-      return g ? new BlameMarker(g, onOpen) : null;
-    },
-  });
+  return [
+    gutter({
+      class: 'cm-blame-gutter',
+      lineMarker: (view, line) => {
+        const g = starts.get(view.state.doc.lineAt(line.from).number);
+        return g ? new BlameMarker(g, onOpen, heatColor(groups, g.time)) : null;
+      },
+    }),
+    currentLineBlame(groups),
+  ];
 }
 
 // ---- conflict-marker resolution widgets ----------------------------------------
