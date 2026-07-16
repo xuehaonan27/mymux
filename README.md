@@ -12,13 +12,15 @@ Tauri app / browser (xterm.js UI)
 
 - **Native rendering** — terminals render once, in xterm.js. No nested tmux
   redraw, so scrollback and TUIs (Claude Code, Codex) stay clean.
-- **tmux is the engine** — sessions/persistence come from `tmux -CC` control
-  mode (the same mechanism iTerm2 uses), consumed natively by our client.
+- **Two engines, one client** — tmux `-CC` powers the classic engine;
+  mymux-ptyd's native panes (⌁/∞) are the default windows and survive daemon
+  restarts.
 - **Agent-aware** — tab badges show which agent is running, waiting for your
   approval, or done — no more polling windows.
 - **Resilient** — an in-process SSH tunnel with auto-reconnect; you pick a host
-  and type its key passphrase **in the app**. The daemon holds state, so a
-  dropped link restores instantly.
+  and type its key passphrase **in the app** (held only in memory, so
+  reconnects are silent). One persistent master connection per host carries
+  the forward, exec calls and probes on one auth.
 
 ## Quick start (desktop app)
 
@@ -54,11 +56,13 @@ it asks you to trust the server's host key; then you land in the workspace —
 
 ## Status
 
-**Latest: the native host manager (M6)** — the app owns its SSH client
-in-process (russh): per-host in-app passphrase entry, `known_hosts` TOFU, no
-dependency on the `ssh` binary or an agent. On top of ephemeral shells + the
-process tree (M5), the code panel (M4), agent badges (M3), the desktop app (M2),
-and the multiplexer core (M0/M1).
+**Latest: one git surface (2026-07-16)** — a Git Graph/Lens-class surface
+behind the bar's branch button: Changes workbench (stage/commit/amend,
+hunk/line staging, split diff, conflict resolution, stashes) and History
+(swim-lane topology, ref menus, compare, blame, file history), all
+daemon-driven over `/git/*`. On top of per-host persistent SSH masters,
+markdown preview, the terminal-history pager, multi-host workspaces (M7), the
+native persistent-pane engine (ptyd), and the editor/package stack below.
 
 | Milestone | Scope | State |
 |-----------|-------|-------|
@@ -71,19 +75,30 @@ and the multiplexer core (M0/M1).
 | **M6** | native host manager: in-process SSH (russh), in-app passphrase, TOFU host keys | ✅ done |
 | **M7** | multi-host: several hosts at once, host chips, cross-host agent counts | ✅ built · Mac verify pending |
 
-Remaining original pain point: LSP (deferred until an editor/plugin story
-exists). Smaller items live in `docs/BACKLOG.md`.
+Post-milestones so far: persistent native panes (mymux-ptyd: splits, zoom,
+faithful snapshots, survive mymuxd restarts), the **mymux-pkg** package index
+(9 prewired entries, LSP ready at install), settings surface + attention
+notifications, and the git tooling line above. Smaller items live in
+`docs/BACKLOG.md`.
 
 ## Layout
 
 - `crates/mux-core` — dependency-free tmux control-mode protocol parser + model.
-- `crates/mymuxd` — the daemon: drives `tmux -CC` and the ephemeral PTYs; serves
-  the WebSocket plus the `/fs`, `/git`, `/proc`, `/agent` HTTP endpoints.
+- `crates/mymuxd` — the daemon: drives `tmux -CC`, talks to ptyd; serves
+  the WebSocket plus the `/fs`, `/git`, `/proc`, `/agent`, `/lsp`, `/pkgs`,
+  `/termhistory` HTTP endpoints.
+- `crates/mymux-ptyd` — the persistent-pane holder: PTYs + server-side terminal
+  grids + raw history logs behind a unix-socket protocol; outlives mymuxd.
 - `crates/mymux-connect` — SSH tunnels: the in-process russh client (host
   manager) and the ssh-binary CLI connector (browser workflow).
+- `crates/mymux-pkg` — the package manager CLI: prewired `index/index.json`
+  entries (language servers today), integrity-checked channels, install/list/
+  remove.
 - `src-tauri` — the macOS desktop app (Tauri 2; its own workspace so the root
   builds on headless boxes).
 - `ui` — Vite + TypeScript + xterm.js + CodeMirror client.
+- `ui/ux` — the headless e2e harness: Playwright-core checks driving the real
+  UI against live daemons and fixture repos (see *Develop*).
 - `systemd/mymuxd.service` — the user-service unit (note `KillMode=process`).
 - `scripts/` — installers (systemd, agent hooks) + the no-build shell tunnel.
 - `docs/BACKLOG.md` — deferred polish.
@@ -98,9 +113,18 @@ npm --prefix ui install     # first time
 npm --prefix ui run build   # typecheck + bundle the UI
 ```
 
+The **e2e harness** lives in `ui/ux`: a daemon (`MYMUX_ADDR=127.0.0.1:8099
+./target/debug/mymuxd`) plus `npm --prefix ui run dev`, then checks like
+`node ui/ux/gitcheck.mjs` drive the real UI headless (Playwright-core) against
+fixture repos (`~/ux-git-test`, `~/ux-git-ops`, `~/ux-git-sub` — created by the
+checks). Every git-interaction batch ships with its own `git*check.mjs`; run
+the whole sweep before committing UI changes.
+
 Two env knobs let a throwaway/second daemon run without colliding with your main
 one: **`MYMUX_SOCKET`** (tmux control socket, default `mymux`) and **`MYMUX_ADDR`**
-(listen address, default `127.0.0.1:8088`).
+(listen address, default `127.0.0.1:8088`). ptyd has its own sandbox knob too:
+**`MYMUX_PTYD_SOCK`** (unix socket path) — that's how `altcheck.mjs` tests
+pane-granular daemons without ever touching your production ptyd.
 
 ## Run the desktop app (macOS)
 
@@ -237,8 +261,12 @@ Code reports precisely (`UserPromptSubmit` / `PermissionRequest` / `Stop`), as d
 the Open Code plugin (`permission.asked` / `session.idle`).
 
 Panes **without** hooks fall back to output heuristics: a backgrounded full-screen
-app badges *running* while active, *done* when it goes quiet, *waiting* if it rang
-the bell — and focusing a window clears its *done*.
+app badges *running* while active, *done* when it goes quiet (8s), *waiting* if
+it rang an attention bell (bells inside OSC sequences — your prompt's window
+title — don't count), and focusing a window clears its *done*. For native panes
+the alternate-screen signal is **authoritative**: mymux-ptyd's terminal grids
+track `?1047/1048/1049` enter/exit chunk-safely and report flips on the wire
+(upgrades in place at ptyd's next restart; `PaneInfo.alt` reseeds adoption).
 
 **The attention queue**: every window that needs a human (waiting for approval /
 input, or finished) is queued across **all** connected hosts, ordered by when it
@@ -261,23 +289,68 @@ already say it. The app (or browser tab) must be running: a closed app can't
 notify. The button shows a struck-through bell if the OS/browser has
 notifications blocked — allow them in the site/app settings first.
 
-## Code & git (⌘E)
+## Git surface (⌘K v / the branch button)
 
-Press **⌘E** (or the `code` button) for a lightweight overlay: a file tree and
-git-changes list on the left, a CodeMirror editor / unified diff on the right
-(loaded on first use, so the app itself stays small). **⌘P** fuzzy-opens any
-file in the repo. Open a file to read or edit it (⌘S saves); click a changed
-file to see its diff. Each pane gets its own session rooted at that pane's cwd,
-preserved across switches.
+One button, one surface, two pages — the repo's whole story.
 
-**Language smarts (LSP)**: opening a `.rs` file inside a Cargo project wires the
-editor to a daemon-managed **rust-analyzer** — live diagnostics (squiggles),
-hover docs, completion and signature help, with rename (F2) / go-to-definition
-(F12) bound where the server supports them. Nothing to configure: install
-rust-analyzer on the dev box (`rustup component add rust-analyzer`) and it's
-picked up; without it the editor simply opens plain. The daemon speaks raw LSP
-over `/lsp` on the existing port — see `docs/LSP-PLAN.md` for the roadmap
-(more languages via the package index are next).
+**Changes** (the working-tree workbench): the uncommitted section (per-file
+＋/− stage, two-click discard, Stage/Unstage-all, the commit box with smart
+stage-all-first, Amend HEAD), the conflict banner when a sequencer is running
+(Continue / two-click Abort, driven over `/git/state` + `/git/op`), and the
+stash list (Apply / Pop / Drop). Click a file to open a **stageable diff** on
+the right: unified (click '+'/−' rows to select ranges, per-hunk buttons, or
+the whole file) or split (HEAD/index ↔ working tree), with sub-hunk
+(un)staging rebuilt into reduced patches and applied over `git apply
+--cached`. Conflicted rows jump into the editor instead, which shows VS
+Code-style **Accept Current / Incoming / Both** bars above each conflict
+block. Submodules are flagged with a purple **S**; clicking enters them as
+their own repos.
+
+**History** (pure swim-lane topology): branches/merges in an 8-color lane
+palette, 200-commit infinite-scroll paging, a branch dropdown and free-text
+filter, and badges that act like Git Lens's — right-click a commit for
+cherry-pick / revert / copy-hash / checkout / reset (soft·mixed·hard, hard is
+two-click) / **mark as compare base** (a second pick renders the A..B
+cumulative diff in the detail column); right-click a branch for checkout /
+merge / create / delete; create tags the same way. **File history** (from the
+editor's Hist button or a diff row) narrows the lanes to one path, renames
+followed. The detail column shows the commit's meta, body, name-status files
+and inline diffs (whole commit or per file).
+
+Toolbar: Fetch / Pull / Push / Rebase / Stash one-click ops (argv-only, no
+shell; output toasted verbatim) with the upstream ahead/behind count beside
+them. **Blame** lives in the editor: a per-run gutter colored by recency
+(newest warm, oldest dim), a hover card per group, ghost text on the cursor
+line — and any of them jumps here, onto that exact commit. Everything runs
+read-write through the `/git/*` endpoints (rev charset-validated, paths
+`safe_path`-confined, timeouts + size caps), so the same flow works identically
+on every connected host.
+
+## Editor (⌘E)
+
+Press **⌘E** (or the `code` button) for a lightweight editor overlay: file
+tree and a changes list on the left (deep links into the git surface's
+workbench), CodeMirror editor on the right (loaded on first use, so the app
+stays small). **⌘P** fuzzy-opens any file in the repo; every open file keeps
+its own buffer (dirty `●`, two-click close) with undo history preserved.
+⌘S saves (and feeds the LSP's `didSave`, so compiler-tier diagnostics land
+too). Per-file buttons in the header: **Blame** (the gutter above), **Hist**
+(the file's history in the git surface), and **Prev** for markdown — rendered
+sanitized with relative images served through `/fs/raw`. A root switcher
+(↑ parent · ⌂ pane cwd · ⎇ repo toplevel) scopes every view. Images and other
+binaries open in viewers (inline image with dimensions + checkerboard,
+hex dump otherwise). The editor's own changes list is leaf-node only — sub
+modules still open *locally* (they're panel roots), everything else links
+into the git surface, by design-division: file-context git here, repo git
+there.
+
+**Language smarts (LSP)**: open a supported file and the daemon-managed
+language server wires in — diagnostics, hover, completion, rename (F2),
+go-to-definition (F12), code actions (⌘.), from rust-analyzer, clangd, gopls,
+pyright, bash/typescript/yaml-language-server or marksman. The servers come
+from the **mymux-pkg** package index (prewired entries: install from the
+packages panel with one click; fallback to PATH-detected servers otherwise),
+resolved managed-first. See `docs/LSP-PLAN.md` for the roadmap.
 
 The daemon serves `/fs/*` and `/git/*` confined to a root (the pane's cwd, else
 `MYMUX_ROOT`/cwd) — rejecting path escapes, with a CORS allowlist so only the
@@ -342,6 +415,10 @@ the key map.
 **Unlimited history**: every native pane's raw output (colors included) is
 also appended to `~/.local/state/mymux/history/<id>-<pid>.log` — 64 MB plus
 one rotated sibling per pane, `MYMUX_HISTORY=0` to opt out. In-app scrollback
-stays fast and bounded (10k lines live, 2k after a reseed); when you need
-last Tuesday, `less -R $(mymux-attach hist <id>)` — logs survive their panes,
-mymuxd, and even ptyd restarts. Bare `mymux-attach hist` lists everything.
+stays fast and bounded (10k lines live, 2k after a reseed). When you need
+older output **in the app**, scroll a pane to its very top and click the
+**⇧ older output** chip: a read-only pager overlays the exact history log
+(plain text, ANSI stripped; scroll up to page further back), Esc closes.
+For the full text with colors, `less -R $(mymux-attach hist <id>)` — logs
+survive their panes, mymuxd, and even ptyd restarts. Bare `mymux-attach hist`
+lists everything.
