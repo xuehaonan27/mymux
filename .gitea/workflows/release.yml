@@ -4,8 +4,9 @@
 # .gitea/workflows stays thin by design; heavy lifting lives in
 # scripts/ci-build-daemon-matrix.sh and scripts/ci-publish-release.sh.
 #
-# Runner layout: the matrix runs on the performant runner (label: rui.ke,
-# per the user) — edit here if labels change (labels, not names, pick).
+# Runner layout: the matrix runs on the performant runner (label: k3s-runner
+# — name vs label matter; rui.ke was the runner's NAME, its label is
+# k3s-runner, confirmed by the user).
 #
 # Secrets needed on the repo: MYMUX_RELEASE_TOKEN (a user's api token with
 # write:repository — repo secrets CANNOT be named GITEA_TOKEN: the GITEA_
@@ -23,7 +24,7 @@ env:
 
 jobs:
   daemon-matrix:
-    runs-on: [rui.ke]
+    runs-on: [k3s-runner]
     steps:
       - uses: actions/checkout@v4
 
