@@ -697,6 +697,53 @@ pub async fn commit(Json(q): Json<WriteReq>) -> Json<WriteResp> {
     Json(run_op(&q, &["commit", "-m", &message], 60).await)
 }
 
+/// `POST /git/amend` — fold the staged set into HEAD (--no-edit: message
+/// editing stays out of scope). The panel two-click-confirms this — it
+/// rewrites the tip commit.
+pub async fn amend(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    Json(run_op(&q, &["commit", "--amend", "--no-edit"], 60).await)
+}
+
+/// `POST /git/discard {path}` — drop ALL of a file's worktree+index changes
+/// back to HEAD, or delete an untracked file (clean). The panel two-clicks
+/// this per row; untracked detection is a porcelain probe first.
+pub async fn discard(Json(q): Json<WriteReq>) -> Json<WriteResp> {
+    let root = root_for_req(q.pane, &q.root).await;
+    let Some(path) = q.path.clone().filter(|p| !p.is_empty()) else {
+        return Json(WriteResp {
+            ok: false,
+            out: "path required".into(),
+        });
+    };
+    if safe_path(&root, &path, false).is_none() {
+        return Json(WriteResp {
+            ok: false,
+            out: "path outside the root".into(),
+        });
+    }
+    let untracked = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["status", "--porcelain", "--", &path])
+        .output()
+        .await
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).starts_with("??"))
+        .unwrap_or(false);
+    if untracked {
+        Json(run_op(&q, &["clean", "-f", "--", &path], 60).await)
+    } else {
+        Json(
+            run_op(
+                &q,
+                &["restore", "--source=HEAD", "--staged", "--worktree", "--", &path],
+                60,
+            )
+            .await,
+        )
+    }
+}
+
 /// `POST /git/fetch` — fetch all remotes (prune).
 pub async fn fetch(Json(q): Json<WriteReq>) -> Json<WriteResp> {
     Json(run_op(&q, &["fetch", "--all", "--prune"], 120).await)

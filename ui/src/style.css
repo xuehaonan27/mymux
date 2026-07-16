@@ -1967,6 +1967,22 @@ body.has-winalpha #hostbar {
   color: #f85149;
   border-color: #f85149;
 }
+.git-discard-btn {
+  flex: 0 0 18px;
+  padding: 0 2px;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: 11px/16px var(--mono);
+}
+.git-discard-btn:hover,
+.git-discard-btn[data-armed='1'] {
+  color: #f85149;
+  border-color: #f85149;
+  background: rgba(248, 81, 73, 0.12);
+}
 .git-commit-row {
   display: flex;
   gap: 8px;

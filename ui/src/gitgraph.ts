@@ -734,6 +734,19 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
           void op(unstaged ? '/git/add' : '/git/unstage', { path: f.path }, unstaged ? 'staged' : 'unstaged');
         });
         row.appendChild(stageBtn);
+        // Discard ALL of this file's changes — two-click armed.
+        const dbtn = el('button', 'git-discard-btn', '✕');
+        dbtn.title = 'discard changes (two clicks)';
+        dbtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (dbtn.dataset.armed !== '1') {
+            dbtn.dataset.armed = '1';
+            dbtn.title = `discard ${f.path}? click again`;
+            return;
+          }
+          void op('/git/discard', { path: f.path }, 'discarded');
+        });
+        row.appendChild(dbtn);
         row.appendChild(el('span', `gbadge g${untracked ? 'new' : f.status.includes('D') ? 'del' : 'mod'}`, f.status.trim() || 'M'));
         row.appendChild(el('span', 'git-file-path', f.path));
         row.addEventListener('click', async () => {
@@ -781,6 +794,30 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
         e.stopPropagation();
       });
       crow.append(msg, cbtn);
+      // Amend HEAD: folds the staged set into the tip commit (--no-edit).
+      // Rewrites history → two-click armed, only offered with a HEAD at all.
+      if (logData?.commits.length) {
+        const abtn = el('button', 'pkgs-btn git-danger', 'Amend');
+        abtn.title = 'amend HEAD with the staged set (--no-edit; two clicks)';
+        abtn.addEventListener('click', () => {
+          if (abtn.dataset.armed !== '1') {
+            abtn.dataset.armed = '1';
+            abtn.textContent = 'rewrite HEAD? click again';
+            return;
+          }
+          const stagedAny = uncommitted.some((f) => !f.status.includes('?') && f.status[0] !== ' ');
+          void (async () => {
+            if (!stagedAny) {
+              opts.toast('nothing staged — nothing to amend with');
+              abtn.dataset.armed = '';
+              abtn.textContent = 'Amend';
+              return;
+            }
+            await op('/git/amend', {}, 'amended HEAD');
+          })();
+        });
+        crow.appendChild(abtn);
+      }
       detailEl.appendChild(crow);
       return;
     }
