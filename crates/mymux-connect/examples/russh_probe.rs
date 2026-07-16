@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use mymux_connect::{run_russh_tunnel, HostConfig};
+use mymux_connect::{run_russh_tunnel, HostConfig, Master};
 use tokio::sync::mpsc;
 
 fn env(k: &str) -> Option<String> {
@@ -30,7 +30,8 @@ async fn main() {
     };
     let passphrase = env("PASSPHRASE");
     let (tx, mut rx) = mpsc::channel(32);
-    tokio::spawn(run_russh_tunnel(cfg, passphrase, tx));
+    let master = Master::new(cfg.clone(), passphrase);
+    tokio::spawn(async move { run_russh_tunnel(cfg, &master, tx).await });
     while let Some(s) = rx.recv().await {
         println!("STATUS {s:?}");
     }

@@ -118,7 +118,10 @@ async fn ssh_connect(
     let config = Arc::new(Config {
         keepalive_interval: Some(Duration::from_secs(15)),
         keepalive_max: 3,
-        inactivity_timeout: Some(Duration::from_secs(90)),
+        // No inactivity timeout: the session doubles as the host's persistent
+        // MASTER (ControlMaster semantics) — an idle master between forward
+        // cycles must survive, or every reconnect costs a fresh auth.
+        inactivity_timeout: None,
         ..Default::default()
     });
 
@@ -162,43 +165,94 @@ async fn ssh_connect(
     Ok(handle)
 }
 
-/// Run a script on the host via `bash -s`, feeding it over the channel and
-/// collecting stdout+stderr. Ok(output) on exit 0; the error carries the exit
-/// code plus the output tail otherwise. Times out after `limit`.
-pub async fn exec_script(
-    cfg: &HostConfig,
-    passphrase: Option<&str>,
-    script: &str,
-    limit: Duration,
-) -> Result<String, Status> {
-    exec_bytes(cfg, passphrase, "bash -s", script.as_bytes(), limit).await
+/// The persistent per-host SSH master (russh-world ControlMaster): one
+/// authenticated connection cached for the app's session. Forward cycles and
+/// one-off exec calls lease CHANNELS off it — a forward restart reuses the
+/// master (never a fresh auth) until the master's own probe fails; only that
+/// case re-authenticates. russh's Handle is !Clone but all channel-opening
+/// methods take &self, so one Arc<Handle> multiplexes everything.
+pub struct Master {
+    cfg: HostConfig,
+    passphrase: tokio::sync::Mutex<Option<String>>,
+    sess: tokio::sync::Mutex<Option<Arc<client::Handle<Client>>>>,
 }
 
-/// Run a remote command with a byte stream piped to its stdin (binary-safe —
-/// this is how the daemon bundle is uploaded).
-pub async fn exec_bytes(
-    cfg: &HostConfig,
-    passphrase: Option<&str>,
+impl Master {
+    pub fn new(cfg: HostConfig, passphrase: Option<String>) -> Self {
+        Self {
+            cfg,
+            passphrase: tokio::sync::Mutex::new(passphrase),
+            sess: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// The live session, establishing it single-flight on first use (or after
+    /// invalidate()). Liveness is proven with a cheap session-channel probe —
+    /// is_closed alone misses half-dead sockets the kernel hasn't told us of.
+    /// (Module-private: russh's Handle must not leak our public API surface.)
+    async fn lease(&self) -> Result<Arc<client::Handle<Client>>, Status> {
+        let mut g = self.sess.lock().await;
+        if let Some(h) = g.as_ref() {
+            if !h.is_closed() {
+                if let Ok(Ok(ch)) =
+                    tokio::time::timeout(Duration::from_secs(5), h.channel_open_session()).await
+                {
+                    drop(ch);
+                    return Ok(h.clone());
+                }
+            }
+            *g = None; // dead master — fall through to one fresh auth
+        }
+        let pass = self.passphrase.lock().await;
+        let h = ssh_connect(&self.cfg, pass.as_deref()).await?;
+        let h = Arc::new(h);
+        *g = Some(h.clone());
+        Ok(h)
+    }
+
+    /// Drop the cached session (a failed channel told us it's dead); the next
+    /// lease re-authenticates.
+    async fn invalidate(&self) {
+        *self.sess.lock().await = None;
+    }
+}
+
+/// Run `command` over the master with a byte stream on stdin (binary-safe).
+/// One retry on channel-open failure: the lease probe may pass right as the
+/// socket dies; anything after exec start is NOT retried (not idempotent).
+pub async fn master_exec_bytes(
+    master: &Master,
     command: &str,
     stdin: &[u8],
     limit: Duration,
 ) -> Result<String, Status> {
-    tokio::time::timeout(limit, exec_inner(cfg, passphrase, command, stdin))
+    tokio::time::timeout(limit, master_exec_inner(master, command, stdin))
         .await
         .map_err(|_| Status::Error(format!("command timed out after {}s", limit.as_secs())))?
 }
 
-async fn exec_inner(
-    cfg: &HostConfig,
-    passphrase: Option<&str>,
-    command: &str,
-    stdin: &[u8],
+/// `master_exec_bytes` for shell scripts (`bash -s`).
+pub async fn master_exec_script(
+    master: &Master,
+    script: &str,
+    limit: Duration,
 ) -> Result<String, Status> {
-    let handle = ssh_connect(cfg, passphrase).await?;
-    let mut ch = handle
-        .channel_open_session()
-        .await
-        .map_err(|e| Status::Error(format!("channel: {e:?}")))?;
+    master_exec_bytes(master, "bash -s", script.as_bytes(), limit).await
+}
+
+async fn master_exec_inner(master: &Master, command: &str, stdin: &[u8]) -> Result<String, Status> {
+    let mut handle = master.lease().await?;
+    let mut ch = match handle.channel_open_session().await {
+        Ok(ch) => ch,
+        Err(e) => {
+            master.invalidate().await;
+            handle = master.lease().await?;
+            handle
+                .channel_open_session()
+                .await
+                .map_err(|_| Status::Error(format!("channel: {e:?}")))?
+        }
+    };
     ch.exec(false, command.as_bytes())
         .await
         .map_err(|e| Status::Error(format!("exec: {e:?}")))?;
@@ -227,8 +281,7 @@ async fn exec_inner(
         Some(0) => Ok(out),
         Some(c) => {
             let tail: Vec<String> = out.lines().rev().take(5).map(str::to_string).collect();
-            let mut tail: Vec<_> = tail.into_iter().rev().collect();
-            let _ = &mut tail;
+            let tail: Vec<_> = tail.into_iter().rev().collect();
             Err(Status::Error(format!(
                 "script exited {c}: {}",
                 tail.join(" · ")
@@ -238,14 +291,39 @@ async fn exec_inner(
     }
 }
 
-/// One connect → auth → forward cycle. Returns `Err(Status)` describing why it
-/// ended (the supervisor decides whether to retry).
-async fn connect_and_serve(
+/// One-shot exec Script (no shared master): kept for the disconnected paths
+/// (e.g. uninstall without a live tunnel) and the exec_script harness.
+pub async fn exec_script(
     cfg: &HostConfig,
     passphrase: Option<&str>,
+    script: &str,
+    limit: Duration,
+) -> Result<String, Status> {
+    let m = Master::new(cfg.clone(), passphrase.map(str::to_string));
+    master_exec_script(&m, script, limit).await
+}
+
+/// One-shot exec Bytes (no shared master), see [`exec_script`].
+pub async fn exec_bytes(
+    cfg: &HostConfig,
+    passphrase: Option<&str>,
+    command: &str,
+    stdin: &[u8],
+    limit: Duration,
+) -> Result<String, Status> {
+    let m = Master::new(cfg.clone(), passphrase.map(str::to_string));
+    master_exec_bytes(&m, command, stdin, limit).await
+}
+/// One connect → auth → forward cycle, leasing channels off the host's
+/// persistent Master (a reconnect after a transient drop re-auths nothing).
+/// Returns `Err(Status)` describing why it ended (the supervisor decides
+/// whether to retry).
+async fn connect_and_serve(
+    cfg: &HostConfig,
+    master: &Master,
     status: &mpsc::Sender<Status>,
 ) -> Result<(), Status> {
-    let handle = ssh_connect(cfg, passphrase).await?;
+    let handle = master.lease().await?;
 
     // Best-effort: start the remote daemon over a session channel (fire-and-forget).
     if let Ok(ch) = handle.channel_open_session().await {
@@ -303,7 +381,10 @@ async fn connect_and_serve(
                         let _ = copy_bidirectional(&mut sock, &mut stream).await;
                     });
                 }
-                Err(_) => return Status::Reconnecting, // session gone
+                Err(_) => {
+                    master.invalidate().await; // session gone
+                    return Status::Reconnecting;
+                }
             }
         }
     };
@@ -314,8 +395,11 @@ async fn connect_and_serve(
             // hang on a half-dead socket (russh may not have noticed the drop yet).
             match tokio::time::timeout(Duration::from_secs(3), handle.channel_open_session()).await
             {
-                Ok(Ok(_ch)) => {}                 // healthy (channel closes on drop)
-                _ => return Status::Reconnecting, // timed out or errored → session dead
+                Ok(Ok(_ch)) => {} // healthy (channel closes on drop)
+                _ => {
+                    master.invalidate().await;
+                    return Status::Reconnecting; // timed out or errored → session dead
+                }
             }
         }
     };
@@ -412,16 +496,17 @@ fn needs_install(remote_version: &str) -> bool {
 }
 
 /// Daemon start failed: when the host's mymuxd is missing or outdated, push
-/// the embedded bundle and run the installer. Ok(true) = install ran (the
-/// supervisor retries the connect); Ok(false) = the host is already current,
-/// so the failure is something else (report the original status).
+/// the embedded bundle and run the installer — all THREE execs (probe,
+/// upload, installer) riding the SAME live master, one auth total. Ok(true) =
+/// install ran (the supervisor retries the connect); Ok(false) = the host is
+/// already current, so the failure is something else (report the original status).
 async fn maybe_install(
-    cfg: &HostConfig,
-    passphrase: Option<&str>,
+    _cfg: &HostConfig,
+    master: &Master,
     status: &mpsc::Sender<Status>,
 ) -> Result<bool, String> {
     const PROBE: &str = "(timeout 2 ~/.local/bin/mymuxd --version 2>/dev/null || timeout 2 mymuxd --version 2>/dev/null || true) | head -1";
-    let probe = exec_script(cfg, passphrase, PROBE, Duration::from_secs(20))
+    let probe = master_exec_script(master, PROBE, Duration::from_secs(20))
         .await
         .map_err(|e| format!("probe failed: {e:?}"))?;
     if !needs_install(probe.trim()) {
@@ -433,10 +518,10 @@ async fn maybe_install(
     let _ = status.send(Status::Installing).await;
     // Upload atomically (.new → rename), then run the box-side installer.
     const PUT: &str = "mkdir -p ~/.local/share/mymux/dist && cat > ~/.local/share/mymux/dist/daemon.tgz.new && mv -f ~/.local/share/mymux/dist/daemon.tgz.new ~/.local/share/mymux/dist/daemon.tgz";
-    exec_bytes(cfg, passphrase, PUT, DAEMON_BUNDLE, Duration::from_secs(600))
+    master_exec_bytes(master, PUT, DAEMON_BUNDLE, Duration::from_secs(600))
         .await
         .map_err(|e| format!("bundle upload failed: {e:?}"))?;
-    let out = exec_script(cfg, passphrase, INSTALL_SCRIPT, Duration::from_secs(300))
+    let out = master_exec_script(master, INSTALL_SCRIPT, Duration::from_secs(300))
         .await
         .map_err(|e| format!("installer failed: {e:?}"))?;
     for line in out.lines().take(12) {
@@ -446,13 +531,12 @@ async fn maybe_install(
 }
 
 /// Supervise the russh tunnel: connect, serve, and reconnect with capped backoff.
-/// Fatal states (bad auth / unknown or changed host key) stop the loop and are
-/// reported so the UI can prompt; transient drops reconnect silently.
-pub async fn run_russh_tunnel(
-    cfg: HostConfig,
-    passphrase: Option<String>,
-    status: mpsc::Sender<Status>,
-) {
+/// The caller owns the host's Master (shared with uninstall/exec paths so a
+/// transient drop reconnects WITHOUT a fresh auth; only a dead master
+/// re-authenticates). Fatal states (bad auth / unknown or changed host key)
+/// stop the loop and are reported so the UI can prompt; transient drops
+/// reconnect silently.
+pub async fn run_russh_tunnel(cfg: HostConfig, master: &Master, status: mpsc::Sender<Status>) {
     let min = Duration::from_millis(500);
     let max = Duration::from_secs(30);
     let mut backoff = min;
@@ -460,7 +544,7 @@ pub async fn run_russh_tunnel(
     loop {
         let _ = status.send(Status::Connecting).await;
         let started = Instant::now();
-        let end = connect_and_serve(&cfg, passphrase.as_deref(), &status)
+        let end = connect_and_serve(&cfg, master, &status)
             .await
             .err()
             .unwrap_or(Status::Reconnecting);
@@ -470,7 +554,7 @@ pub async fn run_russh_tunnel(
             // self-contained installer over this same SSH connection, then
             // retry the whole cycle — zero-touch first connect.
             if matches!(end, Status::DaemonUnreachable) {
-                match maybe_install(&cfg, passphrase.as_deref(), &status).await {
+                match maybe_install(&cfg, master, &status).await {
                     Ok(true) => {
                         backoff = min;
                         continue;

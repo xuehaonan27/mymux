@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use mymux_connect::{config_dir, exec_bytes, parse_probe, run_russh_tunnel, Host, HostStore, Status, WorkReport, UNINSTALL_SCRIPT};
+use mymux_connect::{config_dir, exec_bytes, master_exec_bytes, parse_probe, run_russh_tunnel, Host, HostStore, Status, WorkReport, UNINSTALL_SCRIPT};
 use serde::Serialize;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, State};
@@ -21,6 +21,9 @@ struct Active {
     task: JoinHandle<()>,
     forwarder: JoinHandle<()>,
     port: u16,
+    /// The host's persistent SSH master — uninstall rides it too (no fresh
+    /// auth while connected).
+    master: std::sync::Arc<mymux_connect::Master>,
 }
 
 #[derive(Default)]
@@ -130,33 +133,46 @@ async fn disconnect(state: State<'_, ConnState>, host_id: String) -> Result<(), 
     Ok(())
 }
 
-/// Run the box-side uninstall script over a fresh SSH connection (independent
-/// of any live tunnel). `args` is "--probe" (read-only work report) or "--yes"
-/// (the destructive run, only after the UI showed the report and the user
-/// confirmed).
+/// Run the box-side uninstall script: over the live tunnel's MASTER when
+/// connected (no fresh auth at all), else a one-shot auth with the given
+/// passphrase — keeping "uninstall works while disconnected". `args` is
+/// "--probe" (read-only work report) or "--yes" (the destructive run, only
+/// after the UI showed the report and the user confirmed).
 async fn run_remote_uninstall(
+    state: &ConnState,
     host_id: &str,
     passphrase: Option<String>,
     args: &str,
     limit: std::time::Duration,
 ) -> Result<String, String> {
-    let host = HostStore::load(&config_dir())
+    let cmd = format!("bash -s -- {args}");
+    let shared = state
+        .conns
+        .lock()
+        .unwrap()
         .get(host_id)
-        .cloned()
-        .ok_or_else(|| format!("no such host: {host_id}"))?;
-    // Ports/daemon-cmd are irrelevant for a one-shot exec; host key is verified
-    // against known_hosts as usual (unknown → error tells the UI to connect
-    // once first).
-    let cfg = host.to_tunnel_config(0, 0, String::new(), false);
-    let out = exec_bytes(
-        &cfg,
-        passphrase.as_deref(),
-        &format!("bash -s -- {args}"),
-        UNINSTALL_SCRIPT.as_bytes(),
-        limit,
-    )
-    .await
-    .map_err(|s| match s {
+        .map(|a| a.master.clone());
+    let out = if let Some(master) = shared {
+        master_exec_bytes(&master, &cmd, UNINSTALL_SCRIPT.as_bytes(), limit).await
+    } else {
+        let host = HostStore::load(&config_dir())
+            .get(host_id)
+            .cloned()
+            .ok_or_else(|| format!("no such host: {host_id}"))?;
+        // Ports/daemon-cmd are irrelevant for a one-shot exec; host key is verified
+        // against known_hosts as usual (unknown → error tells the UI to connect
+        // once first).
+        let cfg = host.to_tunnel_config(0, 0, String::new(), false);
+        exec_bytes(
+            &cfg,
+            passphrase.as_deref(),
+            &cmd,
+            UNINSTALL_SCRIPT.as_bytes(),
+            limit,
+        )
+        .await
+    };
+    let out = out.map_err(|s| match s {
         Status::Error(e) => e,
         Status::HostKeyUnknown { .. } => {
             "host key not in known_hosts — connect to this host once (trusting its key) before uninstalling"
@@ -173,9 +189,9 @@ async fn run_remote_uninstall(
 /// `probe_remote` — what work is running on the host and what an uninstall
 /// would remove. Read-only; the UI shows this as the confirmation page.
 #[tauri::command(rename_all = "snake_case")]
-async fn probe_remote(host_id: String, passphrase: Option<String>) -> Result<WorkReport, String> {
+async fn probe_remote(state: State<'_, ConnState>, host_id: String, passphrase: Option<String>) -> Result<WorkReport, String> {
     let out =
-        run_remote_uninstall(&host_id, passphrase, "--probe", std::time::Duration::from_secs(60))
+        run_remote_uninstall(&state, &host_id, passphrase, "--probe", std::time::Duration::from_secs(60))
             .await?;
     Ok(parse_probe(&out))
 }
@@ -183,8 +199,8 @@ async fn probe_remote(host_id: String, passphrase: Option<String>) -> Result<Wor
 /// `uninstall_remote` — the destructive run (--yes), returning the script's
 /// own log lines for the UI to display.
 #[tauri::command(rename_all = "snake_case")]
-async fn uninstall_remote(host_id: String, passphrase: Option<String>) -> Result<String, String> {
-    run_remote_uninstall(&host_id, passphrase, "--yes", std::time::Duration::from_secs(120)).await
+async fn uninstall_remote(state: State<'_, ConnState>, host_id: String, passphrase: Option<String>) -> Result<String, String> {
+    run_remote_uninstall(&state, &host_id, passphrase, "--yes", std::time::Duration::from_secs(120)).await
 }
 
 /// Connect (or re-drive: retry passphrase / trust host key) one host's tunnel.
@@ -208,6 +224,9 @@ async fn connect(
     state.ports.lock().unwrap().insert(host_id.clone(), port);
 
     let cfg = host.to_tunnel_config(port, 8088, remote_daemon_cmd(), trust_host_key.unwrap_or(false));
+    // One persistent master per (re-)drive: every forward cycle, exec and
+    // uninstall over this host leases channels off its single auth.
+    let master = std::sync::Arc::new(mymux_connect::Master::new(cfg.clone(), passphrase));
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Status>(32);
 
     // Forward tunnel status to the webview, tagged with the host id.
@@ -220,13 +239,16 @@ async fn connect(
             let _ = app2.emit("mymux:status", StatusEvent { host_id: hid.clone(), status: s });
         }
     });
-    let task = tauri::async_runtime::spawn(run_russh_tunnel(cfg, passphrase, tx));
+    let master2 = master.clone();
+    let task = tauri::async_runtime::spawn(async move {
+        run_russh_tunnel(cfg, &master2, tx).await;
+    });
 
     state
         .conns
         .lock()
         .unwrap()
-        .insert(host_id, Active { task, forwarder, port });
+        .insert(host_id, Active { task, forwarder, port, master });
     Ok(port)
 }
 

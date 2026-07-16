@@ -22,8 +22,8 @@ use tokio::process::{Child, Command};
 /// path below stays as a fallback until this is proven end-to-end.
 pub mod russh_tunnel;
 pub use russh_tunnel::{
-    exec_bytes, exec_script, parse_probe, run_russh_tunnel, HostConfig, Status, WorkReport,
-    UNINSTALL_SCRIPT,
+    exec_bytes, exec_script, master_exec_bytes, master_exec_script, parse_probe, run_russh_tunnel,
+    HostConfig, Master, Status, WorkReport, UNINSTALL_SCRIPT,
 };
 pub mod hosts;
 pub use hosts::{config_dir, Host, HostStore};
