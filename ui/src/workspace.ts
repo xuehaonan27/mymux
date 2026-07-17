@@ -304,7 +304,7 @@ export class Workspace {
     const idsBefore = new Set(this.panes.keys());
     const place = (n: LayoutNode) => {
       if (n.kind === 'leaf' && n.pane != null) {
-        const p = this.panes.get(n.pane) ?? this.makePane(n.pane);
+        const p = this.panes.get(n.pane) ?? this.makePane(n.pane, n);
         p.el.style.left = `${n.x * cellW}px`;
         p.el.style.top = `${n.y * cellH}px`;
         p.el.style.width = `${n.w * cellW}px`;
@@ -335,6 +335,13 @@ export class Workspace {
     if (setSwapped) {
       this.ghostBust();
       this.ghostBust(120);
+      // xterm bakes letter-spacing into spans when a row first renders; if the
+      // dispose/create churn left it a degenerate glyph measurement, every row
+      // it baked stays wide-spaced until re-rendered (what interaction heals
+      // manually). Re-bake every viewport row once the DOM has settled.
+      window.setTimeout(() => {
+        for (const p of this.panes.values()) p.term.refresh(0, Math.max(0, p.term.rows - 1));
+      }, 150);
     }
     // The active-pane ring exists to tell SPLIT panes apart — around a single
     // full-window pane it's just an ugly frame.
@@ -417,10 +424,20 @@ export class Workspace {
     el.addEventListener('pointercancel', up);
   }
 
-  private makePane(id: number): Pane {
+  private makePane(id: number, n?: LayoutNode): Pane {
     const el = document.createElement('div');
     el.className = 'pane';
     el.addEventListener('mousedown', () => this.focusPane(id));
+    // xterm's DOM renderer bakes letter-spacing from glyph probes AT RENDER
+    // TIME — an open() on a 0×0 element is the degenerate measurement window
+    // behind the wide-spaced-glyph bug, so the cell rect goes on FIRST.
+    if (n) {
+      const { cellW, cellH } = this.style;
+      el.style.left = `${n.x * cellW}px`;
+      el.style.top = `${n.y * cellH}px`;
+      el.style.width = `${n.w * cellW}px`;
+      el.style.height = `${n.h * cellH}px`;
+    }
     this.root.appendChild(el);
 
     const term = new Terminal({
@@ -434,6 +451,7 @@ export class Workspace {
       theme: this.style.theme,
     });
     term.open(el);
+    if (n) term.resize(Math.max(1, n.w), Math.max(1, n.h));
     term.onData((d) => this.sendInput(id, d));
 
     // IME rescue for the macOS app (WKWebView drops Sogou-style non-composition

@@ -94,6 +94,22 @@ const flips = await page.evaluate(
 );
 check('translucent-mode equal-size swap nudges repaints (flips ≥ 4)', flips >= 4, `${flips}`);
 
+// DOM-renderer metric sanity: letter-spacing is baked into spans when a row
+// first renders, so a degenerate measurement bakes ≈ one cell of spacing into
+// every span (the wide-spaced-glyph bug). Headless can't force that moment,
+// but this pins the healthy invariant around switch + snapshot + refresh.
+await page.waitForTimeout(400);
+const badSpacing = await page.evaluate(() => {
+  let bad = 0, total = 0;
+  for (const sp of document.querySelectorAll('.xterm-rows span')) {
+    total++;
+    const v = parseFloat(sp.style.letterSpacing || '0');
+    if (Number.isFinite(v) && Math.abs(v) >= 1) bad++;
+  }
+  return `${bad}/${total}`;
+});
+check('no wide-spaced glyph bake (0 spans with letter-spacing)', badSpacing.startsWith('0/'), badSpacing);
+
 // Hue sanity without feeding ESC to the tty: colored output via printf with
 // quoted \$ sequences inside the pane (xterm renders the red tile there).
 await page.locator('.tab').first().click();

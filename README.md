@@ -369,7 +369,10 @@ opens the file — a trailing `:line[:col]` lands the cursor there, like
 directory. Per-file buttons in the header: **Blame** (the gutter above), **Hist**
 (the file's history in the git surface), and **Prev** for markdown — rendered
 sanitized with relative images served through `/fs/raw`. A root switcher
-(↑ parent · ⌂ pane cwd · ⎇ repo toplevel) scopes every view. Images and other
+(↑ parent · ⌂ pane cwd · ⎇ repo toplevel) scopes every view. Tree rows carry
+a VS Code-style right-click menu (**Copy Relative Path** / **Copy Absolute
+Path**), and a slow or failing directory listing shows an inline status with
+click-to-retry — never a silent blank tree. Images and other
 binaries open in viewers (inline image with dimensions + checkerboard,
 hex dump otherwise). The editor's own changes list is leaf-node only — sub
 modules still open *locally* (they're panel roots), everything else links

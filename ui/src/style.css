@@ -993,6 +993,23 @@ body.has-winalpha #hostbar {
 .trow.tsubinit:hover {
   background: var(--control-bg-hover);
 }
+/* Tree status rows: loading placeholder, empty marker, retryable error. */
+.trow.tstat {
+  color: var(--text-dim);
+  font-style: italic;
+  cursor: default;
+}
+.trow.tstat:hover {
+  background: transparent;
+}
+.trow.tstat.retry {
+  color: #d6a04c;
+  cursor: pointer;
+  font-style: normal;
+}
+.trow.tstat.retry:hover {
+  background: var(--control-bg-hover);
+}
 .code-tool {
   font: 10px ui-monospace, Menlo, monospace;
   color: #9aa5b1;

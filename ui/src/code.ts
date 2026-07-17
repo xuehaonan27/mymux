@@ -98,7 +98,14 @@ async function fsList(
   const r = await fetch(
     `${apiBase()}/fs/list?${paneQ(pane)}${rootQ(root)}path=${encodeURIComponent(path)}`,
   );
-  return r.ok ? r.json() : [];
+  // NEVER silently [] — a 403/404/500 must not masquerade as an empty dir
+  // (the tree showed that as "nothing here", which read as a hard bug).
+  if (!r.ok) {
+    const err = new Error(`list ${path || '/'}: ${r.status}`) as Error & { status?: number };
+    err.status = r.status;
+    throw err;
+  }
+  return r.json();
 }
 async function fsRead(pane: number | null, path: string, root: string | null = null): Promise<string> {
   const r = await fetch(`${apiBase()}/fs/read?${paneQ(pane)}${rootQ(root)}path=${encodeURIComponent(path)}`);
@@ -1303,6 +1310,76 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     }
   }
 
+  // ---- tree context menu (VS Code: right-click a tree row) -------------------
+
+  /** One menu at a time; any outside interaction dismisses it. Reuses the
+   * git-menu classes — same glassy look, zero forked CSS. */
+  let treeMenu: HTMLElement | null = null;
+  const closeTreeMenu = () => {
+    treeMenu?.remove();
+    treeMenu = null;
+  };
+  window.addEventListener(
+    'mousedown',
+    (e) => {
+      if (treeMenu && !treeMenu.contains(e.target as Node)) closeTreeMenu();
+    },
+    true,
+  );
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeTreeMenu();
+  });
+
+  /** Copy-path actions for a root-relative tree row. The absolute form needs
+   * the session's effective root (lazy: fetched on first demand). */
+  function openTreeMenu(x: number, y: number, path: string) {
+    closeTreeMenu();
+    const s = current;
+    if (!s) return;
+    const menu = document.createElement('div');
+    menu.className = 'git-menu';
+    const item = (label: string, fn: () => Promise<void>) => {
+      const it = document.createElement('button');
+      it.className = 'git-menu-item';
+      it.textContent = label;
+      it.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        closeTreeMenu();
+        await fn();
+      });
+      return it;
+    };
+    const say = async (text: string) => {
+      if (await copyText(text)) flashHint(`copied ${text}`);
+      else flashHint('copy failed — the webview clipboard is locked');
+    };
+    menu.appendChild(
+      item('Copy Relative Path', async () => {
+        await say(path || '.');
+      }),
+    );
+    menu.appendChild(
+      item('Copy Absolute Path', async () => {
+        if (!s.fsRoot) {
+          const r = await paneRoot(apiBase(), s.pane);
+          if (r) s.fsRoot = r;
+        }
+        const root = s.fsRoot?.replace(/\/+$/, '');
+        if (!root) {
+          flashHint('pane cwd unknown — no absolute path');
+          return;
+        }
+        await say(path ? `${root}/${path}` : root);
+      }),
+    );
+    document.body.appendChild(menu);
+    // Clamp into the window, VS Code-style.
+    const r = menu.getBoundingClientRect();
+    menu.style.left = `${Math.min(x, Math.max(4, innerWidth - r.width - 4))}px`;
+    menu.style.top = `${Math.min(y, Math.max(4, innerHeight - r.height - 4))}px`;
+    treeMenu = menu;
+  }
+
   function treeItem(path: string, name: string, dir: boolean, depth: number): HTMLElement {
     const wrap = document.createElement('div');
     const row = document.createElement('div');
@@ -1310,6 +1387,11 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     row.dataset.path = path; // decorateTree() keys off this
     row.className += gitClassFor(path, dir);
     row.style.paddingLeft = `${depth * 12 + 8}px`;
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openTreeMenu(e.clientX, e.clientY, path);
+    });
     wrap.appendChild(row);
 
     if (dir) {
@@ -1323,10 +1405,17 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       };
       paint();
       const renderKids = async () => {
-        kids.replaceChildren();
+        kids.replaceChildren(treeStat('…', depth + 1));
         const pane = current?.pane ?? null;
         const sroot = current?.root ?? null;
-        const entries = await fsList(pane, path, sroot);
+        let entries: FsEntry[];
+        try {
+          entries = await fsList(pane, path, sroot);
+        } catch (e) {
+          kids.replaceChildren(treeStat(`⚠ ${fsErrText(e)}`, depth + 1, () => void renderKids()));
+          return;
+        }
+        kids.replaceChildren();
         for (const c of entries) {
           kids.appendChild(treeItem(path ? `${path}/${c.name}` : c.name, c.name, c.dir, depth + 1));
         }
@@ -1396,12 +1485,52 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     return wrap;
   }
 
+  /** Status row for the tree: '…' while loading, an error with click-to-
+   * retry on failure — a slow remote or a daemon error must never read as a
+   * blank, broken tree. */
+  function treeStat(text: string, depth: number, onRetry?: () => void): HTMLElement {
+    const row = document.createElement('div');
+    row.className = 'trow tstat' + (onRetry ? ' retry' : '');
+    row.textContent = text;
+    row.style.paddingLeft = `${depth * 12 + 8}px`;
+    if (onRetry) {
+      row.title = 'click to retry';
+      row.addEventListener('click', (e) => {
+        e.stopPropagation();
+        onRetry();
+      });
+    }
+    return row;
+  }
+
+  const fsErrText = (e: unknown) => {
+    const st = (e as { status?: number }).status;
+    if (st === 403) return 'path not allowed (403)';
+    if (st === 404) return 'missing or unreadable (404)';
+    return st ? `list failed (${st})` : 'daemon unreachable';
+  };
+
   async function loadTree() {
     const s = current;
     void refreshSubmodules(s);
-    treeEl.replaceChildren();
-    const items = await fsList(s?.pane ?? null, '', s?.root ?? null);
+    // Sync the fold button from the session set UP FRONT: remembered dirs
+    // render expanded from the kept/preserved rows instantly, so a mid-fetch
+    // button label must already agree with what the user sees.
+    syncFoldBtn();
+    // Keep the old tree up during a REFRESH (post-save, post-git-op): a blank
+    // flash reads as breakage on a slow link. Placeholder only when empty.
+    if (!treeEl.childElementCount) treeEl.replaceChildren(treeStat('loading…', 0));
+    let items: FsEntry[];
+    try {
+      items = await fsList(s?.pane ?? null, '', s?.root ?? null);
+    } catch (e) {
+      if (current !== s) return;
+      treeEl.replaceChildren(treeStat(`⚠ ${fsErrText(e)}`, 0, () => void loadTree()));
+      return;
+    }
     if (current !== s) return; // switched panes mid-fetch
+    treeEl.replaceChildren();
+    if (!items.length) treeEl.appendChild(treeStat('(empty directory)', 0));
     for (const c of items) treeEl.appendChild(treeItem(c.name, c.name, c.dir, 0));
     syncFoldBtn();
     decorateTree(); // rows were rebuilt — bring the git colors back
@@ -1446,7 +1575,12 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       let frontier = [''];
       while (frontier.length && s.expanded.size < EXPAND_CAP) {
         const batch = frontier.splice(0, 8); // modest parallelism, shell-friendly
-        const lists = await Promise.all(batch.map((d) => fsList(s.pane, d, s.root)));
+        let lists: FsEntry[][];
+        try {
+          lists = await Promise.all(batch.map((d) => fsList(s.pane, d, s.root)));
+        } catch {
+          break; // a dir died mid-walk — keep whatever we already collected
+        }
         if (current !== s) return; // root hopped mid-walk
         for (let i = 0; i < batch.length; i++) {
           for (const e of lists[i]) {
