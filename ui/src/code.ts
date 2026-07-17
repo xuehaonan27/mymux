@@ -574,6 +574,10 @@ export interface CodePanel {
   /** Open the panel rooted at an absolute dir — the terminal/editor
    * "jump to this directory" gesture. */
   openRoot(root: string): void;
+  /** Host/workspace switched while open: swap the session to the new host's
+   * active pane (sessions are workspace-scoped — showing the old host's
+   * tree beside the new host's terminals is simply wrong). */
+  hostSwitched(pane: number | null): void;
 }
 
 // One code view per pane. The tree, the changes list and the editor are all
@@ -1507,8 +1511,16 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     const st = (e as { status?: number }).status;
     if (st === 403) return 'path not allowed (403)';
     if (st === 404) return 'missing or unreadable (404)';
-    return st ? `list failed (${st})` : 'daemon unreachable';
+    return st ? `list failed (${st})` : 'daemon unreachable (restarting?)';
   };
+
+  /** A failed root listing retries itself a few times — a daemon mid-restart
+   * (e.g. the app's zero-touch update right after you upgrade it) is back
+   * within seconds, and making the user click to discover that was just
+   * spooky. Manual click-to-retry remains after the retries run out. */
+  let treeRetryTimer: number | undefined;
+  let treeFailCount = 0;
+  const TREE_RETRY_MAX = 4;
 
   async function loadTree() {
     const s = current;
@@ -1525,10 +1537,22 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       items = await fsList(s?.pane ?? null, '', s?.root ?? null);
     } catch (e) {
       if (current !== s) return;
-      treeEl.replaceChildren(treeStat(`⚠ ${fsErrText(e)}`, 0, () => void loadTree()));
+      treeFailCount += 1;
+      if (treeFailCount <= TREE_RETRY_MAX) {
+        treeEl.replaceChildren(treeStat(`⚠ ${fsErrText(e)} — retry ${treeFailCount}/${TREE_RETRY_MAX} in 2.5s…`, 0));
+        window.clearTimeout(treeRetryTimer);
+        treeRetryTimer = window.setTimeout(() => {
+          if (current === s) void loadTree();
+        }, 2500);
+      } else {
+        treeFailCount = 0;
+        treeEl.replaceChildren(treeStat(`⚠ ${fsErrText(e)}`, 0, () => void loadTree()));
+      }
       return;
     }
     if (current !== s) return; // switched panes mid-fetch
+    treeFailCount = 0;
+    window.clearTimeout(treeRetryTimer);
     treeEl.replaceChildren();
     if (!items.length) treeEl.appendChild(treeStat('(empty directory)', 0));
     for (const c of items) treeEl.appendChild(treeItem(c.name, c.name, c.dir, 0));
@@ -1864,6 +1888,9 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   // selects the per-root session for that pane (see the root switcher).
   function showSession(p: number | null, root?: string | null) {
     stash(); // snapshot outgoing edits into their buffer
+    // Any pending loadTree auto-retry belongs to the outgoing session.
+    window.clearTimeout(treeRetryTimer);
+    treeFailCount = 0;
     const pk = paneKey(p);
     const fresh = !lastRoot.has(pk);
     const eff = root !== undefined ? root : (lastRoot.get(pk) ?? null);
@@ -2146,6 +2173,10 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
         panel.classList.add('show');
       }
       showSession(opts.getActivePane(), root);
+    },
+    hostSwitched(pane: number | null) {
+      if (!open) return;
+      showSession(pane);
     },
     toggle() {
       if (open) {

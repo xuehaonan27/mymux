@@ -34,9 +34,14 @@ async fn upload_driver(master: &Master) -> Result<(), Status> {
         .map(|_| ())
 }
 
-/// Upload one payload into place (target path shell-quoted by us, absolute-only).
+/// Upload one payload into place (target path absolute, app-controlled constant).
+/// The target is DOUBLE-quoted: it starts with `$HOME` (or an XDG fallback),
+/// and single quotes would land the file in a literal `./$HOME/` directory —
+/// the hooks used to "install successfully" into exactly that black hole.
 async fn upload_payload(master: &Master, target: &str, bytes: &[u8]) -> Result<(), Status> {
-    let cmd = format!("mkdir -p \"$(dirname '{target}')\" && cat > '{target}' && chmod +x '{target}'");
+    let cmd = format!(
+        "mkdir -p \"$(dirname \"{target}\")\" && cat > \"{target}\" && chmod +x \"{target}\" && test -x \"{target}\""
+    );
     master_exec_bytes(master, &cmd, bytes, Duration::from_secs(60))
         .await
         .map(|_| ())
@@ -51,8 +56,11 @@ fn ensure_client_paths(agent: &str) -> Result<Vec<(&'static str, &'static [u8])>
             v.push(("$HOME/.local/bin/mymux-agent-report.sh", REPORT.as_bytes()));
             v.push(("$HOME/.local/bin/mymux-codex-notify.sh", CODEX_HANDLER.as_bytes()));
         }
+        // Same XDG logic the driver uses to VERIFY (${XDG_CONFIG_HOME:-...}),
+        // or a user with XDG set gets the plugin written where the checker
+        // (and opencode itself) never looks.
         "opencode" => v.push((
-            "$HOME/.config/opencode/plugins/mymux.js",
+            "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/mymux.js",
             OPENCODE_PLUGIN.as_bytes(),
         )),
         other => {

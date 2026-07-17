@@ -79,6 +79,9 @@ enum ClientMsg {
         id: u32,
         to: usize,
     },
+    /// Client-requested reseed for one pane (deterministic self-heal after
+    /// window switches: re-snapshot at the CURRENT true size).
+    Refresh { pane: u32 },
     ResizePane {
         pane: u32,
         dir: String,
@@ -165,7 +168,13 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
                 Some(Ok(Message::Binary(b))) => {
                     if b.len() >= 4 {
                         let pane = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-                        hub.send_input(pane, &b[4..]).await;
+                        // ptyd's proto refuses frames over 8 MiB on READ — one
+                        // oversized input (a monster paste through the UI)
+                        // would kill the connection and take every native
+                        // pane's link with it. Chunk well under the cap.
+                        for slice in b[4..].chunks(1024 * 1024) {
+                            hub.send_input(pane, slice).await;
+                        }
                     }
                 }
                 Some(Ok(Message::Text(t))) => {
@@ -177,6 +186,7 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
                             ClientMsg::Split { pane, dir } => hub.split(pane, dir == "h").await,
                             ClientMsg::NewWindow { cwd } => hub.new_window(cwd).await,
                             ClientMsg::SelectWindow { id } => hub.select_window(id).await,
+                            ClientMsg::Refresh { pane } => hub.reseed_pane(pane).await,
                             ClientMsg::ClosePane { pane, force } => {
                                 hub.close_pane(pane, force).await
                             }

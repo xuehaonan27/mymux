@@ -80,6 +80,27 @@ await page.click('#code-path'); // anywhere outside the menu
 await page.waitForTimeout(300);
 check('outside click dismisses the menu', (await page.locator('.git-menu').count()) === 0);
 
+// ---- root-list failure: AUTO retry + heal without a click ----------------------
+// chmod the root away, reopen the panel: the tree must retry on its own and
+// recover once the listing works again (the "daemon unreachable ... then it
+// mysteriously healed" report — the new behaviour makes the mechanism visible).
+try {
+  execSync('chmod 000 ~/ux-git-tree');
+  await page.keyboard.press('Control+e'); // close
+  await page.waitForTimeout(400);
+  await page.keyboard.press('Control+e'); // reopen → root listing fails
+  await page.locator('.code-panel.show').waitFor({ timeout: 10000 });
+  await page.waitForTimeout(1500);
+  const retryText = (await page.locator('#code-tree .trow.tstat').first().textContent()) ?? '';
+  check('root failure shows the AUTO retry with countdown', /retry 1\/\d/.test(retryText), retryText);
+  execSync('chmod 755 ~/ux-git-tree');
+  await page.waitForTimeout(3400); // inside the 2.5s backoff
+  const treeText = (await page.locator('#code-tree').textContent()) ?? '';
+  check('auto-retry recovers with no click', treeText.includes('sub') && !treeText.includes('retry'), treeText.slice(0, 120));
+} finally {
+  execSync('chmod 755 ~/ux-git-tree');
+}
+
 execSync('rm -rf ~/ux-git-tree/locked');
 await page.screenshot({ path: 'shots/treectx.png' });
 await browser.close();

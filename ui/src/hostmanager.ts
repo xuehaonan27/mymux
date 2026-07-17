@@ -278,6 +278,10 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
       stop.onclick = async (e) => {
         e.stopPropagation();
         await invoke('disconnect', { host_id: h.id }).catch(() => {});
+        // Same teardown as the live-branch Disconnect: without this the
+        // workspace keeps retrying the JUST-FREED port, and the next host to
+        // bind it inherits a zombie talking to the wrong daemon.
+        hooks.onDisconnected(h.id);
         void showList();
       };
       card.append(stop);

@@ -44,6 +44,11 @@ await page.click('.xterm');
 await page.keyboard.type(`printf 'REDAA-MARKER-A\\n'`);
 await page.keyboard.press('Enter');
 await page.waitForTimeout(800);
+// …and a CJK marker: snapshot replays must not sprinkle spaces between wide
+// chars (the styled_line wide-tail leak).
+await page.keyboard.type(`printf '你好世界AB\\n'`);
+await page.keyboard.press('Enter');
+await page.waitForTimeout(600);
 
 // win 2: GREEN marker
 await page.click('#btn-newwin');
@@ -62,12 +67,17 @@ await page.locator('.tab').first().click();
 await page.waitForTimeout(700);
 check('win1 shows RED again', (await activeTermText()).includes('REDAA-MARKER-A'));
 check('win1 has no GREEN bleed', !(await activeTermText()).includes('GREENBB-MARKER-B'));
+check('win1 CJK replays contiguous (no wide-tail spaces)', (await activeTermText()).includes('你好世界AB') && !(await activeTermText()).includes('你 '));
 
 // And back to win 2 — colors must still be correct (no stale frame of win1).
 await page.locator('.tab').nth(1).click();
 await page.waitForTimeout(700);
 check('win2 shows GREEN again', (await activeTermText()).includes('GREENBB-MARKER-B'));
 check('win2 still has no RED bleed', !(await activeTermText()).includes('REDAA-MARKER-A'));
+// Once more to win1: the CJK must survive a SECOND snapshot round trip.
+await page.locator('.tab').first().click();
+await page.waitForTimeout(700);
+check('win1 CJK still contiguous after re-switch', (await activeTermText()).includes('你好世界AB'));
 
 // The macOS translucent-compositor nudge must fire on an EQUALLY-SIZED swap
 // (1 pane ↔ 1 pane): simulate the app's has-winalpha class and count style
@@ -109,6 +119,31 @@ const badSpacing = await page.evaluate(() => {
   return `${bad}/${total}`;
 });
 check('no wide-spaced glyph bake (0 spans with letter-spacing)', badSpacing.startsWith('0/'), badSpacing);
+
+// Scroll discipline (macOS screenshot complaint): a bare modifier press must
+// NOT scroll to the bottom — xterm's scrollOnUserInput scrolls on ANY
+// keydown, ⌘ included — while real input must. win1 gets scrollback first.
+await page.locator('.tab').first().click();
+await page.waitForTimeout(500);
+await page.click('.xterm');
+await page.keyboard.type('seq 1 200');
+await page.keyboard.press('Enter');
+await page.waitForTimeout(700);
+const viewText = () => page.evaluate(() => document.querySelector('.xterm-rows')?.textContent ?? '');
+const bottomView = await viewText();
+await page.keyboard.press('Shift+PageUp');
+await page.waitForTimeout(300);
+const scrolledUpView = await viewText();
+check('Shift+PageUp scrolls into scrollback', scrolledUpView !== bottomView);
+await page.keyboard.down('Control');
+await page.keyboard.up('Control');
+await page.keyboard.down('Meta');
+await page.keyboard.up('Meta');
+await page.waitForTimeout(250);
+check('modifier-only presses stay put (no jump to bottom)', (await viewText()) === scrolledUpView);
+await page.keyboard.type('x');
+await page.waitForTimeout(300);
+check('real input scrolls to the bottom again', (await viewText()) !== scrolledUpView);
 
 // Hue sanity without feeding ESC to the tty: colored output via printf with
 // quoted \$ sequences inside the pane (xterm renders the red tile there).

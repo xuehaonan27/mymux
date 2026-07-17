@@ -102,6 +102,7 @@ notifications, and the git tooling line above. Smaller items live in
 - `systemd/mymuxd.service` — the user-service unit (note `KillMode=process`).
 - `scripts/` — installers (systemd, agent hooks) + the no-build shell tunnel.
 - `docs/BACKLOG.md` — deferred polish.
+- `docs/AUDIT.md` — the 2026-07-17 five-area structural audit (fixed + deferred findings, and what was verified solid).
 - `fixtures` — captured control-mode streams used in tests.
 
 ## Develop

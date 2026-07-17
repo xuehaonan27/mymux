@@ -134,15 +134,27 @@ async fn ssh_connect(
         reject: reject.clone(),
     };
 
-    let mut handle = client::connect(config, (cfg.hostname.as_str(), cfg.port), handler)
-        .await
-        .map_err(|e| {
-            reject
-                .lock()
-                .unwrap()
-                .take()
-                .unwrap_or_else(|| Status::Error(format!("connect: {e:?}")))
-        })?;
+    // No timeout exists inside russh's connect path: a blackholed SYN or a
+    // banner-silent listener hangs the supervisor forever. Bound the whole
+    // TCP+banner handshake ourselves.
+    let mut handle = tokio::time::timeout(
+        Duration::from_secs(20),
+        client::connect(config, (cfg.hostname.as_str(), cfg.port), handler),
+    )
+    .await
+    .map_err(|_| {
+        Status::Error(
+            "connect timed out (20s) — host unreachable, or a listener that never speaks SSH"
+                .to_string(),
+        )
+    })?
+    .map_err(|e| {
+        reject
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| Status::Error(format!("connect: {e:?}")))
+    })?;
 
     // Public-key auth (RSA needs a hash choice; ed25519 etc. don't).
     let hash_alg = if key.algorithm().is_rsa() {

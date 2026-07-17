@@ -47,7 +47,10 @@ if [ -f "$DIST/daemon.tgz" ]; then
   mkdir -p "$DIST/new"
   tar -xzf "$DIST/daemon.tgz" -C "$DIST/new"
   ( cd "$DIST/new" && sha256sum -c SHA256SUMS >/dev/null )
+  # Rollback seed: if the new daemon fails to start, the previous binaries
+  # get restored (the final alive-check below drives the actual restore).
   for b in mymuxd mymux-ptyd mymux-pkg mymux-attach; do
+    [ -f "$BINS/$b" ] && cp -a "$BINS/$b" "$BINS/.$b.prev"
     [ -f "$DIST/new/$b" ] || continue
     install -m 0755 "$DIST/new/$b" "$BINS/.$b.new"
     mv -f "$BINS/.$b.new" "$BINS/$b"
@@ -160,4 +163,27 @@ fi
 echo "$NEWSHA" > "$STATE/.state-sha"
 # The setsid fallback can take a beat to fork — give the final check a moment.
 for _ in $(seq 20); do alive mymuxd >/dev/null && break; sleep 0.2; done
-alive mymuxd && note "mymuxd running (pid $(alive mymuxd))" || { echo "mymux: mymuxd is NOT running — see /tmp/mymuxd.log or journalctl --user -u mymuxd" >&2; exit 1; }
+if alive mymuxd >/dev/null; then
+  note "mymuxd running (pid $(alive mymuxd))"
+  exit 0
+fi
+# New binaries failed to start: roll back to the previous set (saved by the
+# bundle lane before swapping) and try ONE more service restart before
+# surrendering to manual repair.
+restored=""
+for b in mymuxd mymux-ptyd mymux-pkg mymux-attach; do
+  if [ -f "$BINS/.$b.prev" ]; then
+    mv -f "$BINS/.$b.prev" "$BINS/$b"
+    restored=1
+  fi
+done
+if [ -n "$restored" ]; then
+  systemctl --user restart mymuxd.service 2>/dev/null || alive mymuxd || { setsid mymuxd >/tmp/mymuxd.log 2>&1 </dev/null & }
+  for _ in $(seq 20); do alive mymuxd >/dev/null && break; sleep 0.2; done
+  if alive mymuxd >/dev/null; then
+    echo "mymux: new daemon failed to start — rolled back to the previous daemon (pid $(alive mymuxd))" >&2
+    exit 0
+  fi
+fi
+echo "mymux: mymuxd is NOT running — see /tmp/mymuxd.log or journalctl --user -u mymuxd" >&2
+exit 1

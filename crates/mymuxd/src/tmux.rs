@@ -411,6 +411,11 @@ impl Hub {
                     hub.reseed_visible().await;
                 }
                 None => {
+                    // Mirror the Some branch: an external exit must not leave
+                    // ghost windows in state_json or a spent bootstrap guard.
+                    *hub.model.lock().unwrap() = Model::new();
+                    hub.booted
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
                     hub.emit(ServerEvent::State(r#"{"t":"session_end"}"#.to_string()));
                 }
             }
@@ -540,6 +545,21 @@ impl Hub {
     /// Reseed every visible pane (used after zoom changes re-created panes).
     async fn reseed_visible(&self) {
         for (pane, seed) in self.snapshot_visible().await {
+            self.emit(ServerEvent::Output { pane, data: seed });
+        }
+    }
+
+    /// Reseed ONE pane on client request (the client's deterministic self-heal
+    /// after window switches: a fresh snapshot at the CURRENT true size — a
+    /// stale-lasted narrow paint gets overwritten wholesale since every
+    /// snapshot starts with the destructive reset prefix).
+    pub async fn reseed_pane(&self, pane: u32) {
+        let seed = if is_native_id(pane) {
+            self.persist.snapshot(pane).await
+        } else {
+            self.snapshot_pane(pane).await
+        };
+        if !seed.is_empty() {
             self.emit(ServerEvent::Output { pane, data: seed });
         }
     }

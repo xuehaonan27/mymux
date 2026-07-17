@@ -25,6 +25,14 @@ pub struct PaneGrid {
     /// heuristics read this instead of hoping their byte-scan catches them.
     alt: bool,
     alt_tail: Vec<u8>,
+    /// Current dims (kept so the deferred primary reflow knows the target).
+    cols: u16,
+    rows: u16,
+    /// A resize landed while the pane was on the alternate screen: avt's
+    /// resize reflows only the ACTIVE buffer, so the primary underneath kept
+    /// the stale width. Reflow it once, on the flip back to primary —
+    /// otherwise the next reseed dumps stale-width rows (wrap-junk frames).
+    resized_while_alt: bool,
 }
 
 /// The six complete alt-screen sequences we track (all exactly 8 bytes).
@@ -49,6 +57,9 @@ impl PaneGrid {
             carry: Vec::new(),
             alt: false,
             alt_tail: Vec::new(),
+            cols,
+            rows,
+            resized_while_alt: false,
         }
     }
 
@@ -87,6 +98,7 @@ impl PaneGrid {
     /// Feed raw pty output. Invalid bytes become U+FFFD; an incomplete trailing
     /// multibyte sequence is carried into the next feed.
     pub fn feed(&mut self, bytes: &[u8]) {
+        let was_alt = self.alt;
         self.track_alt(bytes);
         let mut buf = std::mem::take(&mut self.carry);
         buf.extend_from_slice(bytes);
@@ -118,9 +130,19 @@ impl PaneGrid {
                 }
             }
         }
+        // Back on primary after an alt-stint resize: reflow the buffer avt
+        // never resized (its primary kept the old width all along).
+        if was_alt && !self.alt && self.resized_while_alt {
+            self.resized_while_alt = false;
+            self.vt
+                .resize(self.cols.max(1) as usize, self.rows.max(1) as usize);
+        }
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
+        self.cols = cols;
+        self.rows = rows;
+        self.resized_while_alt |= self.alt;
         self.vt.resize(cols.max(1) as usize, rows.max(1) as usize);
     }
 
@@ -132,8 +154,17 @@ impl PaneGrid {
     pub fn snapshot(&self) -> Vec<u8> {
         let dump = self.vt.dump();
         let mut out = Vec::new();
-        // Back out of either alt-screen flavor (avt's dump uses 1047+DECSC).
-        out.extend_from_slice(b"\x1b[?1049l\x1b[?1047l\x1b[0m\x1b[2J\x1b[H");
+        // Back out of either alt-screen flavor (avt's dump uses 1047+DECSC),
+        // and of any stale client modes: origin mode (DECOM) and a custom
+        // scroll region (DECSTBM) survive `?1049l` on xterm, and a long-lived
+        // client reseeding into one would get every CUP clamped/offset by it.
+        out.extend_from_slice(b"\x1b[?1049l\x1b[?1047l\x1b[?6l\x1b[r\x1b[0m\x1b[2J\x1b[H");
+
+        // Snapshot byte budget for the styled history replay: a dense
+        // truecolor backlog can exceed the 8 MiB frame cap on the ptyd
+        // connection and kill the whole native engine for one read error.
+        // Newest lines win; the rest stays in the raw history log.
+        const HISTORY_BUDGET: usize = 4 * 1024 * 1024;
 
         // avt's dump covers the screen(s) only; replay the primary buffer's
         // scrolled-off lines ourselves. `lines()` covers only the active
@@ -155,8 +186,19 @@ impl PaneGrid {
             let (_, rows) = self.vt.size();
             let lines: Vec<&Line> = self.vt.lines().collect();
             if lines.len() > rows {
-                for line in &lines[..lines.len() - rows] {
-                    out.extend_from_slice(styled_line(line).as_bytes());
+                let hist = &lines[..lines.len() - rows];
+                let mut acc: Vec<String> = Vec::new();
+                let mut total = 0usize;
+                for line in hist.iter().rev() {
+                    let s = styled_line(line);
+                    total += s.len() + 2;
+                    if total > HISTORY_BUDGET && !acc.is_empty() {
+                        break;
+                    }
+                    acc.push(s);
+                }
+                for s in acc.iter().rev() {
+                    out.extend_from_slice(s.as_bytes());
                     out.extend_from_slice(b"\r\n");
                 }
                 // The history scrolled the screen; hand dump a clean one (2J
@@ -196,6 +238,13 @@ fn styled_line(line: &Line) -> String {
     let mut out = String::new();
     let mut cur: Option<&Pen> = None;
     for cell in &cells[..end] {
+        // Wide-char TAIL cells are occupancy placeholders (width 0, char ' '):
+        // emitting them as real spaces breaks grapheme adjacency (👌🏻 comes
+        // apart) and shifts every wide char by one column — replayed "你好"
+        // used to come back as "你 好 ". Skip them.
+        if cell.width() == 0 {
+            continue;
+        }
         let pen = cell.pen();
         let switch = match cur {
             None => !pen.is_default(),
@@ -402,6 +451,43 @@ mod tests {
         let all = vt2.lines().map(|l| l.text()).collect::<Vec<_>>().join("\n");
         assert!(all.contains("REDMARK"), "{all}");
         assert!(all.contains("LINE1"), "{all}");
+    }
+
+    #[test]
+    fn wide_chars_replay_without_tail_spaces() {
+        // Wide-char tail cells must not leak into the replay as literal
+        // spaces: history "你好一" used to come back "你 好 一 " (shifted by
+        // one column per wide char, and breaking grapheme adjacency).
+        let mut g = PaneGrid::new(20, 3);
+        for i in 1..=8 {
+            g.feed(format!("你好{i}abc\r\n").as_bytes());
+        }
+        let snap = String::from_utf8(g.snapshot()).unwrap();
+        assert!(snap.contains("你好1abc"), "{snap:?}");
+        assert!(!snap.contains("你 好"), "{snap:?}");
+        let vt2 = replay(&g, 20, 3);
+        let whole = vt2.lines().map(|l| l.text()).collect::<Vec<_>>().join("\n");
+        assert!(whole.contains("你好1abc"), "{whole}");
+        assert!(!whole.contains("你 好"), "{whole}");
+    }
+
+    #[test]
+    fn resize_in_alt_reflows_primary_on_exit() {
+        // Shrink while a TUI owns the alt screen: avt reflows only the ACTIVE
+        // (alt) buffer. On exit the primary must be reflowed by us — else the
+        // next snapshot dumps stale-width rows (wrap-junk everywhere).
+        let mut g = PaneGrid::new(40, 5);
+        g.feed(b"primary-one\r\nprimary-two\r\n");
+        g.feed(b"\x1b[?1049h\x1b[2J\x1b[HALTMARK");
+        g.resize(20, 5);
+        g.feed(b"\x1b[?1049l");
+        assert!(g.resized_while_alt == false, "flip consumed the flag");
+        let vt2 = replay(&g, 20, 5);
+        let view = |vt: &Vt| vt.view().map(|l| l.text()).collect::<Vec<_>>();
+        assert_eq!(view(&vt2), view(&g.vt));
+        let all = vt2.lines().map(|l| l.text()).collect::<Vec<_>>().join("\n");
+        assert!(all.contains("primary-one"), "{all}");
+        assert!(all.contains("primary-two"), "{all}");
     }
 
     #[test]

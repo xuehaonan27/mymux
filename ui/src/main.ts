@@ -518,6 +518,11 @@ function ensureWorkspace(id: string, label: string, port: number): Workspace {
       onOpenHosts: isTauri ? () => hostManager?.open() : undefined,
     },
   });
+  // STYLE freezes at boot: a host connecting after a theme/font-size pref
+  // change would otherwise render the boot-stale preset/size until the next
+  // pref edit (re-applying is connect-safe — sends are readyState-gated).
+  w.setTermTheme(termThemeWithOpacity(presetById(getPrefs().theme).term, currentTermAlpha()));
+  w.setTermFont(getPrefs().fontSize);
   workspaces.set(id, w);
   w.connect();
   return w;
@@ -562,6 +567,14 @@ function switchTo(id: string) {
     activeWs?.hide();
     activeWs = w;
     w.show();
+    // Open panels are host-scoped: the code panel swaps to the new host's
+    // session; the momentary host-specific surfaces close instead of showing
+    // the previous host's content beside the new host's terminals.
+    codePanel.hostSwitched(w.activePane);
+    if (gitPanel.isOpen()) toggleGitGraph();
+    if (procPanel.isOpen()) procPanel.toggle();
+    if (histPanel.isOpen()) histPanel.close();
+    if (pkgsPanel.isOpen()) togglePlugins();
   }
   renderTabs(w);
   renderHosts();
@@ -597,6 +610,14 @@ function endWorkspace(w: Workspace, disconnectTunnel: boolean) {
       switchTo(next.id);
       return;
     }
+    // No workspace left: host-scoped panels must not sit over the host
+    // manager polling a fallback port (proc could even SIGKILL a
+    // same-numbered pid on the WRONG daemon through it).
+    if (codePanel.isOpen()) codePanel.toggle();
+    if (gitPanel.isOpen()) toggleGitGraph();
+    if (procPanel.isOpen()) procPanel.toggle();
+    if (histPanel.isOpen()) histPanel.close();
+    if (pkgsPanel.isOpen()) togglePlugins();
     renderTabs(null);
     renderHosts();
     renderAgents();
@@ -929,6 +950,9 @@ const codePanel = {
       noteModal('code', true);
     });
   },
+  /** Host switch landed while open: swap to that host's session (async-chunk
+   * lazy, so no-op until the panel has materialized once). */
+  hostSwitched: (pane: number | null) => codeReal?.hostSwitched(pane),
 };
 const procPanel = initProcPanel({
   getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
@@ -1081,6 +1105,7 @@ registerModal('code', {
     const lower = e.key.toLowerCase();
     if (mod(e) && lower === 'e' && !e.shiftKey && !e.altKey) {
       toggleCode();
+      if (!codePanel.isOpen()) active()?.refocusActive();
       return true;
     }
     if (mod(e) && lower === 'p' && !e.shiftKey && !e.altKey) {
@@ -1089,7 +1114,10 @@ registerModal('code', {
     }
     if (e.key === 'Escape') {
       // The editor's own layers (quick-open, code-action menu) consume first.
-      if (!codePanel.escape()) codePanel.toggle();
+      if (!codePanel.escape()) {
+        codePanel.toggle();
+        active()?.refocusActive();
+      }
       return true;
     }
     return false;
@@ -1245,6 +1273,10 @@ document.addEventListener(
         e.preventDefault();
         e.stopPropagation();
         top.close();
+        // A closed overlay must not keep document.activeElement (hidden
+        // editors keep swallowing real keystrokes otherwise — verified on
+        // Chromium that display:none subtrees keep receiving keydown).
+        active()?.refocusActive();
       }
       return;
     }

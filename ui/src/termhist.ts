@@ -107,6 +107,12 @@ export function initTermHist(opts: TermHistOpts): TermHistPanel {
       headEl.textContent = 'history · loading…';
       bodyEl.textContent = '';
       panel.classList.add('show');
+      // Steal keyboard focus from the pane: keys pressed while reading
+      // history must not leak into the live pty (verified — the modal stack
+      // lets unconsumed keys fall through to the focused element, and every
+      // one of them would yank the pane to bottom).
+      panel.tabIndex = -1;
+      panel.focus();
       void (async () => {
         const my = seq;
         const res = await fetchSpan();

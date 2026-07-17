@@ -6,6 +6,7 @@
 
 import { Terminal } from '@xterm/xterm';
 import type { ITheme } from '@xterm/xterm';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { modHeld } from './modkey';
 import { pathSpans } from './pathjump';
 import { imeFixEnabled, installImeFix } from './imefix';
@@ -336,13 +337,30 @@ export class Workspace {
     if (setSwapped) {
       this.ghostBust();
       this.ghostBust(120);
-      // xterm bakes letter-spacing into spans when a row first renders; if the
-      // dispose/create churn left it a degenerate glyph measurement, every row
-      // it baked stays wide-spaced until re-rendered (what interaction heals
-      // manually). Re-bake every viewport row once the DOM has settled.
+      // xterm's DOM renderer bakes letter-spacing into spans from glyph-width
+      // probes, and WRONG probes are cached — a plain refresh re-bakes with
+      // the same poisoned cache (why the +150ms refresh alone couldn't heal
+      // it). A font-size ping-pong forces CharSizeService.measure() +
+      // WidthCache.clear() + default-spacing recalc + a full re-render; the
+      // 0.001px excursion is invisible and ends on the real size.
       window.setTimeout(() => {
-        for (const p of this.panes.values()) p.term.refresh(0, Math.max(0, p.term.rows - 1));
+        for (const p of this.panes.values()) {
+          const px = this.style.fontSize;
+          p.term.options.fontSize = px + 0.001;
+          p.term.options.fontSize = px;
+        }
       }, 150);
+      // And ask the daemon for a truth-repaint of every NEW pane (on-by-one,
+      // now that this client's resize has landed server-side on the same
+      // ordered channel): a stale-size snapshot — whose remnants the app's
+      // own SIGWINCH repaint doesn't fully cover — is overwritten wholesale,
+      // every snapshot being self-contained behind its reset prefix.
+      window.setTimeout(() => {
+        if (idsBefore.size === 0) return; // initial adoption just snapshotted
+        for (const id of this.panes.keys()) {
+          if (!idsBefore.has(id)) this.sendJson({ t: 'refresh', pane: id });
+        }
+      }, 280);
     }
     // The active-pane ring exists to tell SPLIT panes apart — around a single
     // full-window pane it's just an ugly frame.
@@ -450,10 +468,30 @@ export class Workspace {
       // Lets an rgba() theme background show through (backdrop-image pref).
       allowTransparency: true,
       theme: this.style.theme,
+      // We scroll on real input ourselves (onData above): xterm's built-in
+      // scrollOnUserInput fires on bare modifier presses (⌘⇧5 screenshots).
+      scrollOnUserInput: false,
+      // The unicode-graphemes addon is marked proposed API upstream.
+      allowProposedApi: true,
     });
     term.open(el);
+    // Unicode 11 widths: xterm's default V6 table treats every emoji as
+    // width 1 — the DOM renderer's negative letter-spacing then COLLAPSES
+    // the span (typed 👌🏻 paints over the next glyph's left half) and every
+    // TUI's own wcwidth math (2 per emoji) misaligns. V11 aligns single
+    // emoji at width 2 with modern tmux/VS Code. Known trade: emoji
+    // CLUSTERS (👌🏻, ZWJ families) sit in wider-than-ink boxes on xterm 6.0
+    // — never collapsed/corrupt; true UAX#29 grapheme clusters need 6.1.
+    term.loadAddon(new Unicode11Addon());
+    term.unicode.activeVersion = '11';
     if (n) term.resize(Math.max(1, n.w), Math.max(1, n.h));
-    term.onData((d) => this.sendInput(id, d));
+    term.onData((d) => {
+      // scrollOnUserInput stays OFF: xterm's version scrolls on ANY keydown —
+      // a bare ⌘ press (macOS screenshot grabs like ⌘⇧5) would yank you to
+      // the bottom. Scroll for real INPUT (this hook) instead.
+      term.scrollToBottom();
+      this.sendInput(id, d);
+    });
 
     // IME rescue for the macOS app (WKWebView drops Sogou-style non-composition
     // commits — see imefix.ts); a no-op elsewhere.

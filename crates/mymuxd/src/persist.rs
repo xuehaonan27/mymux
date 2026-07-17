@@ -134,7 +134,23 @@ impl Persist {
         for _ in 0..25 {
             match Client::connect(&path).await {
                 Ok((client, events)) => {
-                    let listed = client.list().await.unwrap_or_default();
+                    // Adoption commits ONLY on a full truth read: a transient
+                    // list/get_meta failure used to be treated as "no panes,
+                    // no meta", and we then PERSISTED that empty view over the
+                    // real layout blob (splits/grouping wiped). On any
+                    // failure, drop the connection and let the loop retry a
+                    // clean read instead.
+                    let adopt = async {
+                        let listed = client.list().await.ok()?;
+                        let blob = client.get_meta().await.ok()?;
+                        Some((listed, blob))
+                    };
+                    let Some((listed, blob)) = adopt.await else {
+                        drop(events);
+                        drop(client);
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        continue;
+                    };
                     // Ephemeral panes must never survive a mymuxd restart.
                     // ptyd kills them when our old connection drops; sweeping
                     // here covers an old ptyd that kept them as plain panes.
@@ -173,7 +189,6 @@ impl Persist {
                     }
                     // Adopt the layout blob and reconcile it against the panes
                     // that actually survived, then persist the cleaned view.
-                    let blob = client.get_meta().await.unwrap_or_default();
                     {
                         let mut nw = hub.natives.lock().unwrap();
                         *nw = NativeWindows::from_blob(&blob);
