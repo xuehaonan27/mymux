@@ -27,11 +27,7 @@ fn main() {
     // `mymuxd --version` — the bootstrap/install freshness probe: crate
     // version plus the source revision (matched against the shipped bundle).
     if std::env::args().any(|a| a == "--version" || a == "-V") {
-        println!(
-            "mymuxd {} ({})",
-            env!("CARGO_PKG_VERSION"),
-            env!("MYMUX_GIT_REV")
-        );
+        println!("mymuxd {} ({})", env!("CARGO_PKG_VERSION"), env!("MYMUX_GIT_REV"));
         return;
     }
     // Env defaults (proxy etc.) must land BEFORE the runtime spawns worker

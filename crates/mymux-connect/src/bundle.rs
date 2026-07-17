@@ -190,13 +190,7 @@ mod tests {
             .unwrap()
             .port();
         let mut child = std::process::Command::new(py)
-            .args([
-                "-m",
-                "http.server",
-                &port.to_string(),
-                "--bind",
-                "127.0.0.1",
-            ])
+            .args(["-m", "http.server", &port.to_string(), "--bind", "127.0.0.1"])
             .current_dir(&dir)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -223,10 +217,7 @@ mod tests {
         }
         let bytes = got.expect("server never answered");
         assert_eq!(bytes, b"bundle-bytes");
-        assert_eq!(
-            super::sha256_hex(&bytes),
-            super::sha256_hex(b"bundle-bytes")
-        );
+        assert_eq!(super::sha256_hex(&bytes), super::sha256_hex(b"bundle-bytes"));
         // The cap bites: a cap below the payload size is an error.
         let err = super::download(&url, 4).await.expect_err("cap must bite");
         assert!(err.contains("cap"), "{err}");

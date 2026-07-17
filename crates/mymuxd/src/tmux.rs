@@ -414,7 +414,8 @@ impl Hub {
                     // Mirror the Some branch: an external exit must not leave
                     // ghost windows in state_json or a spent bootstrap guard.
                     *hub.model.lock().unwrap() = Model::new();
-                    hub.booted.store(false, std::sync::atomic::Ordering::SeqCst);
+                    hub.booted
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
                     hub.emit(ServerEvent::State(r#"{"t":"session_end"}"#.to_string()));
                 }
             }
