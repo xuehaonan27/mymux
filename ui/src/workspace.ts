@@ -67,6 +67,9 @@ export interface WorkspaceHooks {
   onStatus(w: Workspace, s: WsState): void;
   /** The tmux session ended ("done with this host"); reconnects already stopped. */
   onSessionEnd(w: Workspace): void;
+  /** The link came BACK after a down period (banner up → first healthy
+   * state again): panels holding stale error rows should refresh. */
+  onReconnected?(w: Workspace): void;
   /** The daemon wants the user to confirm closing a busy pane. */
   onConfirmClose(w: Workspace, pane: number, cmd: string): void;
   /** The daemon reported an operational error (e.g. a spawn that failed). */
@@ -109,6 +112,9 @@ export class Workspace {
   private wsState: WsState = 'closed';
   private reconnectPending = false;
   private lastSizeNudge = 0;
+  /** Set while the link is down (banner up) — cleared on the next healthy
+   * state, which is the moment to fire onReconnected. */
+  private wasDown = false;
 
   constructor(opts: {
     id: string;
@@ -179,8 +185,13 @@ export class Workspace {
     // In-workspace banner, so a background host's trouble is visible the moment
     // you switch to it (the bar dot only reflects the visible workspace).
     if (s === 'open') {
+      if (this.wasDown) {
+        this.wasDown = false;
+        this.hooks.onReconnected?.(this);
+      }
       this.banner.style.display = 'none';
     } else {
+      this.wasDown = true;
       const text =
         s === 'connecting'
           ? `Connecting to ${this.label}…`

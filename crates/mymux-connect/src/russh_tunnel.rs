@@ -55,6 +55,11 @@ pub enum Status {
     /// The zero-touch installer is running on the host (daemon was missing);
     /// the connect retries once it finishes.
     Installing,
+    /// Local forward port is held at bind time (a crashed instance of ours,
+    /// or another app). Made FATAL: retrying forever with the same cached
+    /// port — re-sending Connecting over the transient bind error — is how
+    /// host cards used to hang on "connecting" indefinitely.
+    BindFailed(u16),
     Error(String),
 }
 
@@ -66,6 +71,7 @@ fn is_fatal(s: &Status) -> bool {
             | Status::HostKeyUnknown { .. }
             | Status::HostKeyMismatch
             | Status::DaemonUnreachable
+            | Status::BindFailed(_)
     )
 }
 
@@ -371,7 +377,7 @@ async fn connect_and_serve(
 
     let listener = TcpListener::bind(("127.0.0.1", cfg.local_port))
         .await
-        .map_err(|e| Status::Error(format!("bind :{}: {e}", cfg.local_port)))?;
+        .map_err(|_| Status::BindFailed(cfg.local_port))?;
     let _ = status.send(Status::Connected).await;
 
     // Serve the local forward until the ssh session dies. Two concurrent tasks:
@@ -651,6 +657,10 @@ pub async fn run_russh_tunnel(cfg: HostConfig, master: &Master, status: mpsc::Se
     let min = Duration::from_millis(500);
     let max = Duration::from_secs(30);
     let mut backoff = min;
+    // Consecutive DaemonUnreachable rounds whose install+probe attempt ran
+    // without the daemon coming up. Breaks the
+    // install→restart→probe-fails→(rolled back)→install-again oscillation.
+    let mut daemon_tries = 0u32;
 
     loop {
         let _ = status.send(Status::Connecting).await;
@@ -659,12 +669,25 @@ pub async fn run_russh_tunnel(cfg: HostConfig, master: &Master, status: mpsc::Se
             .await
             .err()
             .unwrap_or(Status::Reconnecting);
+        if !matches!(end, Status::DaemonUnreachable) {
+            daemon_tries = 0; // any other outcome resets the install-breaker
+        }
 
         if is_fatal(&end) {
             // A missing daemon is fixable without the user: push the
             // self-contained installer over this same SSH connection, then
             // retry the whole cycle — zero-touch first connect.
             if matches!(end, Status::DaemonUnreachable) {
+                daemon_tries += 1;
+                if daemon_tries > 2 {
+                    let _ = status
+                        .send(Status::Error(
+                            "mymuxd on the host fails to start even after the shipped installer ran (it rolled back). Check journalctl --user -u mymuxd on the host"
+                                .to_string(),
+                        ))
+                        .await;
+                    return;
+                }
                 match maybe_install(&cfg, master, &status).await {
                     Ok(true) => {
                         backoff = min;

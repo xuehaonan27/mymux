@@ -515,6 +515,13 @@ function ensureWorkspace(id: string, label: string, port: number): Workspace {
       onJumpPath(w, pane, token) {
         void jumpToToken(w, pane, token);
       },
+      onReconnected(_w) {
+        // A daemon flap (the post-upgrade daemon swap, a restart, a drop)
+        // stalls HTTP too — panels retry a few times then hold a stale error
+        // row FOREVER on screen. Refresh the open code panel once the link
+        // is back instead of leaving it spooky.
+        if (codePanel.isOpen()) codePanel.refresh();
+      },
       onOpenHosts: isTauri ? () => hostManager?.open() : undefined,
     },
   });
@@ -953,6 +960,8 @@ const codePanel = {
   /** Host switch landed while open: swap to that host's session (async-chunk
    * lazy, so no-op until the panel has materialized once). */
   hostSwitched: (pane: number | null) => codeReal?.hostSwitched(pane),
+  /** Post-reconnect healer (see ensureWorkspace's onReconnected). */
+  refresh: () => codeReal?.refresh(),
 };
 const procPanel = initProcPanel({
   getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',

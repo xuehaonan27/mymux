@@ -578,6 +578,9 @@ export interface CodePanel {
    * active pane (sessions are workspace-scoped — showing the old host's
    * tree beside the new host's terminals is simply wrong). */
   hostSwitched(pane: number | null): void;
+  /** Reload the tree (and the current file when one is open) — the
+   * post-reconnect healer for a panel left holding a stale error row. */
+  refresh(): void;
 }
 
 // One code view per pane. The tree, the changes list and the editor are all
@@ -2177,6 +2180,11 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     hostSwitched(pane: number | null) {
       if (!open) return;
       showSession(pane);
+    },
+    refresh() {
+      if (!open || !current) return;
+      void loadTree();
+      if (current.path) void openFile(current.path);
     },
     toggle() {
       if (open) {
