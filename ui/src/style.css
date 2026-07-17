@@ -1475,6 +1475,10 @@ body.has-winalpha #hostbar {
 .host-icon:hover {
   color: var(--text);
 }
+.host-icon.confirm {
+  color: #f85149;
+  font: 10px var(--mono);
+}
 .host-field {
   display: flex;
   flex-direction: column;

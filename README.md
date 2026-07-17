@@ -150,8 +150,10 @@ daemon bundle itself, zero-touch. **Or just wait for CI**: every `v*` tag
 builds it on GitHub's free `macos-latest` runner and attaches
 `mymux_<version>_aarch64.dmg` to that tag's GitHub Release (job gated on the
 daemon matrix, ad-hoc signed by `cargo tauri build`, same artifact shape).
-First launch of an ad-hoc-signed app needs one right-click → Open (or
-`xattr -dr com.apple.quarantine` on the .app).
+First launch of an ad-hoc-signed app: **macOS may claim the app "is damaged"**
+(verified on Tahoe 26.x, 2026-07-17) — it isn't; ad-hoc signing plus the
+quarantine flag is why. Either right-click → Open once, or from the terminal:
+`xattr -dr com.apple.quarantine /Applications/mymux.app`.
 
 For just the bundle on its own: `scripts/build-daemon-bundle.sh` (same
 delegation). Without the bundle the app still works — the zero-touch install

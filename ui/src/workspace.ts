@@ -302,8 +302,10 @@ export class Workspace {
       }
     }
     // Transparent-window ghost buster (see main.ts forceRepaint): a removed
-    // pane's pixels can linger in the macOS compositor otherwise.
-    if (seen.size < countBefore && document.body.classList.contains('has-winalpha')) {
+    // pane's pixels can linger in the macOS compositor otherwise — and the
+    // SAME class shows on window switches (layout set changes in either
+    // direction: shrinking away from a window, growing back into it).
+    if (seen.size !== countBefore && document.body.classList.contains('has-winalpha')) {
       const el = this.root;
       el.style.opacity = '0.999';
       void el.offsetHeight;

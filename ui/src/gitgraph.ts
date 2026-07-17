@@ -15,6 +15,7 @@
 import { MergeView } from '@codemirror/merge';
 import { EditorView, lineNumbers } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
+import { copyText } from './clipboard';
 
 export interface GitGraphOpts {
   /** The focused pane, for repo resolution (its cwd's toplevel). */
@@ -329,8 +330,8 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       {
         label: 'Copy hash',
         action: () => {
-          void navigator.clipboard.writeText(hash).then(
-            () => opts.toast(`copied ${hash.slice(0, 8)}`),
+          void copyText(hash).then(
+            (ok) => opts.toast(ok ? `copied ${hash.slice(0, 8)}` : 'clipboard write failed (see console)'),
             () => opts.toast('clipboard write failed'),
           );
         },

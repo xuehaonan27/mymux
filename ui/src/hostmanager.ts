@@ -270,13 +270,24 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
       };
       const un = uninstallBtn(h);
       const del = el('button', 'host-icon', '✕');
-      del.title = 'Delete';
+      del.title = 'Delete (two clicks)';
       del.onclick = async (e) => {
         e.stopPropagation();
-        if (confirm(`Delete host “${h.label || h.hostname}”?`)) {
-          await invoke('host_delete', { id: h.id });
-          void showList();
+        // House rule: no window.confirm (inert in the Tauri webview — the
+        // reported "✕ does nothing"). Same two-click inline arm as the
+        // buffer chips: first click arms, second within 1.6s deletes.
+        if (!del.classList.contains('confirm')) {
+          del.classList.add('confirm');
+          del.textContent = 'sure?';
+          setTimeout(() => {
+            del.classList.remove('confirm');
+            del.textContent = '✕';
+          }, 1600);
+          return;
         }
+        del.classList.remove('confirm');
+        await invoke('host_delete', { id: h.id });
+        void showList();
       };
       card.append(edit, un, del);
     }

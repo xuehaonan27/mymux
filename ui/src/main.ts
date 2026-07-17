@@ -2,6 +2,7 @@ import '@xterm/xterm/css/xterm.css';
 import './style.css';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { copyText } from './clipboard';
 import { measureCell } from './metrics';
 import type { CodePanel, CodePanelOpts } from './code';
 import { initProcPanel } from './proc';
@@ -1040,7 +1041,10 @@ function setLeader(on: boolean) {
 
 function copySelection() {
   const sel = active()?.selection() ?? '';
-  if (sel) navigator.clipboard?.writeText(sel).catch(() => {});
+  if (!sel) return;
+  void copyText(sel).then((ok) => {
+    if (!ok) toast('copy failed — the clipboard is unreachable in this webview');
+  });
 }
 
 const ARROWS: Record<string, 'L' | 'R' | 'U' | 'D'> = {
