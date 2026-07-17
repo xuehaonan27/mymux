@@ -585,6 +585,32 @@ const VERSION_PROBE: &str = "(timeout 2 ~/.local/bin/mymuxd --version 2>/dev/nul
 /// later install.
 const PUT_BUNDLE: &str = "mkdir -p ~/.local/share/mymux/dist && cat > ~/.local/share/mymux/dist/daemon.tgz.new && mv -f ~/.local/share/mymux/dist/daemon.tgz.new ~/.local/share/mymux/dist/daemon.tgz";
 
+/// Version strings look like "mymuxd 0.1.0 (<sha>[-dirty])".
+fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
+    let m = v.strip_prefix("mymuxd ")?.split_whitespace().next()?;
+    let mut it = m.split('.');
+    Some((
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+    ))
+}
+
+/// Outdated = STRICTLY OLDER by semantic version; on equal versions the sha
+/// pins the update lane as before (releases share the crate version, so only
+/// string-inequality distinguishes them there). A host running a NEWER
+/// daemon (e.g. pushed by a newer app pin) is NOT outdated — string
+/// inequality used to flag it and one click on Update DOWNGRADED it.
+fn daemon_outdated(current: &str, expected: &str) -> bool {
+    if current.is_empty() || expected.is_empty() {
+        return false;
+    }
+    match (parse_semver(current), parse_semver(expected)) {
+        (Some(c), Some(e)) if c != e => c < e,
+        _ => current != expected,
+    }
+}
+
 /// Remote daemon version vs this app's pin, over one live master — the
 /// post-connect AUDIT that runs even when the tunnel came up fine (an old
 /// daemon that still answers is exactly the case maybe_install never saw).
@@ -598,7 +624,7 @@ pub async fn probe_daemon_meta(master: &Master) -> Result<DaemonMeta, String> {
     let expected = expected_version(&uname);
     let current = probe.trim().to_string();
     Ok(DaemonMeta {
-        outdated: !expected.is_empty() && current != expected,
+        outdated: daemon_outdated(&current, &expected),
         current,
         expected,
     })
@@ -715,6 +741,25 @@ pub async fn run_russh_tunnel(cfg: HostConfig, master: &Master, status: mpsc::Se
 
 #[cfg(test)]
 mod tests {
+    use super::daemon_outdated;
+
+    #[test]
+    fn outdated_semantics() {
+        // Older by semver → outdated either side of the sha pins.
+        assert!(daemon_outdated("mymuxd 0.1.0 (aaa1111)", "mymuxd 0.2.0 (bbb2222)"));
+        // Same version: the sha pin drives the lane (string inequality).
+        assert!(daemon_outdated("mymuxd 0.1.0 (aaa1111)", "mymuxd 0.1.0 (bbb2222)"));
+        assert!(!daemon_outdated("mymuxd 0.1.0 (bbb2222)", "mymuxd 0.1.0 (bbb2222)"));
+        // NEWER on the host is NOT outdated (the old bug downgraded it).
+        assert!(!daemon_outdated("mymuxd 0.2.0 (zzz9999)", "mymuxd 0.1.0 (aaa1111)"));
+        // Unknown anywhere → no verdict.
+        assert!(!daemon_outdated("", "mymuxd 0.1.0 (aaa1111)"));
+        assert!(!daemon_outdated("mymuxd 0.1.0 (aaa1111)", ""));
+        // Unparseable falls back to inequality (never flags equal).
+        assert!(!daemon_outdated("dev-build", "dev-build"));
+        assert!(daemon_outdated("dev-build", "mymuxd 0.1.0 (aaa1111)"));
+    }
+
     /// expected_version lane choice: a manifest embedded at build time owns
     /// the answer when it covers the arch; the embedded bundle's version is
     /// the lane otherwise (empty in a bundle-less dev build).

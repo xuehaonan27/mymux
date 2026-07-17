@@ -256,21 +256,13 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
         void showList();
       };
       card.append(open, bell, un, dis);
-      // Post-connect audit (daemon version + hook map) — painted from the
-      // cache, fetched once if the event predated this card.
+      // Post-connect audit (daemon version + hook map): paint instantly from
+      // any cached entry, and let a missing/stale one refresh in the
+      // background — the manager reopens in one frame, probes trickle after.
       card.dataset.hostId = h.id;
       paintMeta(card, h.id);
-      if (!hostMetaCache.has(h.id)) {
-        invoke('host_meta', { host_id: h.id })
-          .then((m) => {
-            if (m) {
-              hostMetaCache.set(h.id, m as HostMeta);
-              const c = document.querySelector(`[data-host-id="${h.id}"]`);
-              if (c instanceof HTMLElement) paintMeta(c, h.id);
-            }
-          })
-          .catch(() => {});
-      }
+      const entry = hostMetaCache.get(h.id);
+      if (!entry || Date.now() - entry.at > HOST_META_TTL) refreshHostMeta(h.id);
     } else if (conn) {
       // A background tunnel is still trying (connecting/reconnecting): the
       // only sensible action is to stop it.
@@ -639,8 +631,9 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
 
   // ---- post-connect meta (daemon version audit + hook review) --------------
   // Refreshed by the daemon on every Connected transition and after each
-  // daemon_update; cards paint it from this cache (fetch-once fallback when
-  // the card postdates the event).
+  // daemon_update; cards paint from this cache INSTANTLY, and a missing or
+  // stale (2 min) entry refreshes in the background without ever blocking a
+  // card — opening the manager is not an SSH probe marathon.
   interface DaemonMeta {
     current: string;
     expected: string;
@@ -650,10 +643,31 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     daemon?: DaemonMeta;
     hooks: Record<string, boolean>;
   }
-  const hostMetaCache = new Map<string, HostMeta>();
+  interface HostMetaEntry {
+    meta: HostMeta;
+    at: number;
+  }
+  const hostMetaCache = new Map<string, HostMetaEntry>();
+  const hostMetaInflight = new Set<string>();
+  const HOST_META_TTL = 120_000;
+
+  function refreshHostMeta(hostId: string) {
+    if (hostMetaInflight.has(hostId)) return;
+    hostMetaInflight.add(hostId);
+    void invoke<HostMeta | null>('host_meta', { host_id: hostId })
+      .then((m) => {
+        if (m) {
+          hostMetaCache.set(hostId, { meta: m, at: Date.now() });
+          const c = document.querySelector(`[data-host-id="${hostId}"]`);
+          if (c instanceof HTMLElement) paintMeta(c, hostId);
+        }
+      })
+      .catch(() => {})
+      .finally(() => hostMetaInflight.delete(hostId));
+  }
 
   function paintMeta(card: HTMLElement, hostId: string) {
-    const meta = hostMetaCache.get(hostId);
+    const meta = hostMetaCache.get(hostId)?.meta;
     // 🔔 attention dot: any agent missing its notify hooks on this host.
     const bellEl = card.querySelector('.hookbell');
     if (bellEl && meta) {
@@ -713,7 +727,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   }
 
   void listen<{ host_id: string; meta: HostMeta }>('mymux:hostmeta', (ev) => {
-    hostMetaCache.set(ev.payload.host_id, ev.payload.meta);
+    hostMetaCache.set(ev.payload.host_id, { meta: ev.payload.meta, at: Date.now() });
     const card = document.querySelector(`[data-host-id="${ev.payload.host_id}"]`);
     if (card instanceof HTMLElement) paintMeta(card, ev.payload.host_id);
   });
