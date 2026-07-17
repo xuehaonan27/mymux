@@ -3,6 +3,7 @@
 - After a development batch is done (code + typecheck/build + relevant `ui/ux/*check.mjs` checks all green), **git commit and push directly** — no need to ask. Per the owner (2026-07-17).
 - Still ask first for anything beyond routine commit/push: force-push, history rewrites, branch surgery, releases/tags (CI publishes on `v*` tags), and outward-facing actions (PRs, issues, comments).
 - UI changes must come with their `ui/ux/*check.mjs` coverage; run the related sweep before committing (see README *Develop* for the harness).
+- **Never blanket-format the repo** (`cargo fmt` across crates, prettier on the tree) — formatting passes are noisy diffs on files you didn't touch, and they hide real changes. Format only the lines your patch touches (or run it on a crate that is already fmt-clean by convention).
 
 ## Design rules (owner, 2026-07-17 — no ad-hoc fixes around these)
 
