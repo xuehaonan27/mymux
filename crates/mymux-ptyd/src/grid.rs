@@ -8,9 +8,12 @@
 
 use avt::{Color, Line, Pen, Vt};
 
-/// Kept history beyond the visible screen; included in reseeds. Matches
-/// tmux's default history-limit.
-const SCROLLBACK: usize = 2000;
+/// Kept history beyond the visible screen, replayed into the client on
+/// reconnect. 2000 → 4096 after the app-restart user report that shell-pane
+/// history felt truncated ("only the current page stayed"). Memory per pane
+/// stays trivial; the raw log ptyd keeps (up to 64 MB) remains the deep
+/// tier via the terminal-history pager either way.
+const SCROLLBACK: usize = 4096;
 
 pub struct PaneGrid {
     vt: Vt,
@@ -133,10 +136,22 @@ impl PaneGrid {
         out.extend_from_slice(b"\x1b[?1049l\x1b[?1047l\x1b[0m\x1b[2J\x1b[H");
 
         // avt's dump covers the screen(s) only; replay the primary buffer's
-        // scrolled-off lines ourselves. `lines()` follows the ACTIVE buffer, so
-        // skip this while the alternate screen is live (its history is the
-        // primary's, invisible right now anyway).
-        if !ends_in_alt(&dump) {
+        // scrolled-off lines ourselves. `lines()` covers only the active
+        // VISIBLE page in alt-screen mode (avt 0.18 keeps no alt scrollback),
+        // so an alt-screen pane (kimi code & friends) reconnects to just its
+        // current page — the TUI session's earlier output is only in the raw
+        // ~/.local/state/mymux/history log. Say so, visibly, right over the
+        // current page instead of "silently losing" the session.
+        if ends_in_alt(&dump) {
+            out.extend_from_slice(
+                "\x1b[90m┄┄ mymux: alt-screen panes restore only this page — older TUI history lives in the raw log (⇧ older output / termhist) ┄┄\x1b[0m\r\n"
+                    .as_bytes(),
+            );
+            // SU (scroll up): pushes the hint INTO the reconnecting client's
+            // scrollback, above the live alt page — visible on demand instead
+            // of stealing a row of the user's live frame.
+            out.extend_from_slice(b"\x1b[S");
+        } else {
             let (_, rows) = self.vt.size();
             let lines: Vec<&Line> = self.vt.lines().collect();
             if lines.len() > rows {
@@ -284,8 +299,26 @@ mod tests {
 
         let vt2 = replay(&g, 40, 10);
         assert_eq!(visible(&vt2), visible(&g.vt)); // alt view reproduced
-        assert_eq!(vt2.text(), g.vt.text()); // primary preserved underneath
-        assert_eq!(vt2.dump(), g.vt.dump());
+        // Source content must all still be there; the hint adds a scrollback
+        // line on top of it instead of clobbering anything.
+        assert!(
+            vt2.text().iter().any(|l| l.contains("shell prompt $")),
+            "source primary content lost: {:?}",
+            vt2.text()
+        );
+        assert!(
+            vt2.text().iter().any(|l| l.contains("termhist")),
+            "hint missing from snapshot: {}",
+            vt2.text().iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
+        );
+        // Note: we no longer assert dump() byte-equality HERE — that was a
+        // roundtrip-identical contract which the alt-pane hint now breaks
+        // INTENTIONALLY (the reconnecting client gains one hint line in
+        // scrollback that the source pane never had to keep). This test's
+        // real contract: visible frame identical, source content preserved,
+        // hint appended on top, cursor preserved. Colors roundtrip equality
+        // stays asserted above (no hint involved there).
+        assert_eq!(vt2.cursor(), g.vt.cursor());
 
         // Leaving the alt screen must restore the primary content.
         g.feed(b"\x1b[?1049l");
@@ -390,5 +423,46 @@ mod tests {
         let vt2 = replay(&g, 40, 5);
         let view = |vt: &Vt| vt.view().map(|l| l.text()).collect::<Vec<_>>();
         assert_eq!(view(&vt2), view(&g.vt));
+    }
+}
+
+#[cfg(test)]
+mod alt_probe_repro {
+    use super::*;
+
+    /// The user's report: after an app relaunch, an alt-screen pane shows only
+    /// its current page. AVT (0.18) structurally KEEPS NO ALT-BUFFER
+    /// SCROLLBACK — that engine just doesn't retain TUI history above the
+    /// visible page (lines()==visible rows only, probe-proven). The snapshot
+    /// therefore cannot replay an alt session past; what we CAN do is tell
+    /// the user *where* the history actually lives (ptyd's raw log), so the
+    /// "history vanished" experience turns into a pointing hint instead of a
+    /// silent cut. Shell (primary) history replay is unchanged and covered by
+    /// the pre-existing snapshot tests.
+    #[test]
+    fn alt_screen_scrolling_has_no_scrollback_by_engine_design() {
+        let mut g = PaneGrid::new(40, 5);
+        g.feed(b"shell-one\r\nshell-two\r\nshell-three\r\n\x1b[?1049h");
+        for i in 1..=12u32 {
+            g.feed(format!("alt-line-{i:02}\r\n").as_bytes());
+        }
+        let lines: Vec<_> = g.vt.lines().collect();
+        // Probe-proven in alt mode: lines() IS the visible page only — this is
+        // an avt property, not a snapshot bug; see also grid.rs's comment ref.
+        assert_eq!(lines.len(), 5);
+        let whole_view = lines.iter().map(|l| l.text()).collect::<Vec<_>>().join("\n");
+        // Early lines are GONE from the visible page (no alt scrollback
+        // exists) — this is the user-visible truncation, web-engine-fatted.
+        assert!(!whole_view.contains("alt-line-08"));
+        assert!(whole_view.contains("alt-line-12"), "view:\n{whole_view}");
+
+        let snap = String::from_utf8(g.snapshot()).unwrap();
+        assert!(
+            snap.contains("termhist") && snap.contains("older output"),
+            "snapshot should carry the pointer hint for alt panes:\n{}",
+            &snap[..snap.len().min(400)]
+        );
+        // and it must NOT fabricate alt history: no replayed alt-line-08 above.
+        assert!(!snap.contains("\x1b[96malt-line-08"));
     }
 }
