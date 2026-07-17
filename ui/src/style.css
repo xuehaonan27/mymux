@@ -2506,3 +2506,57 @@ body.has-winalpha #hostbar {
 .git-stash-row:hover {
   background: var(--control-bg-hover);
 }
+
+/* Agent notify hooks popover (hostmanager.ts). */
+.host-hookpop {
+  position: fixed;
+  z-index: 45;
+  min-width: 300px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow);
+  font: 11px var(--mono);
+}
+.host-hookpop-hd {
+  color: var(--text-dim);
+  padding: 2px 4px;
+  border-bottom: 1px solid var(--hairline);
+}
+.ah-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+}
+.ah-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 8px;
+}
+.ah-dot.installed {
+  background: #3fb950;
+}
+.ah-dot.missing {
+  background: var(--text-dim);
+}
+.ah-dot.unknown {
+  background: #d6a04c;
+}
+.ah-name {
+  flex: 1;
+  color: var(--text);
+}
+.host-hookpop-status {
+  color: var(--text-dim);
+  padding: 2px 4px;
+  min-height: 14px;
+  white-space: pre-wrap;
+}

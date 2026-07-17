@@ -241,6 +241,12 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
       const open = el('button', 'host-btn small', 'Open');
       open.onclick = main.onclick as () => void;
       const un = uninstallBtn(h);
+      const bell = el('button', 'host-icon', '🔔');
+      bell.title = 'agent notify hooks (Claude / Codex / Kimi / Open Code)';
+      bell.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleHookPop(h, bell);
+      });
       const dis = el('button', 'host-icon', '⏻');
       dis.title = 'Disconnect';
       dis.onclick = async (e) => {
@@ -249,7 +255,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
         hooks.onDisconnected(h.id);
         void showList();
       };
-      card.append(open, un, dis);
+      card.append(open, bell, un, dis);
     } else if (conn) {
       // A background tunnel is still trying (connecting/reconnecting): the
       // only sensible action is to stop it.
@@ -623,4 +629,122 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     isOpen: () => panel.classList.contains('show'),
     close: () => dismiss(),
   };
+}
+
+// ---- agent notify hooks (claude/codex/kimi/opencode) -------------------------
+// One popover per host: four rows, status dot + Install/Uninstall
+// (two-click armed, same rule as the host ✕ delete).
+
+interface HookHostLike {
+  id: string;
+  label?: string;
+}
+const AGENT_HOOKS: [string, string][] = [
+  ['claude', 'Claude Code'],
+  ['codex', 'Codex'],
+  ['kimi', 'Kimi Code'],
+  ['opencode', 'Open Code'],
+];
+let hookPop: HTMLElement | null = null;
+function closeHookPop() {
+  hookPop?.remove();
+  hookPop = null;
+}
+/** The connected-host 🔔 button's popover. */
+function toggleHookPop(h: HookHostLike, anchor: HTMLElement) {
+  if (hookPop) {
+    closeHookPop();
+    return;
+  }
+  const pop = document.createElement('div');
+  pop.className = 'host-hookpop';
+  document.body.appendChild(pop);
+  hookPop = pop;
+  const r = anchor.getBoundingClientRect();
+  pop.style.left = `${Math.min(r.left, innerWidth - 320)}px`;
+  pop.style.top = `${r.bottom + 6}px`;
+  const head = document.createElement('div');
+  head.className = 'host-hookpop-hd';
+  head.textContent = `agent notify · ${h.label ?? h.id}`;
+  pop.appendChild(head);
+  const statusEl = document.createElement('div');
+  statusEl.className = 'host-hookpop-status';
+  const rows = AGENT_HOOKS.map(([agent, label]) => {
+    const row = document.createElement('div');
+    row.className = 'ah-row';
+    const dot = document.createElement('span');
+    dot.className = 'ah-dot unknown';
+    const name = document.createElement('span');
+    name.className = 'ah-name';
+    name.textContent = label;
+    const installBtn = document.createElement('button');
+    installBtn.className = 'pkgs-btn';
+    installBtn.textContent = 'Install';
+    installBtn.style.display = 'none';
+    installBtn.onclick = async () => {
+      statusEl.textContent = `installing ${label}…`;
+      try {
+        const out = (await invoke('agent_hook', { hostId: h.id, agent, install: true })) as string;
+        statusEl.textContent = out.trim() || `${label} installed`;
+      } catch (err) {
+        statusEl.textContent = String(err);
+      }
+      void refresh();
+    };
+    const unBtn = document.createElement('button');
+    unBtn.className = 'pkgs-btn git-danger ah-uninstall';
+    unBtn.textContent = 'Uninstall';
+    unBtn.title = 'two clicks (house rule)';
+    unBtn.style.display = 'none';
+    unBtn.onclick = () => {
+      if (unBtn.dataset.armed !== '1') {
+        unBtn.dataset.armed = '1';
+        unBtn.textContent = 'sure?';
+        setTimeout(() => {
+          unBtn.dataset.armed = '';
+          unBtn.textContent = 'Uninstall';
+        }, 1600);
+        return;
+      }
+      unBtn.dataset.armed = '';
+      unBtn.textContent = 'Uninstall';
+      void (async () => {
+        statusEl.textContent = `uninstalling ${label}…`;
+        try {
+          const out = (await invoke('agent_hook', { hostId: h.id, agent, install: false })) as string;
+          statusEl.textContent = out.trim() || `${label} uninstalled`;
+        } catch (err) {
+          statusEl.textContent = String(err);
+        }
+        void refresh();
+      })();
+    };
+    row.append(dot, name, installBtn, unBtn);
+    pop.appendChild(row);
+    return { agent, dot, installBtn, unBtn };
+  });
+  pop.appendChild(statusEl);
+  statusEl.textContent = 'probing…';
+  const closeOnDown = (ev: MouseEvent) => {
+    if (!pop.contains(ev.target as Node) && ev.target !== anchor) {
+      document.removeEventListener('mousedown', closeOnDown, true);
+      closeHookPop();
+    }
+  };
+  document.addEventListener('mousedown', closeOnDown, true);
+  const refresh = async () => {
+    try {
+      const st = (await invoke('agent_hook_status', { hostId: h.id })) as Record<string, boolean>;
+      statusEl.textContent = '';
+      for (const { agent, dot, installBtn, unBtn } of rows) {
+        const on = !!st[agent];
+        dot.className = `ah-dot ${on ? 'installed' : 'missing'}`;
+        installBtn.style.display = on ? 'none' : '';
+        unBtn.style.display = on ? '' : 'none';
+      }
+    } catch (err) {
+      statusEl.textContent = String(err);
+    }
+  };
+  void refresh();
 }

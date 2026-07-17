@@ -203,6 +203,48 @@ async fn uninstall_remote(state: State<'_, ConnState>, host_id: String, passphra
     run_remote_uninstall(&state, &host_id, passphrase, "--yes", std::time::Duration::from_secs(120)).await
 }
 
+/// Shared-master resolution for agent-hook commands (the four status/action
+/// calls ride ONE auth — the tunnel is almost always up when the user manages
+/// a host; a disconnected host gets a clear, non-silent error instead).
+fn hook_master(state: &ConnState, host_id: &str) -> Result<std::sync::Arc<mymux_connect::Master>, String> {
+    state
+        .conns
+        .lock()
+        .unwrap()
+        .get(host_id)
+        .map(|a| a.master.clone())
+        .ok_or_else(|| {
+            "connect to this host first — agent hooks ride the live tunnel's master".to_string()
+        })
+}
+
+/// Whether each agent's notify hooks are present on this host.
+#[tauri::command(rename_all = "snake_case")]
+async fn agent_hook_status(
+    state: State<'_, ConnState>,
+    host_id: String,
+) -> Result<std::collections::HashMap<String, bool>, String> {
+    let master = hook_master(&state, &host_id)?;
+    let mut out = std::collections::HashMap::new();
+    for (agent, _label) in mymux_connect::agenthook::AGENTS {
+        let s = mymux_connect::agenthook::hook_status(&master, agent).await?;
+        out.insert(agent.to_string(), s);
+    }
+    Ok(out)
+}
+
+/// Install (or uninstall, with `install: false`) one agent's notify hooks.
+#[tauri::command(rename_all = "snake_case")]
+async fn agent_hook(
+    state: State<'_, ConnState>,
+    host_id: String,
+    agent: String,
+    install: bool,
+) -> Result<String, String> {
+    let master = hook_master(&state, &host_id)?;
+    mymux_connect::agenthook::hook_set(&master, &agent, install).await
+}
+
 /// Connect (or re-drive: retry passphrase / trust host key) one host's tunnel.
 /// Other hosts' tunnels are untouched. Returns the local forward port — the UI
 /// points that host's workspace at `ws://127.0.0.1:<port>/ws`.
@@ -265,7 +307,9 @@ pub fn run() {
             conn_status,
             conns_list,
             probe_remote,
-            uninstall_remote
+            uninstall_remote,
+            agent_hook_status,
+            agent_hook
         ])
         .run(tauri::generate_context!())
         .expect("error while running the mymux app");
