@@ -1047,6 +1047,24 @@ body.has-winalpha #hostbar {
   font: 11px ui-monospace, Menlo, monospace;
   color: #5b6673;
 }
+/* git decorations on the file tree (VS Code-ish): untracked yellow-green,
+ * added green, modified amber, deleted red, ignored dimmed. Dir rows inherit
+ * the worst descendant via the same classes. Must come after .tdir so it wins. */
+.trow.git-u {
+  color: #9ece6a;
+}
+.trow.git-a {
+  color: #56d364;
+}
+.trow.git-m {
+  color: #e2c08d;
+}
+.trow.git-d {
+  color: #f85149;
+}
+.trow.git-ign {
+  opacity: 0.45;
+}
 #code-path {
   color: #c5cdd9;
 }

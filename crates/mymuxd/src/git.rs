@@ -24,17 +24,21 @@ pub struct StatusQuery {
     pane: Option<u32>,
     /// Optional absolute root override (the panel's root switcher).
     root: Option<String>,
+    /// `ignored=1`: include `!!` entries (gitignore-matched files/dirs) — the
+    /// file tree dims them; the changes list never asks and stays clean.
+    ignored: Option<String>,
 }
 
 /// `GET /git/status?pane=<id>` — working-tree + staged changes.
 pub async fn status(Query(q): Query<StatusQuery>) -> Json<Vec<GitFile>> {
     let root = root_for_req(q.pane, &q.root).await;
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .args(["status", "--porcelain=v1"])
-        .output()
-        .await;
+    let mut args = vec!["status", "--porcelain=v1"];
+    if q.ignored.as_deref() == Some("1") {
+        // "matching" collapses ignored dirs to one row (node_modules/ itself,
+        // not its whole forest) — exactly what a tree needs to dim.
+        args.push("--ignored=matching");
+    }
+    let out = Command::new("git").arg("-C").arg(&root).args(&args).output().await;
     let Ok(out) = out else { return Json(vec![]) };
     if !out.status.success() {
         return Json(vec![]);
@@ -46,9 +50,16 @@ pub async fn status(Query(q): Query<StatusQuery>) -> Json<Vec<GitFile>> {
             if l.len() < 4 {
                 return None;
             }
+            let status = l[..2].to_string();
+            // Rename/copy rows read "old -> new"; the tree colors the NEW path.
+            let path = if status.contains('R') || status.contains('C') {
+                l[3..].rsplit(" -> ").next().unwrap_or(l[3..].trim()).to_string()
+            } else {
+                l[3..].trim().to_string()
+            };
             Some(GitFile {
-                status: l[..2].to_string(),
-                path: l[3..].trim().to_string(),
+                status,
+                path,
                 submodule: false,
             })
         })

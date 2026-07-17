@@ -12,6 +12,7 @@ import {
 } from '@codemirror/view';
 import { getPrefs } from './prefs';
 import { cmThemeSlot, cmThemeFor, presetById, rethemeState } from './theme';
+import { copyText } from './clipboard';
 import { rust } from '@codemirror/lang-rust';
 import { javascript } from '@codemirror/lang-javascript';
 import { python } from '@codemirror/lang-python';
@@ -60,6 +61,22 @@ interface GitFile {
   submodule?: boolean;
 }
 
+/** Decoration kinds for the file tree (VS Code colors): U untracked, A added,
+ * M modified, R renamed/copied (paints as M), D deleted, IGN ignored. */
+type GitKind = 'U' | 'A' | 'M' | 'R' | 'D' | 'IGN';
+/** Porcelain XY status → the decoration kind. */
+function gitKindOf(status: string): GitKind | null {
+  if (status === '??') return 'U';
+  if (status === '!!') return 'IGN';
+  if (status.includes('D')) return 'D';
+  if (status.includes('R') || status.includes('C')) return 'R';
+  if (status.includes('A')) return 'A';
+  if (status.includes('M')) return 'M';
+  return null;
+}
+/** Severity for ancestor-dir aggregation (ignored never propagates up). */
+const GIT_PRIO: Record<Exclude<GitKind, 'IGN'>, number> = { D: 5, R: 4, M: 3, A: 2, U: 1 };
+
 const paneQ = (pane: number | null) => (pane != null ? `pane=${pane}&` : '');
 
 const rootQ = (root: string | null) => (root ? `root=${encodeURIComponent(root)}&` : '');
@@ -96,8 +113,14 @@ async function fsWrite(
   });
   return r.ok;
 }
-async function gitStatus(pane: number | null, root: string | null = null): Promise<GitFile[]> {
-  const r = await fetch(`${apiBase()}/git/status?${paneQ(pane)}${rootQ(root)}`);
+async function gitStatus(
+  pane: number | null,
+  root: string | null = null,
+  ignored = false,
+): Promise<GitFile[]> {
+  const r = await fetch(
+    `${apiBase()}/git/status?${paneQ(pane)}${rootQ(root)}${ignored ? 'ignored=1' : ''}`,
+  );
   return r.ok ? r.json() : [];
 }
 async function gitFiles(pane: number | null, root: string | null = null): Promise<string[]> {
@@ -571,6 +594,12 @@ interface Session {
   fsRoot?: string;
   /** .gitmodules registry (uninitialized dirs get init rows in the tree). */
   submodules?: { path: string; initialized: boolean }[];
+  /** Tree decorations: exact git kind per root-relative path (files AND the
+   * `!!`-collapsed ignored dirs). */
+  gitKinds?: Map<string, GitKind>;
+  /** Dir tint: the worst non-ignored descendant kind (VS Code-style — a
+   * folder inherits its dirtiest child's color). */
+  gitDirAgg?: Map<string, Exclude<GitKind, 'IGN'>>;
 }
 
 export interface CodePanelOpts {
@@ -661,6 +690,47 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   const sessions = new Map<string, Session>();
   let current: Session | null = null;
   let open = false;
+
+  // The Tauri WKWebView is flaky on native copy/paste (the same webview
+  // family that made clipboard.ts necessary for terminal selections) — route
+  // the panel's editor copy/paste through explicit clipboard APIs with the
+  // textarea fallback instead of trusting the native path. Browsers keep
+  // their own (working) pipeline untouched — AND get no handler here, because
+  // CodeMirror ALSO listens for paste on its content DOM: a second, naive
+  // handler double-inserts (Chromium e2e caught this). In Tauri we run on
+  // CAPTURE and stopPropagation so exactly one inserter survives: ours.
+  const isTauriWebview = '__TAURI_INTERNALS__' in window || '__TAURI__' in window;
+  if (isTauriWebview) {
+    panel.addEventListener('copy', (e) => {
+      const sel = window.getSelection()?.toString() ?? '';
+      if (!sel) return; // empty selection: nothing to steal the event for
+      e.clipboardData?.setData('text/plain', sel);
+      e.preventDefault();
+      void copyText(sel);
+    });
+    panel.addEventListener(
+      'paste',
+      (e) => {
+        if (!editor?.hasFocus) return; // inputs (search/rename) keep native paste
+        e.preventDefault();
+        e.stopPropagation(); // lock CodeMirror's own paste listener out
+        const text = e.clipboardData?.getData('text/plain') ?? '';
+        if (text) {
+          editor.dispatch(editor.state.replaceSelection(text));
+          return;
+        }
+        // A locked-down WK build hands us an EMPTY clipboardData even on a
+        // user-gesture paste — fall back to the async API before failing loud.
+        void navigator.clipboard
+          .readText()
+          .then((t) => {
+            if (t && editor) editor.dispatch(editor.state.replaceSelection(t));
+          })
+          .catch(() => flashHint('paste unavailable — the webview clipboard is locked'));
+      },
+      true,
+    );
+  }
 
   const keyOf = (p: number | null, root: string | null) =>
     `${opts.getScope()}:${p ?? -1}|${root ?? ''}`;
@@ -1050,6 +1120,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       const p = s.path;
       pathEl.textContent = `${p}   ✓ saved`;
       renderBufs();
+      void loadChanges(); // the write flips porcelain state — badges + tree colors
       setTimeout(() => {
         if (current === s && current.path === p) renderHeader();
       }, 1200);
@@ -1124,10 +1195,38 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     editor!.focus();
   }
 
+  /** The git decoration class for one tree row (empty string when clean or
+   * outside a repo). Dirs tint by their dirtiest descendant; `!!`-collapsed
+   * ignored dirs and ignored files dim. */
+  function gitClassFor(p: string, dir: boolean): string {
+    const s = current;
+    if (!s) return '';
+    const paint = (k: GitKind | undefined) =>
+      k === 'IGN' ? ' git-ign' : k ? ` git-${k === 'R' ? 'm' : k.toLowerCase()}` : '';
+    if (!dir) return paint(s.gitKinds?.get(p));
+    const exact = s.gitKinds?.get(p);
+    if (exact === 'IGN') return ' git-ign';
+    const agg = s.gitDirAgg?.get(p);
+    if (exact && (!agg || GIT_PRIO[exact] > GIT_PRIO[agg])) return paint(exact);
+    return paint(agg);
+  }
+
+  /** Repaint every row's git decoration from the session cache (post-fetch,
+   * post-rebuild) — cheap enough to run at every state refresh. */
+  function decorateTree() {
+    for (const row of treeEl.querySelectorAll<HTMLElement>('.trow')) {
+      row.classList.remove('git-u', 'git-a', 'git-m', 'git-d', 'git-ign');
+      const p = row.dataset.path;
+      if (p) row.className += gitClassFor(p, row.classList.contains('tdir'));
+    }
+  }
+
   function treeItem(path: string, name: string, dir: boolean, depth: number): HTMLElement {
     const wrap = document.createElement('div');
     const row = document.createElement('div');
     row.className = 'trow' + (dir ? ' tdir' : ' tfile');
+    row.dataset.path = path; // decorateTree() keys off this
+    row.className += gitClassFor(path, dir);
     row.style.paddingLeft = `${depth * 12 + 8}px`;
     wrap.appendChild(row);
 
@@ -1223,6 +1322,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     if (current !== s) return; // switched panes mid-fetch
     for (const c of items) treeEl.appendChild(treeItem(c.name, c.name, c.dir, 0));
     syncFoldBtn();
+    decorateTree(); // rows were rebuilt — bring the git colors back
   }
 
   // ---- expand/collapse-all + search -----------------------------------------
@@ -1410,14 +1510,47 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
 
   async function loadChanges() {
     const s = current;
-    const files = await gitStatus(s?.pane ?? null, s?.root ?? null);
+    // One fetch feeds BOTH the changes list and the tree decorations — the
+    // two never disagree about what git sees.
+    const files = await gitStatus(s?.pane ?? null, s?.root ?? null, true);
     if (current !== s) return;
+
+    // Decoration maps, root-relative (status paths are prefix-relative too,
+    // so keys match the tree rows directly; ../ rows live outside the view).
+    const kinds = new Map<string, GitKind>();
+    const dirAgg = new Map<string, Exclude<GitKind, 'IGN'>>();
+    for (const f of files) {
+      const k = gitKindOf(f.status);
+      if (!k || f.path.startsWith('../') || f.path === '..' || f.path.startsWith('/')) continue;
+      const p = f.path.replace(/\/+$/, ''); // ignored dirs arrive "dir/"
+      if (k === 'IGN') {
+        if (!kinds.has(p)) kinds.set(p, k); // never shadows a real status
+        continue;
+      }
+      const prev = kinds.get(p);
+      if (!prev || prev === 'IGN' || GIT_PRIO[k] > GIT_PRIO[prev]) kinds.set(p, k);
+      // Ancestors inherit the worst descendant (ignored never propagates).
+      let slash = p.indexOf('/');
+      while (slash > 0) {
+        const dir = p.slice(0, slash);
+        const acc = dirAgg.get(dir);
+        if (!acc || GIT_PRIO[k] > GIT_PRIO[acc]) dirAgg.set(dir, k);
+        slash = p.indexOf('/', slash + 1);
+      }
+    }
+    if (s) {
+      s.gitKinds = kinds;
+      s.gitDirAgg = dirAgg;
+    }
+    decorateTree();
+
     changesEl.replaceChildren();
-    if (!files.length) {
+    const visible = files.filter((f) => gitKindOf(f.status) !== 'IGN');
+    if (!visible.length) {
       changesEl.textContent = 'clean';
       return;
     }
-    for (const f of files) {
+    for (const f of visible) {
       const st = f.status.trim();
       const cls = st.includes('?') || st.includes('A') ? 'gnew' : st.includes('D') ? 'gdel' : 'gmod';
       const row = document.createElement('div');
