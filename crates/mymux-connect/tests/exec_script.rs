@@ -38,16 +38,27 @@ async fn exec_script_runs_commands_over_ssh() {
     assert!(msg.contains("doomed"), "missing output tail: {msg}");
 
     // Stdin is really piped: the script can read what we send.
-    let out = exec_script(cfg, None, "read x; echo \"got:$x\"", Duration::from_secs(20))
-        .await
-        .expect("read should succeed");
+    let out = exec_script(
+        cfg,
+        None,
+        "read x; echo \"got:$x\"",
+        Duration::from_secs(20),
+    )
+    .await
+    .expect("read should succeed");
     assert!(out.contains("got:"), "stdin roundtrip failed: {out:?}");
 
     // Binary stdin: 1 MiB lands byte-intact (exercises packet chunking).
     let bytes: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
-    let out = exec_bytes(cfg, None, "cat | sha256sum", &bytes, Duration::from_secs(30))
-        .await
-        .expect("binary upload should succeed");
+    let out = exec_bytes(
+        cfg,
+        None,
+        "cat | sha256sum",
+        &bytes,
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("binary upload should succeed");
     // sha256 of `(0..1_000_000).map(|i| (i % 251) as u8)`, precomputed.
     const WANT: &str = "2c030d49ec131bfbbb446ad21e7a2f12cdb4f2f4f3fda3ac709dd2e68a4646c7";
     assert!(out.contains(WANT), "binary roundtrip corrupted: {out}");

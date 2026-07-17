@@ -69,7 +69,9 @@ fn override_root(param: &Option<String>) -> Option<PathBuf> {
     if p.is_empty() {
         return None;
     }
-    let home = PathBuf::from(std::env::var_os("HOME")?).canonicalize().ok()?;
+    let home = PathBuf::from(std::env::var_os("HOME")?)
+        .canonicalize()
+        .ok()?;
     let abs = PathBuf::from(p).canonicalize().ok()?;
     (abs.is_dir() && abs.starts_with(&home)).then_some(abs)
 }
@@ -301,7 +303,9 @@ fn walk_search(root: &Path, needle: &str, content: bool) -> Vec<SearchHit> {
         if depth > MAX_DEPTH || hits.len() >= MAX_HITS {
             break;
         }
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in rd.filter_map(|e| e.ok()) {
             let name = e.file_name().to_string_lossy().into_owned();
             let Ok(ft) = e.file_type() else { continue };
@@ -333,7 +337,9 @@ fn walk_search(root: &Path, needle: &str, content: bool) -> Vec<SearchHit> {
             if md.len() > MAX_SEARCH_FILE {
                 continue;
             }
-            let Ok(bytes) = std::fs::read(e.path()) else { continue };
+            let Ok(bytes) = std::fs::read(e.path()) else {
+                continue;
+            };
             if bytes.iter().take(8192).any(|&b| b == 0) {
                 continue; // binary sniff (same trick as the editor)
             }
@@ -375,7 +381,11 @@ mod tests {
     fn search_matches_names_and_contents_skipping_forests() {
         let root = std::env::temp_dir().join(format!("mymux-fs-search-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        touch(&root, "src/main.rs", "fn main() { println!(\"needle\"); }\n");
+        touch(
+            &root,
+            "src/main.rs",
+            "fn main() { println!(\"needle\"); }\n",
+        );
         touch(&root, "src/needle_helper.rs", "// needle\n");
         touch(&root, "node_modules/dep/index.js", "needle\n");
         std::fs::write(root.join("bin.dat"), b"nee\0dle").unwrap(); // NUL byte → binary
@@ -386,7 +396,10 @@ mod tests {
             "{names:?}"
         );
         // The content of needle_helper.rs doesn't matter for name mode.
-        assert!(!names.iter().any(|h| h.path.contains("node_modules")), "{names:?}");
+        assert!(
+            !names.iter().any(|h| h.path.contains("node_modules")),
+            "{names:?}"
+        );
 
         let contents = walk_search(&root, "needle", true);
         assert!(
@@ -395,8 +408,14 @@ mod tests {
                 .any(|h| h.path == "src/main.rs" && h.line == Some(1)),
             "{contents:?}"
         );
-        assert!(!contents.iter().any(|h| h.path.contains("node_modules")), "{contents:?}");
-        assert!(!contents.iter().any(|h| h.path == "bin.dat"), "{contents:?}"); // binary-sniffed out
+        assert!(
+            !contents.iter().any(|h| h.path.contains("node_modules")),
+            "{contents:?}"
+        );
+        assert!(
+            !contents.iter().any(|h| h.path == "bin.dat"),
+            "{contents:?}"
+        ); // binary-sniffed out
 
         let _ = std::fs::remove_dir_all(&root);
     }

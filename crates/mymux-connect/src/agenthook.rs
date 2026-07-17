@@ -48,13 +48,15 @@ async fn upload_payload(master: &Master, target: &str, bytes: &[u8]) -> Result<(
 }
 
 fn ensure_client_paths(agent: &str) -> Result<Vec<(&'static str, &'static [u8])>, Status> {
-    let mut v: Vec<(&'static str, &'static [u8])> =
-        Vec::with_capacity(2);
+    let mut v: Vec<(&'static str, &'static [u8])> = Vec::with_capacity(2);
     match agent {
         "claude" | "kimi" => v.push(("$HOME/.local/bin/mymux-agent-report.sh", REPORT.as_bytes())),
         "codex" => {
             v.push(("$HOME/.local/bin/mymux-agent-report.sh", REPORT.as_bytes()));
-            v.push(("$HOME/.local/bin/mymux-codex-notify.sh", CODEX_HANDLER.as_bytes()));
+            v.push((
+                "$HOME/.local/bin/mymux-codex-notify.sh",
+                CODEX_HANDLER.as_bytes(),
+            ));
         }
         // Same XDG logic the driver uses to VERIFY (${XDG_CONFIG_HOME:-...}),
         // or a user with XDG set gets the plugin written where the checker
@@ -80,7 +82,9 @@ fn payload_for(agent: &str) -> &'static str {
 
 /// installed/missing for one agent.
 pub async fn hook_status(master: &Master, agent: &str) -> Result<bool, String> {
-    upload_driver(master).await.map_err(|s| format!("upload driver: {s:?}"))?;
+    upload_driver(master)
+        .await
+        .map_err(|s| format!("upload driver: {s:?}"))?;
     let out = master_exec_script(
         master,
         &format!("{DRIVER_PATH} {agent} status"),
@@ -93,7 +97,9 @@ pub async fn hook_status(master: &Master, agent: &str) -> Result<bool, String> {
 
 /// install=true installs, install=false uninstalls.
 pub async fn hook_set(master: &Master, agent: &str, install: bool) -> Result<String, String> {
-    upload_driver(master).await.map_err(|s| format!("upload driver: {s:?}"))?;
+    upload_driver(master)
+        .await
+        .map_err(|s| format!("upload driver: {s:?}"))?;
     if install {
         for (target, bytes) in ensure_client_paths(agent).map_err(|s| format!("{s:?}"))? {
             upload_payload(master, target, bytes)

@@ -234,34 +234,6 @@ export function initSettingsPanel(): SettingsPanel {
     }
     panel.append(r);
 
-    // Renderer A/B (the WKWebView artifact experiment): canvas paints cells
-    // instead of DOM spans — new panes only, flip back any time.
-    const rr = document.createElement('div');
-    rr.className = 'settings-row';
-    const rlab = document.createElement('span');
-    rlab.textContent = 'Terminal renderer:';
-    rr.append(rlab);
-    for (const [v, text] of [
-      ['dom', 'DOM (default)'],
-      ['canvas', 'Canvas (experimental)'],
-    ] as const) {
-      const rb = document.createElement('input');
-      rb.type = 'radio';
-      rb.name = 'renderer';
-      rb.checked = p.renderer === v;
-      rb.addEventListener('change', () => {
-        if (rb.checked) setPrefs({ renderer: v });
-      });
-      const l = document.createElement('label');
-      l.append(rb, document.createTextNode(' ' + text + ' '));
-      rr.append(l);
-    }
-    panel.append(rr);
-    const rhint = document.createElement('div');
-    rhint.className = 'settings-hint';
-    rhint.textContent = 'Applies to newly created panes; existing panes keep their renderer until re-created (window switch, reconnect).';
-    panel.append(rhint);
-
     const hint = document.createElement('div');
     hint.className = 'settings-hint';
     hint.textContent = 'You can still switch roots per pane with the root bar. Prefs live on this device (localStorage).';

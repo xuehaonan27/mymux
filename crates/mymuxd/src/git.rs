@@ -38,7 +38,12 @@ pub async fn status(Query(q): Query<StatusQuery>) -> Json<Vec<GitFile>> {
         // not its whole forest) — exactly what a tree needs to dim.
         args.push("--ignored=matching");
     }
-    let out = Command::new("git").arg("-C").arg(&root).args(&args).output().await;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(&args)
+        .output()
+        .await;
     let Ok(out) = out else { return Json(vec![]) };
     if !out.status.success() {
         return Json(vec![]);
@@ -53,7 +58,11 @@ pub async fn status(Query(q): Query<StatusQuery>) -> Json<Vec<GitFile>> {
             let status = l[..2].to_string();
             // Rename/copy rows read "old -> new"; the tree colors the NEW path.
             let path = if status.contains('R') || status.contains('C') {
-                l[3..].rsplit(" -> ").next().unwrap_or(l[3..].trim()).to_string()
+                l[3..]
+                    .rsplit(" -> ")
+                    .next()
+                    .unwrap_or(l[3..].trim())
+                    .to_string()
             } else {
                 l[3..].trim().to_string()
             };
@@ -80,7 +89,8 @@ pub async fn status(Query(q): Query<StatusQuery>) -> Json<Vec<GitFile>> {
 /// .gitmodules values are toplevel-relative, so strip the pane's prefix (""
 /// at the toplevel; a subdir prefix keeps out-of-view subs from matching).
 /// None outside a work tree; Some(vec![]) when there's no .gitmodules.
-async fn submodule_paths(root: &std::path::Path) -> Option<Vec<String>> {    let out = Command::new("git")
+async fn submodule_paths(root: &std::path::Path) -> Option<Vec<String>> {
+    let out = Command::new("git")
         .arg("-C")
         .arg(root)
         .args(["rev-parse", "--show-toplevel", "--show-prefix"])
@@ -224,7 +234,14 @@ pub async fn diff(Query(q): Query<DiffQuery>) -> Result<String, StatusCode> {
             if let Ok(out) = Command::new("git")
                 .arg("-C")
                 .arg(&root)
-                .args(["diff", "--no-color", "--no-index", "--", "/dev/null", &q.path])
+                .args([
+                    "diff",
+                    "--no-color",
+                    "--no-index",
+                    "--",
+                    "/dev/null",
+                    &q.path,
+                ])
                 .output()
                 .await
             {
@@ -323,7 +340,11 @@ fn parse_log(text: &str) -> Vec<LogCommit> {
             }
             Some(LogCommit {
                 hash: f[0].to_string(),
-                parents: f[1].split(' ').filter(|p| !p.is_empty()).map(str::to_string).collect(),
+                parents: f[1]
+                    .split(' ')
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string)
+                    .collect(),
                 author: f[2].to_string(),
                 date: f[3].to_string(),
                 subject: f[4].to_string(),
@@ -413,7 +434,12 @@ pub async fn log(Query(q): Query<LogQuery>) -> Json<serde_json::Value> {
         let name = Command::new("git")
             .arg("-C")
             .arg(&root)
-            .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+            .args([
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{upstream}",
+            ])
             .output()
             .await
             .ok()
@@ -431,7 +457,10 @@ pub async fn log(Query(q): Query<LogQuery>) -> Json<serde_json::Value> {
             .and_then(|o| {
                 let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
                 let mut it = t.split_whitespace();
-                Some((it.next()?.parse::<u64>().ok()?, it.next()?.parse::<u64>().ok()?))
+                Some((
+                    it.next()?.parse::<u64>().ok()?,
+                    it.next()?.parse::<u64>().ok()?,
+                ))
             });
         match (name, counts) {
             (Some(u), Some((a, b))) => (Some(u), Some(a), Some(b)),
@@ -519,7 +548,12 @@ pub async fn show(Query(q): Query<ShowQuery>) -> Result<Json<serde_json::Value>,
     let meta = Command::new("git")
         .arg("-C")
         .arg(&root)
-        .args(["show", "-s", "--format=%H%x1f%an%x1f%aI%x1f%s%x1f%b", &q.rev])
+        .args([
+            "show",
+            "-s",
+            "--format=%H%x1f%an%x1f%aI%x1f%s%x1f%b",
+            &q.rev,
+        ])
         .output()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -682,7 +716,8 @@ async fn run_op(q: &WriteReq, args: &[&str], timeout_secs: u64) -> WriteResp {
 
 /// Spawn + timeout + tail-collect, shared by run_op and the sequencer driver.
 async fn run_git(mut cmd: Command, timeout_secs: u64) -> WriteResp {
-    let out = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output()).await;
+    let out =
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output()).await;
     match out {
         Err(_) => WriteResp {
             ok: false,
@@ -790,7 +825,14 @@ pub async fn discard(Json(q): Json<WriteReq>) -> Json<WriteResp> {
         Json(
             run_op(
                 &q,
-                &["restore", "--source=HEAD", "--staged", "--worktree", "--", &path],
+                &[
+                    "restore",
+                    "--source=HEAD",
+                    "--staged",
+                    "--worktree",
+                    "--",
+                    &path,
+                ],
                 60,
             )
             .await,
@@ -803,7 +845,10 @@ pub async fn discard(Json(q): Json<WriteReq>) -> Json<WriteResp> {
 /// (reverse = unstaging). Stdin-fed, no shell, 120s.
 pub async fn apply_patch(Json(q): Json<WriteReq>) -> Json<WriteResp> {
     let root = root_for_req(q.pane, &q.root).await;
-    let Some(patch) = q.patch.clone().filter(|p| !p.trim().is_empty() && p.len() <= 8_000_000)
+    let Some(patch) = q
+        .patch
+        .clone()
+        .filter(|p| !p.trim().is_empty() && p.len() <= 8_000_000)
     else {
         return Json(WriteResp {
             ok: false,
@@ -831,7 +876,11 @@ pub async fn apply_patch(Json(q): Json<WriteReq>) -> Json<WriteResp> {
         let _ = stdin.write_all(patch.as_bytes()).await;
         let _ = stdin.shutdown().await;
     }
-    let out = tokio::time::timeout(std::time::Duration::from_secs(120), child.wait_with_output()).await;
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        child.wait_with_output(),
+    )
+    .await;
     match out {
         Err(_) => Json(WriteResp {
             ok: false,
@@ -898,14 +947,18 @@ fn bad_rev() -> Json<WriteResp> {
 /// `POST /git/cherry-pick {rev}` — apply one commit onto HEAD; conflicts come
 /// back as git's own output.
 pub async fn cherry_pick(Json(q): Json<WriteReq>) -> Json<WriteResp> {
-    let Some(rev) = req_rev(&q) else { return bad_rev() };
+    let Some(rev) = req_rev(&q) else {
+        return bad_rev();
+    };
     Json(run_op(&q, &["cherry-pick", &rev], 60).await)
 }
 
 /// `POST /git/revert {rev}` — revert one commit with the default message
 /// (--no-edit: the panel can't host an editor).
 pub async fn revert(Json(q): Json<WriteReq>) -> Json<WriteResp> {
-    let Some(rev) = req_rev(&q) else { return bad_rev() };
+    let Some(rev) = req_rev(&q) else {
+        return bad_rev();
+    };
     Json(run_op(&q, &["revert", "--no-edit", &rev], 60).await)
 }
 
@@ -913,14 +966,18 @@ pub async fn revert(Json(q): Json<WriteReq>) -> Json<WriteResp> {
 /// dirty-tree refusals are git's own message. Long timeout: checkouts of big
 /// trees with hooks can lag.
 pub async fn checkout(Json(q): Json<WriteReq>) -> Json<WriteResp> {
-    let Some(rev) = req_rev(&q) else { return bad_rev() };
+    let Some(rev) = req_rev(&q) else {
+        return bad_rev();
+    };
     Json(run_op(&q, &["checkout", &rev], 120).await)
 }
 
 /// `POST /git/reset {rev, mode}` — reset HEAD to rev. mode ∈ soft|mixed|hard;
 /// a destructive verb with no silent default — anything else is rejected.
 pub async fn reset(Json(q): Json<WriteReq>) -> Json<WriteResp> {
-    let Some(rev) = req_rev(&q) else { return bad_rev() };
+    let Some(rev) = req_rev(&q) else {
+        return bad_rev();
+    };
     let flag = match q.mode.as_deref() {
         Some("soft") => "--soft",
         Some("mixed") => "--mixed",
@@ -943,7 +1000,9 @@ fn req_at(q: &WriteReq) -> Option<String> {
 /// `POST /git/branch {rev: name, at?}` — create a branch (at HEAD or the
 /// right-clicked commit). Invalid names are git's own error message.
 pub async fn branch(Json(q): Json<WriteReq>) -> Json<WriteResp> {
-    let Some(name) = req_rev(&q) else { return bad_rev() };
+    let Some(name) = req_rev(&q) else {
+        return bad_rev();
+    };
     match req_at(&q) {
         Some(at) => Json(run_op(&q, &["branch", &name, &at], 60).await),
         None => Json(run_op(&q, &["branch", &name], 60).await),
@@ -953,13 +1012,17 @@ pub async fn branch(Json(q): Json<WriteReq>) -> Json<WriteResp> {
 /// `POST /git/branch/delete {rev: name}` — safe delete (-d): git refuses an
 /// unmerged branch and its message says why.
 pub async fn branch_delete(Json(q): Json<WriteReq>) -> Json<WriteResp> {
-    let Some(name) = req_rev(&q) else { return bad_rev() };
+    let Some(name) = req_rev(&q) else {
+        return bad_rev();
+    };
     Json(run_op(&q, &["branch", "-d", &name], 60).await)
 }
 
 /// `POST /git/tag {rev: name, at?}` — create a lightweight tag.
 pub async fn tag(Json(q): Json<WriteReq>) -> Json<WriteResp> {
-    let Some(name) = req_rev(&q) else { return bad_rev() };
+    let Some(name) = req_rev(&q) else {
+        return bad_rev();
+    };
     match req_at(&q) {
         Some(at) => Json(run_op(&q, &["tag", &name, &at], 60).await),
         None => Json(run_op(&q, &["tag", &name], 60).await),
@@ -968,14 +1031,18 @@ pub async fn tag(Json(q): Json<WriteReq>) -> Json<WriteResp> {
 
 /// `POST /git/tag/delete {rev: name}` — delete a tag.
 pub async fn tag_delete(Json(q): Json<WriteReq>) -> Json<WriteResp> {
-    let Some(name) = req_rev(&q) else { return bad_rev() };
+    let Some(name) = req_rev(&q) else {
+        return bad_rev();
+    };
     Json(run_op(&q, &["tag", "-d", &name], 60).await)
 }
 
 /// `POST /git/merge {rev}` — merge into HEAD (120s: big trees + hooks). A
 /// conflict surfaces through the graph panel's own banner (batch A).
 pub async fn merge(Json(q): Json<WriteReq>) -> Json<WriteResp> {
-    let Some(rev) = req_rev(&q) else { return bad_rev() };
+    let Some(rev) = req_rev(&q) else {
+        return bad_rev();
+    };
     Json(run_op(&q, &["merge", &rev], 120).await)
 }
 
@@ -1036,20 +1103,26 @@ pub async fn stash_push(Json(q): Json<WriteReq>) -> Json<WriteResp> {
 /// `POST /git/stash/pop {rev=stash@{n}}` — apply and drop; conflicts come
 /// back as git's own output (the entry is kept on conflict).
 pub async fn stash_pop(Json(q): Json<WriteReq>) -> Json<WriteResp> {
-    let Some(sel) = req_rev(&q) else { return bad_rev() };
+    let Some(sel) = req_rev(&q) else {
+        return bad_rev();
+    };
     Json(run_op(&q, &["stash", "pop", &sel], 60).await)
 }
 
 /// `POST /git/stash/apply {rev=stash@{n}}` — apply, keep the entry.
 pub async fn stash_apply(Json(q): Json<WriteReq>) -> Json<WriteResp> {
-    let Some(sel) = req_rev(&q) else { return bad_rev() };
+    let Some(sel) = req_rev(&q) else {
+        return bad_rev();
+    };
     Json(run_op(&q, &["stash", "apply", &sel], 60).await)
 }
 
 /// `POST /git/stash/drop {rev=stash@{n}}` — delete the entry (the panel
 /// two-click-confirms this one before calling).
 pub async fn stash_drop(Json(q): Json<WriteReq>) -> Json<WriteResp> {
-    let Some(sel) = req_rev(&q) else { return bad_rev() };
+    let Some(sel) = req_rev(&q) else {
+        return bad_rev();
+    };
     Json(run_op(&q, &["stash", "drop", &sel], 60).await)
 }
 
@@ -1289,7 +1362,13 @@ mod tests {
         let text = "M\tui/src/main.ts\nA\tui/ux/gitcheck.mjs\nD\tdocs/old.md\nR100\told/name.ts\tnew/name.ts\n";
         let files = parse_name_status(text);
         assert_eq!(files.len(), 4);
-        assert_eq!(files[0], ShowFile { status: "M".into(), path: "ui/src/main.ts".into() });
+        assert_eq!(
+            files[0],
+            ShowFile {
+                status: "M".into(),
+                path: "ui/src/main.ts".into()
+            }
+        );
         assert_eq!(files[1].status, "A");
         assert_eq!(files[2].status, "D");
         assert_eq!(files[3].path, "new/name.ts");

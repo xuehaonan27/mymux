@@ -21,7 +21,7 @@ await page.click('#btn-settings');
 await page.locator('.settings-panel.show').waitFor({ timeout: 5000 });
 const boxes = await page.locator('.settings-panel input[type=checkbox]').count();
 const radios = await page.locator('.settings-panel input[type=radio]').count();
-check('panel: 2 checkboxes + 4 radios', boxes === 2 && radios === 4, `cb=${boxes} r=${radios}`);
+check('panel: 2 checkboxes + 2 radios', boxes === 2 && radios === 2, `cb=${boxes} r=${radios}`);
 
 // 2. Tick 'notify' → the bell lights up (onPrefsChange re-renders it).
 await page.evaluate(() => {

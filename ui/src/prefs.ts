@@ -23,10 +23,6 @@ export interface Prefs {
   windowOpacity: number;
   /** Terminal font size in px (⌘=/⌘-/⌘0 adjusts live). */
   fontSize: number;
-  /** Terminal renderer: 'dom' (xterm default) or 'canvas' (experimental —
-   * kills the whole DOM/AA/letter-spacing artifact class on WKWebView).
-   * Takes effect on NEW panes only. */
-  renderer: 'dom' | 'canvas';
 }
 
 const DEFAULTS: Prefs = {
@@ -39,7 +35,6 @@ const DEFAULTS: Prefs = {
   paneOpacity: 1,
   windowOpacity: 1,
   fontSize: 13,
-  renderer: 'dom',
 };
 
 export { DEFAULTS as PREFS_DEFAULTS };
@@ -59,7 +54,6 @@ function load(): Prefs {
     p.paneOpacity = Math.min(1, Math.max(0, num(p.paneOpacity, DEFAULTS.paneOpacity)));
     p.windowOpacity = Math.min(1, Math.max(0, num(p.windowOpacity, DEFAULTS.windowOpacity)));
     p.fontSize = Math.min(28, Math.max(8, num(p.fontSize, DEFAULTS.fontSize)));
-    if (p.renderer !== 'dom' && p.renderer !== 'canvas') p.renderer = 'dom';
     if (typeof p.bgImage !== 'string') p.bgImage = '';
     return p;
   } catch {

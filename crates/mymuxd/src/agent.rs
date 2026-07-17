@@ -119,10 +119,7 @@ pub struct PaneReq {
 /// Defer = triage, not dismissal: re-stamp the ask so it sinks to the tail of
 /// the UI's attention queue (which sorts by needy-since ascending). The badge
 /// stays on. For "I saw it, I'll get to it after the others".
-pub async fn defer_handler(
-    State(hub): State<Arc<Hub>>,
-    Json(q): Json<PaneReq>,
-) -> &'static str {
+pub async fn defer_handler(State(hub): State<Arc<Hub>>, Json(q): Json<PaneReq>) -> &'static str {
     hub.defer_agent(q.pane);
     "ok"
 }
@@ -131,10 +128,7 @@ pub async fn defer_handler(
 /// and hush heuristic re-badging until the agent opens a NEW exchange (next
 /// hook report, attention bell, or alt-screen exit — the daemon lifts the
 /// suppression there). For "it told me to come back later, stop nagging me".
-pub async fn consume_handler(
-    State(hub): State<Arc<Hub>>,
-    Json(q): Json<PaneReq>,
-) -> &'static str {
+pub async fn consume_handler(State(hub): State<Arc<Hub>>, Json(q): Json<PaneReq>) -> &'static str {
     hub.consume_agent(q.pane);
     "ok"
 }

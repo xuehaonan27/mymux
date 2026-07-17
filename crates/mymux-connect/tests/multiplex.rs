@@ -28,11 +28,15 @@ async fn master_serves_many_execs_on_one_auth() {
         let out = master_exec_script(&master, &format!("echo hello-{i}"), Duration::from_secs(10))
             .await
             .expect("exec failed");
-        assert!(out.contains(&format!("hello-{i}")), "missing output: {out:?}");
+        assert!(
+            out.contains(&format!("hello-{i}")),
+            "missing output: {out:?}"
+        );
     }
     let n = auth_count(&sshd.log);
     assert_eq!(
-        n, 1,
+        n,
+        1,
         "every lease must reuse the single master auth (seen {n}):\n{}",
         std::fs::read_to_string(&sshd.log).unwrap_or_default()
     );
@@ -49,7 +53,12 @@ async fn master_multiplexes_concurrent_channels() {
     for i in 0..4 {
         let m = master.clone();
         handles.push(tokio::spawn(async move {
-            master_exec_script(&m, &format!("sleep 0.3; echo c{i}"), Duration::from_secs(15)).await
+            master_exec_script(
+                &m,
+                &format!("sleep 0.3; echo c{i}"),
+                Duration::from_secs(15),
+            )
+            .await
         }));
     }
     for (i, h) in handles.into_iter().enumerate() {
@@ -58,7 +67,8 @@ async fn master_multiplexes_concurrent_channels() {
     }
     let n = auth_count(&sshd.log);
     assert_eq!(
-        n, 1,
+        n,
+        1,
         "concurrent channels must multiplex over one auth (seen {n}):\n{}",
         std::fs::read_to_string(&sshd.log).unwrap_or_default()
     );

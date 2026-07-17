@@ -36,11 +36,15 @@ type Status =
 interface StatusEvent {
   host_id: string;
   status: Status;
+  /** The last explanatory line the supervisor reported (bind/probe/drop…). */
+  why?: string;
 }
 interface ConnInfo {
   host_id: string;
   port: number;
   status?: Status | null;
+  /** Latest supervisor reason note (bind/probe/drop…), when there is one. */
+  why?: string;
 }
 
 export interface HostManagerHooks {
@@ -232,7 +236,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
         'host-card-sub',
         live || !conn
           ? `${h.user}@${h.hostname}:${h.port}`
-          : `${h.user}@${h.hostname}:${h.port} — connecting…`,
+          : `${h.user}@${h.hostname}:${h.port} — connecting…${conn.why ? ` · ${conn.why}` : ''}`,
       ),
     );
     card.appendChild(main);
@@ -594,8 +598,8 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
       return;
     }
     if (!statusEl) return;
-    if (s === 'connecting') setStatus('info', 'Connecting…');
-    else if (s === 'reconnecting') setStatus('info', 'Reconnecting…');
+    if (s === 'connecting') setStatus('info', `Connecting…${ev.why ? ` · ${ev.why}` : ''}`);
+    else if (s === 'reconnecting') setStatus('info', `Reconnecting…${ev.why ? ` · ${ev.why}` : ''}`);
     else if (s === 'auth_failed') {
       setStatus('error', 'Authentication failed — wrong passphrase, or the key isn’t authorized.');
       settleAttempt();

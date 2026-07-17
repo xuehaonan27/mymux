@@ -348,8 +348,8 @@ mod tests {
 
         let vt2 = replay(&g, 40, 10);
         assert_eq!(visible(&vt2), visible(&g.vt)); // alt view reproduced
-        // Source content must all still be there; the hint adds a scrollback
-        // line on top of it instead of clobbering anything.
+                                                   // Source content must all still be there; the hint adds a scrollback
+                                                   // line on top of it instead of clobbering anything.
         assert!(
             vt2.text().iter().any(|l| l.contains("shell prompt $")),
             "source primary content lost: {:?}",
@@ -358,7 +358,11 @@ mod tests {
         assert!(
             vt2.text().iter().any(|l| l.contains("termhist")),
             "hint missing from snapshot: {}",
-            vt2.text().iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
+            vt2.text()
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
         );
         // Note: we no longer assert dump() byte-equality HERE — that was a
         // roundtrip-identical contract which the alt-pane hint now breaks
@@ -536,7 +540,11 @@ mod alt_probe_repro {
         // Probe-proven in alt mode: lines() IS the visible page only — this is
         // an avt property, not a snapshot bug; see also grid.rs's comment ref.
         assert_eq!(lines.len(), 5);
-        let whole_view = lines.iter().map(|l| l.text()).collect::<Vec<_>>().join("\n");
+        let whole_view = lines
+            .iter()
+            .map(|l| l.text())
+            .collect::<Vec<_>>()
+            .join("\n");
         // Early lines are GONE from the visible page (no alt scrollback
         // exists) — this is the user-visible truncation, web-engine-fatted.
         assert!(!whole_view.contains("alt-line-08"));

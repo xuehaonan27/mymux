@@ -7,12 +7,10 @@
 import { Terminal } from '@xterm/xterm';
 import type { ITheme } from '@xterm/xterm';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
-import { CanvasAddon } from '@xterm/addon-canvas';
 import { modHeld } from './modkey';
 import { pathSpans } from './pathjump';
 import { imeFixEnabled, installImeFix } from './imefix';
 import { measureCell } from './metrics';
-import { getPrefs } from './prefs';
 
 export type Kind = 'leaf' | 'cols' | 'rows';
 export interface LayoutNode {
@@ -296,17 +294,21 @@ export class Workspace {
     if (p) p.term.write(new Uint8Array(buf, 4));
   }
 
-  /** macOS translucent-compositor nudge (the main.ts forceRepaint twin): an
-   * instant re-composite, optionally re-fired after `delayMs` — content that
-   * lands in LATER frames (window-switch snapshot bytes) repaints with
-   * distorted font colours unless the layer is nudged again once it exists. */
-  private ghostBust(delayMs = 0) {
+  /** macOS translucent-compositor nudge, retargeted per layer family (the
+   * main.ts forceRepaint twin): removed panes' pixels linger in the ROOT's
+   * shared backing store, while a switched-in pane's own layer can hold a
+   * mistimed texture — the narrow right-column ghost in the field shots is
+   * exactly the second kind. Flick the root AND, when given, each pane's own
+   * element so both layer caches genuinely re-upload. */
+  private ghostBust(delayMs = 0, els: HTMLElement[] = []) {
     if (!document.body.classList.contains('has-winalpha')) return;
-    const el = this.root;
+    const targets = [this.root, ...els];
     const flick = () => {
-      el.style.opacity = '0.999';
-      void el.offsetHeight; // reflow: the sub-1 opacity flip re-composites
-      el.style.opacity = '';
+      for (const el of targets) {
+        el.style.opacity = '0.999';
+        void el.offsetHeight; // reflow: the sub-1 opacity flip re-composites
+        el.style.opacity = '';
+      }
     };
     if (delayMs > 0) window.setTimeout(flick, delayMs);
     else flick();
@@ -348,8 +350,9 @@ export class Workspace {
     // fires both at once and after they have painted.
     const setSwapped = seen.size !== idsBefore.size || [...seen].some((id) => !idsBefore.has(id));
     if (setSwapped) {
-      this.ghostBust();
-      this.ghostBust(120);
+      const paneEls = [...this.panes.values()].map((p) => p.el);
+      this.ghostBust(0, paneEls);
+      this.ghostBust(120, paneEls);
       // xterm's DOM renderer bakes letter-spacing into spans from glyph-width
       // probes, and WRONG probes are cached — a plain refresh re-bakes with
       // the same poisoned cache (why the +150ms refresh alone couldn't heal
@@ -488,17 +491,6 @@ export class Workspace {
       allowProposedApi: true,
     });
     term.open(el);
-    // Experimental canvas renderer (pref): cell-rasterized — no DOM/AA/
-    // letter-spacing artifact class at all, the family that keeps biting on
-    // WKWebView's translucent compositing. Pref `renderer: 'canvas'` opts
-    // in per-pane from here on; any load failure falls back to DOM quietly.
-    if (getPrefs().renderer === 'canvas') {
-      try {
-        term.loadAddon(new CanvasAddon());
-      } catch (e) {
-        console.warn('canvas renderer unavailable, staying on DOM', e);
-      }
-    }
     // Unicode 11 widths: xterm's default V6 table treats every emoji as
     // width 1 — the DOM renderer's negative letter-spacing then COLLAPSES
     // the span (typed 👌🏻 paints over the next glyph's left half) and every

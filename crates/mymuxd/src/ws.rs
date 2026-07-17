@@ -81,7 +81,9 @@ enum ClientMsg {
     },
     /// Client-requested reseed for one pane (deterministic self-heal after
     /// window switches: re-snapshot at the CURRENT true size).
-    Refresh { pane: u32 },
+    Refresh {
+        pane: u32,
+    },
     ResizePane {
         pane: u32,
         dir: String,

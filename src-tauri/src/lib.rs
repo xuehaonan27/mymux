@@ -32,6 +32,10 @@ struct ConnState {
     conns: Mutex<HashMap<String, Active>>,
     /// Latest tunnel status per host id (kept by each forwarder task).
     statuses: Arc<Mutex<HashMap<String, Status>>>,
+    /// The LAST explanatory reason per host ("bind 8089 in use", "health
+    /// probe timed out", …) — what liberates 'connecting' from being a
+    /// reasonless spinner. Cleared on every Connected transition.
+    reasons: Arc<Mutex<HashMap<String, String>>>,
     /// Last local port used per host, so a host keeps a stable URL across
     /// reconnects of its tunnel.
     ports: Mutex<HashMap<String, u16>>,
@@ -56,11 +60,14 @@ struct HostMetaMsg {
     meta: HostMeta,
 }
 
-/// The `mymux:status` event payload: which host a status belongs to.
+/// The `mymux:status` event payload: which host a status belongs to, plus the
+/// latest explanatory reason when one exists ("bind 8089 in use", …).
 #[derive(Clone, Serialize)]
 struct StatusEvent {
     host_id: String,
     status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    why: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -68,6 +75,8 @@ struct ConnInfo {
     host_id: String,
     port: u16,
     status: Option<Status>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    why: Option<String>,
 }
 
 /// A free local port for a host's tunnel: its remembered port when available,
@@ -133,6 +142,7 @@ fn conn_status(state: State<'_, ConnState>, host_id: String) -> Option<Status> {
 #[tauri::command]
 fn conns_list(state: State<'_, ConnState>) -> Vec<ConnInfo> {
     let statuses = state.statuses.lock().unwrap();
+    let reasons = state.reasons.lock().unwrap();
     state
         .conns
         .lock()
@@ -142,6 +152,7 @@ fn conns_list(state: State<'_, ConnState>) -> Vec<ConnInfo> {
             host_id: id.clone(),
             port: a.port,
             status: statuses.get(id).cloned(),
+            why: reasons.get(id).cloned(),
         })
         .collect()
 }
@@ -349,6 +360,7 @@ async fn connect(
     // check that also catches a still-running OLD daemon, which the
     // zero-touch installer never sees (it only acts on DaemonUnreachable).
     let statuses = state.statuses.clone();
+    let reasons = state.reasons.clone();
     let metas = state.metas.clone();
     let hid = host_id.clone();
     let app2 = app.clone();
@@ -356,8 +368,23 @@ async fn connect(
     let forwarder = tauri::async_runtime::spawn(async move {
         let mut was_connected = false;
         while let Some(s) = rx.recv().await {
+            // Error notes carry the WHY; everything else carries the state.
+            if let Status::Error(why) = &s {
+                reasons.lock().unwrap().insert(hid.clone(), why.clone());
+            }
+            if s == Status::Connected {
+                reasons.lock().unwrap().remove(&hid);
+            }
             statuses.lock().unwrap().insert(hid.clone(), s.clone());
-            let _ = app2.emit("mymux:status", StatusEvent { host_id: hid.clone(), status: s.clone() });
+            let why = reasons.lock().unwrap().get(&hid).cloned();
+            let _ = app2.emit(
+                "mymux:status",
+                StatusEvent {
+                    host_id: hid.clone(),
+                    status: s.clone(),
+                    why,
+                },
+            );
             let now_connected = s == Status::Connected;
             if now_connected && !was_connected {
                 let (m, h, a, ms) = (master3.clone(), hid.clone(), app2.clone(), metas.clone());

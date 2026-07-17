@@ -20,10 +20,18 @@ use tokio::sync::{broadcast, mpsc};
 
 #[derive(Clone)]
 enum Ev {
-    Output { id: u32, data: Vec<u8> },
-    Exit { id: u32 },
+    Output {
+        id: u32,
+        data: Vec<u8>,
+    },
+    Exit {
+        id: u32,
+    },
     /// The pane's grid flipped into/out of the alternate screen.
-    Alt { id: u32, on: bool },
+    Alt {
+        id: u32,
+        on: bool,
+    },
 }
 
 struct Pane {
@@ -203,7 +211,11 @@ fn handle_req(req: Req, store: &Arc<Store>, out: &mpsc::UnboundedSender<(u8, Vec
                         }
                         Ok(Ev::Alt { id, on }) => {
                             let ev = Event {
-                                ev: if on { "alt_on".into() } else { "alt_off".into() },
+                                ev: if on {
+                                    "alt_on".into()
+                                } else {
+                                    "alt_off".into()
+                                },
                                 id,
                             };
                             if out

@@ -233,9 +233,15 @@ async fn reader_loop(
                     if ev.ev == "exit" {
                         let _ = events.send(PtydEvent::Exit { id: ev.id });
                     } else if ev.ev == "alt_on" {
-                        let _ = events.send(PtydEvent::Alt { id: ev.id, on: true });
+                        let _ = events.send(PtydEvent::Alt {
+                            id: ev.id,
+                            on: true,
+                        });
                     } else if ev.ev == "alt_off" {
-                        let _ = events.send(PtydEvent::Alt { id: ev.id, on: false });
+                        let _ = events.send(PtydEvent::Alt {
+                            id: ev.id,
+                            on: false,
+                        });
                     }
                 }
             }

@@ -455,7 +455,12 @@ impl NativeWindows {
     /// Drag a divider: shift the split boundary adjacent to `pane` in `dir`
     /// by `cells`; returns every pane's new size so the caller can push them
     /// to ptyd. None when the pane (or a suitable boundary) doesn't exist.
-    pub fn resize_pane(&mut self, pane: u32, dir: &str, cells: i32) -> Option<Vec<(u32, u16, u16)>> {
+    pub fn resize_pane(
+        &mut self,
+        pane: u32,
+        dir: &str,
+        cells: i32,
+    ) -> Option<Vec<(u32, u16, u16)>> {
         let win = self.window_of(pane)?;
         let w = self.wins.get_mut(&win)?;
         if !resize_boundary(&mut w.root, pane, dir, cells) {
@@ -904,7 +909,11 @@ mod tests {
         // Clamp: can't shrink the neighbour below 1 cell.
         nw.resize_pane(P1, "right", 1000).unwrap();
         let clamped = rects(&nw, P1);
-        assert_eq!(clamped[&P2].2 + clamped[&P1].2, 80, "still exact after clamp");
+        assert_eq!(
+            clamped[&P2].2 + clamped[&P1].2,
+            80,
+            "still exact after clamp"
+        );
         assert!(clamped[&P2].2 >= 1);
         // Vertical: grow P2 down by 2.
         nw.resize_pane(P2, "down", 2).unwrap();

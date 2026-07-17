@@ -372,12 +372,27 @@ async fn connect_and_serve(
         }
     }
     if !daemon_ok {
+        let _ = status
+            .send(Status::Error(format!(
+                "mymuxd not answering on remote port {} after 14 probes — running the installer next",
+                cfg.remote_port
+            )))
+            .await;
         return Err(Status::DaemonUnreachable);
     }
 
-    let listener = TcpListener::bind(("127.0.0.1", cfg.local_port))
-        .await
-        .map_err(|_| Status::BindFailed(cfg.local_port))?;
+    let listener = match TcpListener::bind(("127.0.0.1", cfg.local_port)).await {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = status
+                .send(Status::Error(format!(
+                    "bind 127.0.0.1:{} failed ({e}) — port is held by an earlier mymux instance or another app",
+                    cfg.local_port
+                )))
+                .await;
+            return Err(Status::BindFailed(cfg.local_port));
+        }
+    };
     let _ = status.send(Status::Connected).await;
 
     // Serve the local forward until the ssh session dies. Two concurrent tasks:
@@ -401,6 +416,11 @@ async fn connect_and_serve(
                 }
                 Err(_) => {
                     master.invalidate().await; // session gone
+                    let _ = status
+                        .send(Status::Error(
+                            "the SSH server dropped our forward channel — reconnecting".to_string(),
+                        ))
+                        .await;
                     return Status::Reconnecting;
                 }
             }
@@ -416,6 +436,12 @@ async fn connect_and_serve(
                 Ok(Ok(_ch)) => {} // healthy (channel closes on drop)
                 _ => {
                     master.invalidate().await;
+                    let _ = status
+                        .send(Status::Error(
+                            "3s health probe timed out — the SSH session is presumed dead; reconnecting"
+                                .to_string(),
+                        ))
+                        .await;
                     return Status::Reconnecting; // timed out or errored → session dead
                 }
             }
@@ -470,7 +496,11 @@ pub fn parse_probe(out: &str) -> WorkReport {
                 r.work.push(format!("tmux {ref_} — {cmd} (window: {win})"));
             }
             ["pane", "ptyd", short, kind, name, pid] => {
-                let label = if *kind == "∞" { "persistent shell" } else { "shell" };
+                let label = if *kind == "∞" {
+                    "persistent shell"
+                } else {
+                    "shell"
+                };
                 let name = if *name == "-" { "unnamed" } else { name };
                 r.work.push(format!("{label} “{name}” ({pid}, id {short})"));
             }
@@ -511,8 +541,7 @@ static BUNDLE_VERSION: &str = "";
 /// sha256 pins. The client downloads host-matched bundles on demand instead
 /// of shipping daemon bytes for every arch inside every client platform.
 #[cfg(bundle_manifest)]
-static BUNDLES_JSON: &str =
-    include_str!("../../../src-tauri/resources/daemon/bundles.json");
+static BUNDLES_JSON: &str = include_str!("../../../src-tauri/resources/daemon/bundles.json");
 #[cfg(not(bundle_manifest))]
 static BUNDLES_JSON: &str = "";
 
@@ -520,7 +549,10 @@ static BUNDLES_JSON: &str = "";
 /// the host's arch; else the embedded x86_64 bundle's version (legacy path).
 fn expected_version(uname_sm: &str) -> String {
     if let Some(m) = crate::bundle::BundleManifest::parse(BUNDLES_JSON) {
-        if crate::bundle::arch_key(uname_sm).and_then(|k| m.assets.get(k)).is_some() {
+        if crate::bundle::arch_key(uname_sm)
+            .and_then(|k| m.assets.get(k))
+            .is_some()
+        {
             return m.version;
         }
     }
@@ -746,12 +778,24 @@ mod tests {
     #[test]
     fn outdated_semantics() {
         // Older by semver → outdated either side of the sha pins.
-        assert!(daemon_outdated("mymuxd 0.1.0 (aaa1111)", "mymuxd 0.2.0 (bbb2222)"));
+        assert!(daemon_outdated(
+            "mymuxd 0.1.0 (aaa1111)",
+            "mymuxd 0.2.0 (bbb2222)"
+        ));
         // Same version: the sha pin drives the lane (string inequality).
-        assert!(daemon_outdated("mymuxd 0.1.0 (aaa1111)", "mymuxd 0.1.0 (bbb2222)"));
-        assert!(!daemon_outdated("mymuxd 0.1.0 (bbb2222)", "mymuxd 0.1.0 (bbb2222)"));
+        assert!(daemon_outdated(
+            "mymuxd 0.1.0 (aaa1111)",
+            "mymuxd 0.1.0 (bbb2222)"
+        ));
+        assert!(!daemon_outdated(
+            "mymuxd 0.1.0 (bbb2222)",
+            "mymuxd 0.1.0 (bbb2222)"
+        ));
         // NEWER on the host is NOT outdated (the old bug downgraded it).
-        assert!(!daemon_outdated("mymuxd 0.2.0 (zzz9999)", "mymuxd 0.1.0 (aaa1111)"));
+        assert!(!daemon_outdated(
+            "mymuxd 0.2.0 (zzz9999)",
+            "mymuxd 0.1.0 (aaa1111)"
+        ));
         // Unknown anywhere → no verdict.
         assert!(!daemon_outdated("", "mymuxd 0.1.0 (aaa1111)"));
         assert!(!daemon_outdated("mymuxd 0.1.0 (aaa1111)", ""));

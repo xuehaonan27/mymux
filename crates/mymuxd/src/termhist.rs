@@ -62,11 +62,7 @@ async fn read_span(cur: &std::path::Path, offset: u64, len: u64) -> (Vec<u8>, u6
             Ok(f) => f,
             Err(_) => break,
         };
-        if f
-            .seek(std::io::SeekFrom::Start(start))
-            .await
-            .is_err()
-        {
+        if f.seek(std::io::SeekFrom::Start(start)).await.is_err() {
             break;
         }
         let mut buf = vec![0u8; want as usize];
@@ -89,7 +85,10 @@ pub async fn history(
     State(hub): State<Arc<Hub>>,
     Query(q): Query<HistQuery>,
 ) -> Result<axum::Json<serde_json::Value>, StatusCode> {
-    let pane = q.pane.filter(|p| is_native(*p)).ok_or(StatusCode::NOT_FOUND)?;
+    let pane = q
+        .pane
+        .filter(|p| is_native(*p))
+        .ok_or(StatusCode::NOT_FOUND)?;
     let pid = hub
         .pane_pids()
         .await
