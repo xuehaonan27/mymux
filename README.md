@@ -56,13 +56,17 @@ it asks you to trust the server's host key; then you land in the workspace —
 
 ## Status
 
-**Latest: one git surface (2026-07-16)** — a Git Graph/Lens-class surface
-behind the bar's branch button: Changes workbench (stage/commit/amend,
-hunk/line staging, split diff, conflict resolution, stashes) and History
-(swim-lane topology, ref menus, compare, blame, file history), all
-daemon-driven over `/git/*`. On top of per-host persistent SSH masters,
-markdown preview, the terminal-history pager, multi-host workspaces (M7), the
-native persistent-pane engine (ptyd), and the editor/package stack below.
+**Latest: reliability + VS Code-parity line (2026-07-17)** — all-pane IME
+(Sogou-class commit lanes), terminal font zoom (⌘=/⌘-/⌘0), ⌘+click path
+jumps (terminal ⇄ editor ⇄ `file:line`), editor⇄git two-way jumps with the
+graph as the landing view, workspace-scoped panel swapping across hosts,
+autoretrying/self-healing editor trees, plain-English reconnect/install
+surfaces (bind-fatal + install-rollback + oscillation breaker), and an
+experimental Canvas terminal renderer (Settings A/B). A five-area structural
+audit lives in `docs/AUDIT.md`; the design rules these changes follow are in
+`AGENTS.md`. On top of the git surface, per-host persistent SSH masters,
+multi-host workspaces, ptyd persistent panes, and the editor/package stack
+below.
 
 | Milestone | Scope | State |
 |-----------|-------|-------|
@@ -73,13 +77,13 @@ native persistent-pane engine (ptyd), and the editor/package stack below.
 | **M4** | ⌘E code panel: file tree, editor (edit/save), git diff | ✅ done |
 | **M5** | process tree (⌘K i) + ephemeral non-tmux shells (⌘K n) | ✅ done |
 | **M6** | native host manager: in-process SSH (russh), in-app passphrase, TOFU host keys | ✅ done |
-| **M7** | multi-host: several hosts at once, host chips, cross-host agent counts | ✅ built · Mac verify pending |
+| **M7** | multi-host: several hosts at once, host chips, cross-host agent counts | ✅ done (in daily use) |
 
 Post-milestones so far: persistent native panes (mymux-ptyd: splits, zoom,
 faithful snapshots, survive mymuxd restarts), the **mymux-pkg** package index
 (9 prewired entries, LSP ready at install), settings surface + attention
-notifications, and the git tooling line above. Smaller items live in
-`docs/BACKLOG.md`.
+notifications, and the git tooling line above. Deferred items are tracked in
+`docs/BACKLOG.md` (polish) and `docs/AUDIT.md` (structural).
 
 ## Layout
 
@@ -119,7 +123,11 @@ The **e2e harness** lives in `ui/ux`: a daemon (`MYMUX_ADDR=127.0.0.1:8099
 `node ui/ux/gitcheck.mjs` drive the real UI headless (Playwright-core) against
 fixture repos (`~/ux-git-test`, `~/ux-git-ops`, `~/ux-git-sub` — created by the
 checks). Every git-interaction batch ships with its own `git*check.mjs`; run
-the whole sweep before committing UI changes.
+the whole sweep before committing UI changes. Cross-cutting static guards:
+`npm --prefix ui run check:args` (every `invoke()` key in `ui/src` must match
+a snake_case Rust param on its command — kills the hostId/host_id class for
+good), and daemon-touching checks must run sandboxed (own `MYMUX_PTYD_SOCK` +
+`MYMUX_SOCKET` + port — never a shared/production daemon).
 
 Two env knobs let a throwaway/second daemon run without colliding with your main
 one: **`MYMUX_SOCKET`** (tmux control socket, default `mymux`) and **`MYMUX_ADDR`**

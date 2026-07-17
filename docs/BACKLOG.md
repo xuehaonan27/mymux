@@ -1,6 +1,24 @@
 # mymux backlog (later polish)
 
-Deferred refinements — captured so we don't lose them. Not blocking.
+Deferred refinements — captured so we don't lose them. Not blocking. Structural
+work is tracked in `docs/AUDIT.md` (deferred ledger); panel I/O + testing
+discipline rules live in `AGENTS.md`.
+
+## Shipped 2026-07-17 (reliability + parity line — ledger for the date)
+
+Terminal/input: Sogou-class IME commit rescue (`ui/src/imefix.ts`), Unicode 11
+emoji widths + ptyd wide-tail snapshot fix, ⌘=/⌘-/⌘0 font zoom, modifier-only
+presses no longer jump to bottom (scrollOnUserInput discipline), ⌘+click path
+jumps (terminal ⇄ editor ⇄ `file:line`, shared resolver), Canvas renderer
+experiment lane (Settings A/B). Editor/git: graph-first landing, per-row ✎
+git→editor jumps, tree status rows with auto-retry + reconnect self-heal,
+right-click Copy (Relative|Absolute) Path, ⌘P index caching. Multi-host:
+workspace-scoped panel swapping on host switch (editors/git/proc/hist/pkgs all
+behave). Connectivity: bind fatal surfaces, install rollback + oscillation
+breaker, SSH connect timeout, semantic outdated verdict, host probes moved off
+the open path (paint-from-cache). Tests: arg-shape static guard,
+`treectx/emojicheck/hostroutecheck/reconnectcheck/pkgsstylecheck` and the
+sandboxed harness pattern. Ledger continues below for everything NOT shipped.
 
 ## Plugin system (contract-first; decoupled per the user, 2026-07-03)
 Strategy decided with the user: no general-purpose plugin platform up front

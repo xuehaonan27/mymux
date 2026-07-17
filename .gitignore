@@ -10,6 +10,8 @@ src-tauri/resources/daemon/*
 
 # e2e proof screenshots (local run artifacts)
 ui/shots/
+# the same, when a check is launched from ui/ux as cwd
+ui/ux/shots/
 
 # CI release artifacts (matrix outputs, not sources)
 release/

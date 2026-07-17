@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
+    "check:args": "node ux/argshapecheck.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
