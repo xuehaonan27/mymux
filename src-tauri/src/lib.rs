@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use mymux_connect::{config_dir, exec_bytes, master_exec_bytes, parse_probe, run_russh_tunnel, Host, HostStore, Status, WorkReport, UNINSTALL_SCRIPT};
+use mymux_connect::{config_dir, exec_bytes, master_exec_bytes, parse_probe, run_russh_tunnel, DaemonMeta, Host, HostStore, Status, WorkReport, UNINSTALL_SCRIPT};
 use serde::Serialize;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, State};
@@ -35,6 +35,25 @@ struct ConnState {
     /// Last local port used per host, so a host keeps a stable URL across
     /// reconnects of its tunnel.
     ports: Mutex<HashMap<String, u16>>,
+    /// Latest post-connect meta probe per host (daemon version + hook map).
+    metas: Arc<Mutex<HashMap<String, HostMeta>>>,
+}
+
+/// A host's post-connect audit, refreshed on every Connected transition and
+/// after each daemon_update: whether the remote daemon matches this app's
+/// pin, and which agent hooks are installed.
+#[derive(Default, Clone, Serialize)]
+struct HostMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    daemon: Option<DaemonMeta>,
+    hooks: HashMap<String, bool>,
+}
+
+/// The `mymux:hostmeta` event payload: which host a meta refresh belongs to.
+#[derive(Clone, Serialize)]
+struct HostMetaMsg {
+    host_id: String,
+    meta: HostMeta,
 }
 
 /// The `mymux:status` event payload: which host a status belongs to.
@@ -233,6 +252,59 @@ async fn agent_hook_status(
     Ok(out)
 }
 
+/// The latest post-connect meta probe for a host (daemon version + hooks),
+/// so a UI that attached after the event can still render it.
+#[tauri::command(rename_all = "snake_case")]
+fn host_meta(state: State<'_, ConnState>, host_id: String) -> Option<HostMeta> {
+    state.metas.lock().unwrap().get(&host_id).cloned()
+}
+
+/// Run one meta probe over a live master and publish it (cache + event). Both
+/// call sites — the Connected-transition watcher and daemon_update — conflate
+/// here so "what the UI shows" always comes from the same store.
+async fn refresh_host_meta(
+    metas: &Arc<Mutex<HashMap<String, HostMeta>>>,
+    app: &AppHandle,
+    host_id: &str,
+    master: &std::sync::Arc<mymux_connect::Master>,
+) {
+    let daemon = mymux_connect::probe_daemon_meta(master).await.ok();
+    let mut hooks = HashMap::new();
+    for (agent, _label) in mymux_connect::agenthook::AGENTS {
+        if let Ok(on) = mymux_connect::agenthook::hook_status(master, agent).await {
+            hooks.insert(agent.to_string(), on);
+        }
+    }
+    let meta = HostMeta { daemon, hooks };
+    metas.lock().unwrap().insert(host_id.to_string(), meta.clone());
+    let _ = app.emit(
+        "mymux:hostmeta",
+        HostMetaMsg {
+            host_id: host_id.to_string(),
+            meta,
+        },
+    );
+}
+
+/// Push this app's daemon bundle to a connected host and run the installer —
+/// the user-confirmed UPDATE for a live, outdated daemon (the zero-touch
+/// path only fires when the daemon won't start at all). The installer swaps
+/// binaries atomically and restarts ONLY mymuxd under systemd
+/// (KillMode=process: tmux sessions survive; ptyd is never restarted, so
+/// persistent panes ride through — throwaway ⌁ panes do die). The tunnel
+/// flaps back on its own and a fresh meta probe re-clears the badge.
+#[tauri::command(rename_all = "snake_case")]
+async fn daemon_update(
+    app: AppHandle,
+    state: State<'_, ConnState>,
+    host_id: String,
+) -> Result<String, String> {
+    let master = hook_master(&state, &host_id)?;
+    let out = mymux_connect::push_daemon_update(&master).await?;
+    refresh_host_meta(&state.metas, &app, &host_id, &master).await;
+    Ok(out)
+}
+
 /// Install (or uninstall, with `install: false`) one agent's notify hooks.
 #[tauri::command(rename_all = "snake_case")]
 async fn agent_hook(
@@ -271,14 +343,29 @@ async fn connect(
     let master = std::sync::Arc::new(mymux_connect::Master::new(cfg.clone(), passphrase));
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Status>(32);
 
-    // Forward tunnel status to the webview, tagged with the host id.
+    // Forward tunnel status to the webview, tagged with the host id. Every
+    // transition INTO Connected fires one background meta probe (daemon
+    // version audit + agent-hook review) on the same master — this is the
+    // check that also catches a still-running OLD daemon, which the
+    // zero-touch installer never sees (it only acts on DaemonUnreachable).
     let statuses = state.statuses.clone();
+    let metas = state.metas.clone();
     let hid = host_id.clone();
     let app2 = app.clone();
+    let master3 = master.clone();
     let forwarder = tauri::async_runtime::spawn(async move {
+        let mut was_connected = false;
         while let Some(s) = rx.recv().await {
             statuses.lock().unwrap().insert(hid.clone(), s.clone());
-            let _ = app2.emit("mymux:status", StatusEvent { host_id: hid.clone(), status: s });
+            let _ = app2.emit("mymux:status", StatusEvent { host_id: hid.clone(), status: s.clone() });
+            let now_connected = s == Status::Connected;
+            if now_connected && !was_connected {
+                let (m, h, a, ms) = (master3.clone(), hid.clone(), app2.clone(), metas.clone());
+                tauri::async_runtime::spawn(async move {
+                    refresh_host_meta(&ms, &a, &h, &m).await;
+                });
+            }
+            was_connected = now_connected;
         }
     });
     let master2 = master.clone();
@@ -309,7 +396,9 @@ pub fn run() {
             probe_remote,
             uninstall_remote,
             agent_hook_status,
-            agent_hook
+            agent_hook,
+            host_meta,
+            daemon_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running the mymux app");

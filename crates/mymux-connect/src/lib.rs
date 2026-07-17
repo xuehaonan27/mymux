@@ -24,8 +24,9 @@ pub mod agenthook;
 pub mod bundle;
 pub mod russh_tunnel;
 pub use russh_tunnel::{
-    exec_bytes, exec_script, master_exec_bytes, master_exec_script, parse_probe, run_russh_tunnel,
-    HostConfig, Master, Status, WorkReport, UNINSTALL_SCRIPT,
+    exec_bytes, exec_script, master_exec_bytes, master_exec_script, parse_probe, probe_daemon_meta,
+    push_daemon_update, run_russh_tunnel, DaemonMeta, HostConfig, Master, Status, WorkReport,
+    UNINSTALL_SCRIPT,
 };
 pub mod hosts;
 pub use hosts::{config_dir, Host, HostStore};

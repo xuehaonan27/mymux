@@ -241,7 +241,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
       const open = el('button', 'host-btn small', 'Open');
       open.onclick = main.onclick as () => void;
       const un = uninstallBtn(h);
-      const bell = el('button', 'host-icon', '🔔');
+      const bell = el('button', 'host-icon hookbell', '🔔');
       bell.title = 'agent notify hooks (Claude / Codex / Kimi / Open Code)';
       bell.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -256,6 +256,21 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
         void showList();
       };
       card.append(open, bell, un, dis);
+      // Post-connect audit (daemon version + hook map) — painted from the
+      // cache, fetched once if the event predated this card.
+      card.dataset.hostId = h.id;
+      paintMeta(card, h.id);
+      if (!hostMetaCache.has(h.id)) {
+        invoke('host_meta', { hostId: h.id })
+          .then((m) => {
+            if (m) {
+              hostMetaCache.set(h.id, m as HostMeta);
+              const c = document.querySelector(`[data-host-id="${h.id}"]`);
+              if (c instanceof HTMLElement) paintMeta(c, h.id);
+            }
+          })
+          .catch(() => {});
+      }
     } else if (conn) {
       // A background tunnel is still trying (connecting/reconnecting): the
       // only sensible action is to stop it.
@@ -617,6 +632,87 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   }
 
   void listen<StatusEvent>('mymux:status', (ev) => onStatus(ev.payload));
+
+  // ---- post-connect meta (daemon version audit + hook review) --------------
+  // Refreshed by the daemon on every Connected transition and after each
+  // daemon_update; cards paint it from this cache (fetch-once fallback when
+  // the card postdates the event).
+  interface DaemonMeta {
+    current: string;
+    expected: string;
+    outdated: boolean;
+  }
+  interface HostMeta {
+    daemon?: DaemonMeta;
+    hooks: Record<string, boolean>;
+  }
+  const hostMetaCache = new Map<string, HostMeta>();
+
+  function paintMeta(card: HTMLElement, hostId: string) {
+    const meta = hostMetaCache.get(hostId);
+    // 🔔 attention dot: any agent missing its notify hooks on this host.
+    const bellEl = card.querySelector('.hookbell');
+    if (bellEl && meta) {
+      const anyMissing = Object.values(meta.hooks).some((on) => !on);
+      bellEl.classList.toggle('attn', anyMissing);
+      (bellEl as HTMLElement).title = anyMissing
+        ? 'agent notify hooks — some agents are NOT covered (click to review)'
+        : 'agent notify hooks (Claude / Codex / Kimi / Open Code)';
+    }
+    // Daemon line under the card subtitle: quiet when current, amber + a
+    // (two-click armed) Update when the remote runs an old mymuxd.
+    card.querySelector('.host-metaline')?.remove();
+    if (!meta?.daemon) return;
+    const d = meta.daemon;
+    const line = el('div', 'host-card-sub host-metaline');
+    const txt = document.createElement('span');
+    if (d.outdated) {
+      txt.textContent = `daemon ${d.current || 'unknown'} → ${d.expected} `;
+      txt.className = 'stale';
+      line.appendChild(txt);
+      const up = el('button', 'pkgs-btn host-update', 'Update') as HTMLButtonElement;
+      up.title =
+        'push the current daemon + restart it (remote tmux / ∞ panes survive; throwaway ⌁ panes die)';
+      up.onclick = async (e) => {
+        e.stopPropagation();
+        if (up.dataset.armed !== '1') {
+          up.dataset.armed = '1';
+          up.textContent = 'sure?';
+          window.setTimeout(() => {
+            up.dataset.armed = '';
+            up.textContent = 'Update';
+          }, 2000);
+          return;
+        }
+        up.dataset.armed = '';
+        up.disabled = true;
+        up.textContent = 'updating…';
+        try {
+          await invoke('daemon_update', { hostId });
+          // The post-update probe repaints via mymux:hostmeta; the tunnel
+          // flaps (Reconnecting → Connected) while the daemon restarts.
+        } catch (err) {
+          up.textContent = 'failed — retry';
+          up.disabled = false;
+          console.warn('daemon_update', err);
+        }
+      };
+      line.appendChild(up);
+    } else {
+      txt.textContent = `daemon ${d.current || d.expected}`;
+      txt.className = 'current';
+      line.appendChild(txt);
+    }
+    // The card is a centered flex ROW of [main][buttons]; the meta line must
+    // live inside main (the flex:1 text column), under the address sub-line.
+    card.querySelector('.host-card-main')?.appendChild(line);
+  }
+
+  void listen<{ host_id: string; meta: HostMeta }>('mymux:hostmeta', (ev) => {
+    hostMetaCache.set(ev.payload.host_id, ev.payload.meta);
+    const card = document.querySelector(`[data-host-id="${ev.payload.host_id}"]`);
+    if (card instanceof HTMLElement) paintMeta(card, ev.payload.host_id);
+  });
 
   void showList();
   // The boot gate starts shown — tell the modal stack.

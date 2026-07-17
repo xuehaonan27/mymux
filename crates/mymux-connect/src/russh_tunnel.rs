@@ -547,6 +547,63 @@ async fn resolve_bundle_bytes(master: &Master, uname_sm: &str) -> Result<Vec<u8>
     }
 }
 
+/// What the post-connect meta check reports about the remote daemon.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DaemonMeta {
+    /// Remote `mymuxd --version` output ("" = not installed / not answering).
+    pub current: String,
+    /// This app's pinned expectation: the manifest's version when it covers
+    /// the host's arch, else the embedded x86_64 bundle's ("" in a bundle-less
+    /// dev build — nothing to compare against).
+    pub expected: String,
+    /// The expectation is known and the probe differs — a push brings the
+    /// host current. False when either side is unknown or they match.
+    pub outdated: bool,
+}
+
+const UNAME_PROBE: &str = "uname -sm 2>/dev/null || true";
+const VERSION_PROBE: &str = "(timeout 2 ~/.local/bin/mymuxd --version 2>/dev/null || timeout 2 mymuxd --version 2>/dev/null || true) | head -1";
+/// Upload atomically (.new → rename) so a half-written push can't poison a
+/// later install.
+const PUT_BUNDLE: &str = "mkdir -p ~/.local/share/mymux/dist && cat > ~/.local/share/mymux/dist/daemon.tgz.new && mv -f ~/.local/share/mymux/dist/daemon.tgz.new ~/.local/share/mymux/dist/daemon.tgz";
+
+/// Remote daemon version vs this app's pin, over one live master — the
+/// post-connect AUDIT that runs even when the tunnel came up fine (an old
+/// daemon that still answers is exactly the case maybe_install never saw).
+pub async fn probe_daemon_meta(master: &Master) -> Result<DaemonMeta, String> {
+    let uname = master_exec_script(master, UNAME_PROBE, Duration::from_secs(10))
+        .await
+        .unwrap_or_default();
+    let probe = master_exec_script(master, VERSION_PROBE, Duration::from_secs(20))
+        .await
+        .map_err(|e| format!("probe failed: {e:?}"))?;
+    let expected = expected_version(&uname);
+    let current = probe.trim().to_string();
+    Ok(DaemonMeta {
+        outdated: !expected.is_empty() && current != expected,
+        current,
+        expected,
+    })
+}
+
+/// Push this app's daemon bundle and run the installer — the UPDATE path for
+/// a live host (maybe_install's first-aid path shares it). The installer
+/// swaps binaries atomically and restarts ONLY mymuxd (systemd
+/// KillMode=process, tmux sessions survive); ptyd is never restarted here, so
+/// persistent panes ride through. Returns the installer's log lines.
+pub async fn push_daemon_update(master: &Master) -> Result<String, String> {
+    let uname = master_exec_script(master, UNAME_PROBE, Duration::from_secs(10))
+        .await
+        .unwrap_or_default();
+    let bytes = resolve_bundle_bytes(master, &uname).await?;
+    master_exec_bytes(master, PUT_BUNDLE, &bytes, Duration::from_secs(600))
+        .await
+        .map_err(|e| format!("bundle upload failed: {e:?}"))?;
+    master_exec_script(master, INSTALL_SCRIPT, Duration::from_secs(300))
+        .await
+        .map_err(|e| format!("installer failed: {e:?}"))
+}
+
 /// Daemon start failed: when the host's mymuxd is missing or outdated, push
 /// the embedded bundle and run the installer — all THREE execs (probe,
 /// upload, installer) riding the SAME live master, one auth total. Ok(true) =
@@ -557,30 +614,15 @@ async fn maybe_install(
     master: &Master,
     status: &mpsc::Sender<Status>,
 ) -> Result<bool, String> {
-    let uname = master_exec_script(master, "uname -sm 2>/dev/null || true", Duration::from_secs(10))
-        .await
-        .unwrap_or_default();
-    const PROBE: &str = "(timeout 2 ~/.local/bin/mymuxd --version 2>/dev/null || timeout 2 mymuxd --version 2>/dev/null || true) | head -1";
-    let probe = master_exec_script(master, PROBE, Duration::from_secs(20))
-        .await
-        .map_err(|e| format!("probe failed: {e:?}"))?;
-    let expected = expected_version(&uname);
-    if probe.trim() == expected && !expected.is_empty() {
+    let meta = probe_daemon_meta(master).await?;
+    if !meta.outdated && !meta.expected.is_empty() {
         return Ok(false); // current — the start failure is something else
     }
-    if expected.is_empty() && probe.trim().is_empty() {
+    if meta.expected.is_empty() && meta.current.is_empty() {
         return Err("mymuxd is not installed on the host, and this app has neither a release manifest nor an embedded bundle (see ci-publish-release.sh / build-daemon-bundle.sh)".into());
     }
     let _ = status.send(Status::Installing).await;
-    let bytes = resolve_bundle_bytes(master, &uname).await?;
-    // Upload atomically (.new → rename), then run the box-side installer.
-    const PUT: &str = "mkdir -p ~/.local/share/mymux/dist && cat > ~/.local/share/mymux/dist/daemon.tgz.new && mv -f ~/.local/share/mymux/dist/daemon.tgz.new ~/.local/share/mymux/dist/daemon.tgz";
-    master_exec_bytes(master, PUT, &bytes, Duration::from_secs(600))
-        .await
-        .map_err(|e| format!("bundle upload failed: {e:?}"))?;
-    let out = master_exec_script(master, INSTALL_SCRIPT, Duration::from_secs(300))
-        .await
-        .map_err(|e| format!("installer failed: {e:?}"))?;
+    let out = push_daemon_update(master).await?;
     for line in out.lines().take(12) {
         eprintln!("mymux-connect install: {line}");
     }

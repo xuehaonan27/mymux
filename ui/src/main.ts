@@ -257,11 +257,17 @@ async function agentAskOp(op: 'defer' | 'consume', w?: Workspace, win?: WinInfo)
     return;
   }
   try {
-    await fetch(`${ws.apiBase}/agent/${op}`, {
+    const r = await fetch(`${ws.apiBase}/agent/${op}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pane: target.agent_pane }),
     });
+    if (r.status === 404) {
+      // The remote mymuxd predates these endpoints — say so instead of
+      // pretending the ask was triaged.
+      toast('this daemon is too old — update it from the host card (⏻ row)');
+      return;
+    }
   } catch {
     toast('daemon unreachable — ask not updated.');
     return;

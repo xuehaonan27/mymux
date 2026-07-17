@@ -1537,6 +1537,37 @@ body.has-winalpha #hostbar {
   color: #f85149;
   font: 10px var(--mono);
 }
+.host-icon.attn {
+  position: relative;
+  color: #d29922; /* amber: something on this host wants a look */
+}
+.host-icon.attn::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #d29922;
+}
+.host-metaline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 11px;
+}
+.host-metaline .stale {
+  color: #d29922; /* daemon behind this app's pin — Update offered */
+}
+.host-metaline .current {
+  opacity: 0.55;
+}
+.host-update {
+  padding: 0 8px;
+  font-size: 10px;
+}
 .host-field {
   display: flex;
   flex-direction: column;

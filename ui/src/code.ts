@@ -1352,7 +1352,13 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
         `${apiBase()}/fs/search?${paneQ(s.pane)}${rootQ(s.root)}q=${encodeURIComponent(q)}&mode=${content ? 'content' : 'name'}`,
       );
       if (seq !== searchSeq || current !== s) return; // a newer query/root won
-      const hits = r.ok ? ((await r.json()) as SearchHit[]) : [];
+      if (!r.ok) {
+        // An old daemon (no /fs/search) must not masquerade as "no matches".
+        if (r.status === 404) flashHint('search needs a newer daemon — update from the host card');
+        renderHits([], content);
+        return;
+      }
+      const hits = (await r.json()) as SearchHit[];
       renderHits(hits, content);
     } catch {
       /* daemon unreachable — leave the tree be */
