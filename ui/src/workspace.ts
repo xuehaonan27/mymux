@@ -7,10 +7,12 @@
 import { Terminal } from '@xterm/xterm';
 import type { ITheme } from '@xterm/xterm';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
+import { CanvasAddon } from '@xterm/addon-canvas';
 import { modHeld } from './modkey';
 import { pathSpans } from './pathjump';
 import { imeFixEnabled, installImeFix } from './imefix';
 import { measureCell } from './metrics';
+import { getPrefs } from './prefs';
 
 export type Kind = 'leaf' | 'cols' | 'rows';
 export interface LayoutNode {
@@ -486,6 +488,17 @@ export class Workspace {
       allowProposedApi: true,
     });
     term.open(el);
+    // Experimental canvas renderer (pref): cell-rasterized — no DOM/AA/
+    // letter-spacing artifact class at all, the family that keeps biting on
+    // WKWebView's translucent compositing. Pref `renderer: 'canvas'` opts
+    // in per-pane from here on; any load failure falls back to DOM quietly.
+    if (getPrefs().renderer === 'canvas') {
+      try {
+        term.loadAddon(new CanvasAddon());
+      } catch (e) {
+        console.warn('canvas renderer unavailable, staying on DOM', e);
+      }
+    }
     // Unicode 11 widths: xterm's default V6 table treats every emoji as
     // width 1 — the DOM renderer's negative letter-spacing then COLLAPSES
     // the span (typed 👌🏻 paints over the next glyph's left half) and every
