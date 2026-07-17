@@ -8,5 +8,8 @@ src-tauri/resources/daemon/*
 .DS_Store
 .secret/
 
+# e2e proof screenshots (local run artifacts)
+ui/shots/
+
 # CI release artifacts (matrix outputs, not sources)
 release/

@@ -54,6 +54,7 @@ check('daemon sees lib initialized', s.some((x) => x.path === 'lib' && x.initial
 sh(`echo dirt >> ${R}/lib/lib.txt`);
 await page.click('#btn-git');
 await page.locator('.git-panel.show').waitFor({ timeout: 10000 });
+await page.click('.git-tab[data-page="changes"]'); // default landing is the History graph now
 await page.locator('.git-changes-side .git-detail-title').first().waitFor({ timeout: 10000 });
 check('graph badges the submodule S', (await page.locator('.git-file', { hasText: 'lib' }).locator('.gbadge.gsub').count()) === 1);
 check('plain files keep their letter', (await page.locator('.git-file .gbadge.gsub').count()) === 1);

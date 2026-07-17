@@ -3,6 +3,7 @@ import './style.css';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { copyText } from './clipboard';
+import { parseToken, resolvePath, paneRoot, parentOf, baseOf } from './pathjump';
 import { measureCell } from './metrics';
 import type { CodePanel, CodePanelOpts } from './code';
 import { initProcPanel } from './proc';
@@ -509,12 +510,47 @@ function ensureWorkspace(id: string, label: string, port: number): Workspace {
       onOpenHistory(w, pane) {
         histPanel.open(w, pane);
       },
+      onJumpPath(w, pane, token) {
+        void jumpToToken(w, pane, token);
+      },
       onOpenHosts: isTauri ? () => hostManager?.open() : undefined,
     },
   });
   workspaces.set(id, w);
   w.connect();
   return w;
+}
+
+// ⌘+click from a terminal: resolve the token against THAT pane's cwd and open
+// the code panel at the file (a :line lands the cursor on it) or root it at
+// the directory. Files under the pane cwd keep the wider root context;
+// anything else hops the panel to the file's parent dir.
+async function jumpToToken(w: Workspace, pane: number, token: string) {
+  const parsed = parseToken(token);
+  if (!parsed) return;
+  if (parsed.path.includes('~')) {
+    toast('~ paths are not supported — use an absolute path');
+    return;
+  }
+  const base = await paneRoot(w.apiBase, pane);
+  if (!base) {
+    toast('pane cwd unknown — cannot resolve the path');
+    return;
+  }
+  const target = await resolvePath(w.apiBase, base, parsed.path);
+  if (!target) {
+    toast(`no such path: ${parsed.path}`);
+    return;
+  }
+  if (target.dir) {
+    codePanel.openRoot(target.abs);
+    return;
+  }
+  if (target.abs.startsWith(`${base}/`)) {
+    codePanel.openAt(base, target.abs.slice(base.length + 1), parsed.line);
+  } else {
+    codePanel.openAt(parentOf(target.abs), baseOf(target.abs), parsed.line);
+  }
 }
 
 function switchTo(id: string) {
@@ -878,9 +914,16 @@ const codePanel = {
   escape: () => codeReal?.escape() ?? false,
   retheme: () => codeReal?.retheme(),
   /** The git graph's conflict jump: open a file in the editor. */
-  openAt: (root: string, path: string) => {
+  openAt: (root: string, path: string, line?: number) => {
     void ensureCode().then((c) => {
-      c.openAt(root, path);
+      c.openAt(root, path, line);
+      noteModal('code', true);
+    });
+  },
+  /** Terminal/editor dir jump: root the panel at an absolute directory. */
+  openRoot: (root: string) => {
+    void ensureCode().then((c) => {
+      c.openRoot(root);
       noteModal('code', true);
     });
   },

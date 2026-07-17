@@ -24,6 +24,7 @@ await page.keyboard.press('Enter');
 await page.waitForTimeout(600);
 await page.click('#btn-git');
 await page.locator('.git-panel.show').waitFor({ timeout: 10000 });
+await page.click('.git-tab[data-page="changes"]'); // default landing is the History graph now
 await page.locator('.git-changes-side .git-detail-title').first().waitFor({ timeout: 10000 });
 
 // Dirty the tree, refresh, then the uncommitted card must list it.

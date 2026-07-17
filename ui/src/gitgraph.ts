@@ -23,7 +23,8 @@ export interface GitGraphOpts {
   getApiBase: () => string;
   /** Transient notices (op results, failures). */
   toast: (msg: string) => void;
-  /** Conflict jump: open a file in the code panel's editor. */
+  /** Jump back to the editor: open a file in the code panel (conflict rows,
+   * the per-row ✎ buttons, the workbench diff header). */
   openInCode?: (root: string, path: string) => void;
   /** Optional syntax-language resolver for the workbench's split diff —
    * passes through to the code panel's langFor when it has loaded. */
@@ -97,8 +98,10 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
   // Repo/session state, resolved on open.
   let root: string | null = null;
   let pane: number | null = null;
-  /** The git surface's two pages: the working-tree workbench, or history. */
-  let page: 'changes' | 'history' = 'changes';
+  /** The git surface's two pages: the working-tree workbench, or history.
+   * The branch graph is the landing view — the "tree" users orient by; deep
+   * links set the page explicitly, and reopening keeps the last-used one. */
+  let page: 'changes' | 'history' = 'history';
   /** '' = every ref, '~current' = HEAD only, else this branch's history. */
   let branchFilter = '';
   /** Free-text filter over the loaded commits (subject/author/hash/refs). */
@@ -653,13 +656,24 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
   }
 
   /** Files (click → per-file diff) + whole-revision diff, shared by the
-   * commit, compare, and stash details. */
+   * commit, compare, and stash details. The ✎ jumps to the editor's view of
+   * the file in the working tree (may be gone from older commits — the editor
+   * says so plainly). */
   function appendFilesAndDiff(container: HTMLElement, d: ShowResp, perFile: (path: string) => Promise<ShowResp | null>) {
     const list = el('div', 'git-files');
     for (const f of d.files) {
       const row = el('div', 'git-file');
       row.appendChild(el('span', `gbadge g${f.status === 'A' ? 'new' : f.status === 'D' ? 'del' : 'mod'}`, f.status));
       row.appendChild(el('span', 'git-file-path', f.path));
+      if (opts.openInCode && root) {
+        const obtn = el('button', 'git-open-btn', '✎');
+        obtn.title = 'open in the editor';
+        obtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          opts.openInCode!(root!, f.path);
+        });
+        row.appendChild(obtn);
+      }
       row.addEventListener('click', async () => {
         const fd = await perFile(f.path);
         container.querySelector('.git-diff')?.remove();
@@ -709,7 +723,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       el(
         'div',
         'git-detail-hint',
-        files.length ? 'click a file for the stageable diff · + stage / − unstage' : 'working tree clean',
+        files.length ? 'click a file for the stageable diff · + stage / − unstage · ✎ editor' : 'working tree clean',
       ),
     );
     const banner = renderConflictBanner();
@@ -749,6 +763,17 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
         void op('/git/discard', { path: f.path }, 'discarded');
       });
       row.appendChild(dbtn);
+      // Jump back to the editor for this file (mirrors the diff header's
+      // "open in editor" — the row itself opens the stageable diff).
+      if (opts.openInCode && root) {
+        const obtn = el('button', 'git-open-btn', '✎');
+        obtn.title = 'open in the editor';
+        obtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          opts.openInCode!(root!, f.path);
+        });
+        row.appendChild(obtn);
+      }
       if (f.submodule) {
         const sb = el('span', 'gbadge gsub', 'S');
         sb.title = 'submodule — view the gitlink diff here; enter it from the code panel';
@@ -1351,7 +1376,9 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       closeMenu();
       panel.classList.toggle('show', open);
       if (open) {
-        page = 'changes'; // the everyday page; jumps land where they belong
+        // No page forcing: a fresh surface lands on the History graph (the
+        // initial value above); afterwards you come back to whichever page
+        // you last used. Explicit jump-ins set the page themselves.
         selected = '';
         rootOverride = null;
         fileFilter = null;

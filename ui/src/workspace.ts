@@ -6,6 +6,9 @@
 
 import { Terminal } from '@xterm/xterm';
 import type { ITheme } from '@xterm/xterm';
+import { modHeld } from './modkey';
+import { pathSpans } from './pathjump';
+import { imeFixEnabled, installImeFix } from './imefix';
 
 export type Kind = 'leaf' | 'cols' | 'rows';
 export interface LayoutNode {
@@ -70,6 +73,9 @@ export interface WorkspaceHooks {
   onOpenHosts?(): void;
   /** Open the raw terminal-history pager for a pane (scroll-top chip). */
   onOpenHistory?(w: Workspace, pane: number): void;
+  /** ⌘+click on a path-ish token in a terminal (modifier-gated links). The
+   * shell resolves it against the pane's cwd and opens the code panel there. */
+  onJumpPath?(w: Workspace, pane: number, token: string): void;
 }
 
 interface Pane {
@@ -202,6 +208,9 @@ export class Workspace {
     // Repaint after display:none and pick up any size drift while hidden.
     for (const p of this.panes.values()) p.term.refresh(0, Math.max(0, p.term.rows - 1));
     this.sendResize();
+    // Un-hiding a workspace is the same re-composite moment (host switch on a
+    // translucent window): nudge once the reflowed content is on screen.
+    this.ghostBust(120);
     if (this.activePane != null) this.panes.get(this.activePane)?.term.focus();
   }
 
@@ -272,11 +281,27 @@ export class Workspace {
     if (p) p.term.write(new Uint8Array(buf, 4));
   }
 
+  /** macOS translucent-compositor nudge (the main.ts forceRepaint twin): an
+   * instant re-composite, optionally re-fired after `delayMs` — content that
+   * lands in LATER frames (window-switch snapshot bytes) repaints with
+   * distorted font colours unless the layer is nudged again once it exists. */
+  private ghostBust(delayMs = 0) {
+    if (!document.body.classList.contains('has-winalpha')) return;
+    const el = this.root;
+    const flick = () => {
+      el.style.opacity = '0.999';
+      void el.offsetHeight; // reflow: the sub-1 opacity flip re-composites
+      el.style.opacity = '';
+    };
+    if (delayMs > 0) window.setTimeout(flick, delayMs);
+    else flick();
+  }
+
   // Place each leaf pane at its exact cell rectangle; dispose vanished panes.
   private applyLayout(root: LayoutNode) {
     const { cellW, cellH } = this.style;
     const seen = new Set<number>();
-    const countBefore = this.panes.size;
+    const idsBefore = new Set(this.panes.keys());
     const place = (n: LayoutNode) => {
       if (n.kind === 'leaf' && n.pane != null) {
         const p = this.panes.get(n.pane) ?? this.makePane(n.pane);
@@ -301,15 +326,15 @@ export class Workspace {
         this.panes.delete(pid);
       }
     }
-    // Transparent-window ghost buster (see main.ts forceRepaint): a removed
-    // pane's pixels can linger in the macOS compositor otherwise — and the
-    // SAME class shows on window switches (layout set changes in either
-    // direction: shrinking away from a window, growing back into it).
-    if (seen.size !== countBefore && document.body.classList.contains('has-winalpha')) {
-      const el = this.root;
-      el.style.opacity = '0.999';
-      void el.offsetHeight;
-      el.style.opacity = '';
+    // Transparent-window ghost buster: removed pixels linger in the macOS
+    // compositor otherwise. A WINDOW SWITCH swaps the pane-ID set — very
+    // often with an EQUAL count (1↔1), which a size check misses — and the
+    // new window's snapshot bytes land a frame or two later, so the nudge
+    // fires both at once and after they have painted.
+    const setSwapped = seen.size !== idsBefore.size || [...seen].some((id) => !idsBefore.has(id));
+    if (setSwapped) {
+      this.ghostBust();
+      this.ghostBust(120);
     }
     // The active-pane ring exists to tell SPLIT panes apart — around a single
     // full-window pane it's just an ugly frame.
@@ -410,6 +435,35 @@ export class Workspace {
     });
     term.open(el);
     term.onData((d) => this.sendInput(id, d));
+
+    // IME rescue for the macOS app (WKWebView drops Sogou-style non-composition
+    // commits — see imefix.ts); a no-op elsewhere.
+    if (imeFixEnabled()) installImeFix(term, (d) => this.sendInput(id, d));
+
+    // ⌘+click path links (VS Code-style): provideLinks is modifier-GATED —
+    // hold ⌘ and path-ish tokens underline and become clickable; with the
+    // modifier up the terminal behaves exactly as before. The shell resolves
+    // each token against THIS pane's cwd and opens the code panel there.
+    term.registerLinkProvider({
+      provideLinks: (y, cb) => {
+        if (!modHeld()) {
+          cb(undefined);
+          return;
+        }
+        const line = term.buffer.active.getLine(y - 1);
+        const spans = line ? pathSpans(line.translateToString(false)) : [];
+        cb(
+          spans.map((sp) => ({
+            range: { start: { x: sp.start + 1, y }, end: { x: sp.start + sp.len, y } },
+            text: sp.raw,
+            decorations: { underline: true, pointerCursor: true },
+            activate: () => {
+              if (modHeld()) this.hooks.onJumpPath?.(this, id, sp.raw);
+            },
+          })),
+        );
+      },
+    });
 
     // Scroll-top chip: the xterm buffer starts here, but the raw history log
     // goes way further back — offer the pager when the user hits the top.

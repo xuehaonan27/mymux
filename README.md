@@ -312,7 +312,10 @@ notifications blocked — allow them in the site/app settings first.
 
 ## Git surface (⌘K v / the branch button)
 
-One button, one surface, two pages — the repo's whole story.
+One button, one surface, two pages — the repo's whole story. It opens on the
+**History** graph (the map you orient by); reopening within a session returns
+to whichever page you last used, and the deep links below land on their page
+no matter what.
 
 **Changes** (the working-tree workbench): the uncommitted section (per-file
 ＋/− stage, two-click discard, Stage/Unstage-all, the commit box with smart
@@ -324,8 +327,11 @@ the whole file) or split (HEAD/index ↔ working tree), with sub-hunk
 (un)staging rebuilt into reduced patches and applied over `git apply
 --cached`. Conflicted rows jump into the editor instead, which shows VS
 Code-style **Accept Current / Incoming / Both** bars above each conflict
-block. Submodules are flagged with a purple **S**; clicking enters them as
-their own repos.
+block. Every file row carries a **✎** that jumps back into the editor on that
+file (the reverse of the editor's deep links); commit/stash detail rows have
+the same ✎ to the file's working-tree copy — as does the diff header's *open
+in editor*. Submodules are flagged with a purple **S**; clicking enters them
+as their own repos.
 
 **History** (pure swim-lane topology): branches/merges in an 8-color lane
 palette, 200-commit infinite-scroll paging, a branch dropdown and free-text
@@ -355,7 +361,12 @@ workbench), CodeMirror editor on the right (loaded on first use, so the app
 stays small). **⌘P** fuzzy-opens any file in the repo; every open file keeps
 its own buffer (dirty `●`, two-click close) with undo history preserved.
 ⌘S saves (and feeds the LSP's `didSave`, so compiler-tier diagnostics land
-too). Per-file buttons in the header: **Blame** (the gutter above), **Hist**
+too). **Path jumps (⌘+click)**: hold ⌘ and path-ish tokens underline like in
+VS Code — in every terminal pane, and inside the editor on path tokens.
+Clicking resolves the token against that pane's cwd (or the panel's root) and
+opens the file — a trailing `:line[:col]` lands the cursor there, like
+`./src/a.rs:33` from compiler output — or re-roots the panel when it names a
+directory. Per-file buttons in the header: **Blame** (the gutter above), **Hist**
 (the file's history in the git surface), and **Prev** for markdown — rendered
 sanitized with relative images served through `/fs/raw`. A root switcher
 (↑ parent · ⌂ pane cwd · ⎇ repo toplevel) scopes every view. Images and other

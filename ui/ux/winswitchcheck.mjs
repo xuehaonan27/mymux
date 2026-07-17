@@ -69,6 +69,31 @@ await page.waitForTimeout(700);
 check('win2 shows GREEN again', (await activeTermText()).includes('GREENBB-MARKER-B'));
 check('win2 still has no RED bleed', !(await activeTermText()).includes('REDAA-MARKER-A'));
 
+// The macOS translucent-compositor nudge must fire on an EQUALLY-SIZED swap
+// (1 pane ↔ 1 pane): simulate the app's has-winalpha class and count style
+// flips on the workspace root across two switches. Headless can't see the
+// compositor fringe itself (Mac-verify still applies) — this pins the trigger
+// so the equal-count case can't silently regress to zero nudges.
+await page.evaluate(() => document.body.classList.add('has-winalpha'));
+const flips = await page.evaluate(
+  () =>
+    new Promise((resolve) => {
+      const rootNode = document.querySelector('.workspace');
+      let n = 0;
+      const mo = new MutationObserver((ms) => {
+        for (const m of ms) if (m.type === 'attributes' && m.attributeName === 'style') n++;
+      });
+      mo.observe(rootNode, { attributes: true });
+      document.querySelectorAll('.tab')[0].click(); // → win 1
+      setTimeout(() => document.querySelectorAll('.tab')[1].click(), 250); // → win 2
+      setTimeout(() => {
+        mo.disconnect();
+        resolve(n);
+      }, 900);
+    }),
+);
+check('translucent-mode equal-size swap nudges repaints (flips ≥ 4)', flips >= 4, `${flips}`);
+
 // Hue sanity without feeding ESC to the tty: colored output via printf with
 // quoted \$ sequences inside the pane (xterm renders the red tile there).
 await page.locator('.tab').first().click();

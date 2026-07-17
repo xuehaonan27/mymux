@@ -1065,6 +1065,12 @@ body.has-winalpha #hostbar {
 .trow.git-ign {
   opacity: 0.45;
 }
+/* ⌘-held path tokens inside the editor (jump-on-click, see workspace's
+ * modifier-gated terminal links for the same gesture). */
+.cm-jumplink {
+  text-decoration: underline;
+  cursor: pointer;
+}
 #code-path {
   color: #c5cdd9;
 }
@@ -2167,6 +2173,20 @@ body.has-winalpha #hostbar {
   color: #f85149;
   border-color: #f85149;
   background: rgba(248, 81, 73, 0.12);
+}
+.git-open-btn {
+  flex: 0 0 18px;
+  padding: 0 2px;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: 11px/16px var(--mono);
+}
+.git-open-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 .git-commit-row {
   display: flex;

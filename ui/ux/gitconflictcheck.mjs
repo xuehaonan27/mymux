@@ -46,6 +46,7 @@ await page.keyboard.press('Enter');
 await page.waitForTimeout(600);
 await page.click('#btn-git');
 await page.locator('.git-panel.show').waitFor({ timeout: 10000 });
+await page.click('.git-tab[data-page="changes"]'); // default landing is the History graph now
 await page.locator('.git-changes-side .git-detail-title').first().waitFor({ timeout: 10000 });
 
 // 1. The uncommitted card carries the conflict banner.
@@ -80,6 +81,7 @@ await page.keyboard.press('Escape');
 await page.waitForTimeout(300);
 await page.click('#btn-git');
 await page.locator('.git-panel.show').waitFor({ timeout: 10000 });
+await page.click('.git-tab[data-page="changes"]'); // default landing is the History graph now
 // Panel shows before the async load() fills it — wait for real content.
 await page.locator('.git-changes-side .git-detail-title').first().waitFor({ timeout: 10000 });
 check('banner persists while unresolved', (await page.locator('.git-conflict-banner').count()) === 1);

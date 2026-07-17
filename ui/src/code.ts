@@ -13,6 +13,15 @@ import {
 import { getPrefs } from './prefs';
 import { cmThemeSlot, cmThemeFor, presetById, rethemeState } from './theme';
 import { copyText } from './clipboard';
+import { modOf } from './modkey';
+import {
+  parseToken,
+  resolvePath,
+  paneRoot,
+  normalizeAbs,
+  parentOf,
+  baseOf,
+} from './pathjump';
 import { rust } from '@codemirror/lang-rust';
 import { javascript } from '@codemirror/lang-javascript';
 import { python } from '@codemirror/lang-python';
@@ -553,8 +562,11 @@ export interface CodePanel {
    * reuses this mapping (wrapper-thunk, lazy-safe). */
   langFor(path: string): Extension[];
   /** Open the panel at (pane-root session, path) — the git graph's conflict
-   * jump-in. */
-  openAt(root: string, path: string): void;
+   * jump-in. `line` lands the cursor on it (path-jump gestures carry one). */
+  openAt(root: string, path: string, line?: number): void;
+  /** Open the panel rooted at an absolute dir — the terminal/editor
+   * "jump to this directory" gesture. */
+  openRoot(root: string): void;
 }
 
 // One code view per pane. The tree, the changes list and the editor are all
@@ -1011,6 +1023,75 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       extensions: [basicSetup, editorTheme, themed(), EditorView.editable.of(false)],
     });
 
+  /** ⌘+click path-jump inside the editor: hold the modifier and path-ish
+   * tokens gain an underline; clicking resolves the token against the session
+   * root and opens the file (or hops root to the directory). Same resolver as
+   * the ⌘P path row — one answer to "what does this token point at". */
+  const jumpLinkExt: Extension = (() => {
+    const mark = Decoration.mark({ class: 'cm-jumplink' });
+    class JumpLink {
+      decorations: DecorationSet = Decoration.none;
+      from = -1;
+      to = -1;
+      constructor(private view: EditorView) {}
+      private repaint() {
+        // Decorations re-read on view updates only — nudge one (no-op) so the
+        // underline flips exactly when the modifier does.
+        this.view.dispatch({});
+      }
+      setRange(from: number, to: number) {
+        if (from === this.from && to === this.to) return;
+        this.from = from;
+        this.to = to;
+        this.decorations = from < 0 ? Decoration.none : Decoration.set([mark.range(from, to)]);
+        this.repaint();
+      }
+      tokenAt(x: number, y: number): { from: number; to: number; text: string } | null {
+        const pos = this.view.posAtCoords({ x, y });
+        if (pos == null) return null;
+        const line = this.view.state.doc.lineAt(pos);
+        const text = line.text;
+        const off = pos - line.from;
+        const isTok = (ch: string) => /[\w.~+-]/.test(ch) || ch === '/';
+        let a = off;
+        let b = off;
+        while (a > 0 && isTok(text[a - 1])) a--;
+        while (b < text.length && isTok(text[b])) b++;
+        // A trailing :line[:col] rides along (compiler-error style clicks).
+        const m = text.slice(b).match(/^:(\d+)(?::(\d+))?/);
+        const end = b + (m ? m[0].length : 0);
+        const tok = text.slice(a, end);
+        // Must look like a path (slash) or a file (extension) — plain words
+        // like "return" never underline, so code reading stays un-noised.
+        if (!tok.includes('/') && !/\.[A-Za-z0-9]+/.test(tok)) return null;
+        return { from: line.from + a, to: line.from + end, text: tok };
+      }
+    }
+    return ViewPlugin.fromClass(JumpLink, {
+      decorations: (v) => v.decorations,
+      eventHandlers: {
+        mousemove(this: JumpLink, e: MouseEvent) {
+          if (!modOf(e)) {
+            this.setRange(-1, -1);
+            return;
+          }
+          const t = this.tokenAt(e.clientX, e.clientY);
+          this.setRange(t ? t.from : -1, t ? t.to : -1);
+        },
+        mousedown(this: JumpLink, e: MouseEvent) {
+          if (e.button !== 0 || !modOf(e)) return;
+          const t = this.tokenAt(e.clientX, e.clientY);
+          if (!t) return;
+          e.preventDefault(); // no selection change, no focus dance — just jump
+          void jumpToPath(t.text);
+        },
+        mouseleave(this: JumpLink) {
+          this.setRange(-1, -1);
+        },
+      },
+    });
+  })();
+
   function fileState(path: string, doc: string, lsp: Extension | null): EditorState {
     return EditorState.create({
       doc,
@@ -1021,6 +1102,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
         langFor(path),
         blameSlot.of([]), // the blame gutter toggles in here, never a rebuild
         ...(lsp ? [lsp] : []),
+        jumpLinkExt,
         keymap.of([
           { key: 'Mod-s', preventDefault: true, run: () => (void save(), true) },
           { key: 'Mod-.', preventDefault: true, run: () => (void openCodeActions(), true) },
@@ -1495,6 +1577,56 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     editor.focus();
   }
 
+  /** Jump to a typed/clicked path: absolute or root-relative, file (optionally
+   * with a :line suffix) or directory. Files under the current root open
+   * directly; anything else hops the panel's root to the parent first — the
+   * same resolve for the ⌘P path row and editor ⌘+click, so they can't
+   * disagree about what a token means. '~' stays unsupported on purpose:
+   * whose home, the pane's or the daemon's, is a question nobody wants to
+   * answer mid-gesture. */
+  async function jumpToPath(raw: string) {
+    const s = current;
+    if (!s) return;
+    const parsed = parseToken(raw);
+    if (!parsed) return;
+    if (parsed.path.includes('~')) {
+      flashHint('~ paths are not supported — use an absolute path');
+      return;
+    }
+    if (!s.fsRoot) {
+      const r = await paneRoot(apiBase(), s.pane);
+      if (r) s.fsRoot = r;
+    }
+    if (!s.fsRoot) {
+      flashHint('no root to resolve against');
+      return;
+    }
+    const target = await resolvePath(apiBase(), s.fsRoot, parsed.path);
+    if (current !== s) return;
+    if (!target) {
+      flashHint(`no such path: ${parsed.path}`);
+      return;
+    }
+    if (target.dir) {
+      switchRoot(target.abs);
+      return;
+    }
+    const root = s.fsRoot.replace(/\/+$/, '');
+    if (target.abs.startsWith(`${root}/`)) {
+      const rel = target.abs.slice(root.length + 1);
+      if (parsed.line != null) void openFileAt(rel, parsed.line);
+      else void openFile(rel);
+    } else {
+      // Outside the current root: hop the session to the parent dir, then
+      // open the file there (same override rules as the root switcher).
+      const parent = parentOf(target.abs);
+      switchRoot(parent);
+      const rel = baseOf(target.abs);
+      if (parsed.line != null) void openFileAt(rel, parsed.line);
+      else void openFile(rel);
+    }
+  }
+
   /** .gitmodules registry for the session (used by the tree's init rows). */
   async function refreshSubmodules(s: Session | null) {
     if (!s) return;
@@ -1721,7 +1853,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   const qoEl = document.createElement('div');
   qoEl.className = 'qopen';
   qoEl.style.display = 'none';
-  qoEl.innerHTML = `<input class="qopen-input" placeholder="Open file…" spellcheck="false"><div class="qopen-list"></div>`;
+  qoEl.innerHTML = `<input class="qopen-input" placeholder="Open file… (a slash makes it a raw path)" spellcheck="false"><div class="qopen-list"></div>`;
   panel.appendChild(qoEl);
   const qoInput = qoEl.querySelector('.qopen-input') as HTMLInputElement;
   const qoList = qoEl.querySelector('.qopen-list') as HTMLElement;
@@ -1749,8 +1881,27 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     return scored.slice(0, 50).map((x) => x[1]);
   }
 
+  /** Typed paths (not fuzzy names) get a dedicated row: starts with '/' or
+   * './'/'../', or contains any slash — "./a", "../b", "/etc/…" all qualify. */
+  const PATHY = /^\/|^\.{1,2}\/|\//;
+  const isPathy = (q: string) => PATHY.test(q);
+
   function renderQo() {
     qoList.replaceChildren();
+    const q = qoInput.value.trim();
+    if (isPathy(q)) {
+      const row = document.createElement('div');
+      row.className = 'qopen-row sel qopen-path';
+      const base = current?.fsRoot ?? '';
+      row.textContent = q.startsWith('/') ? `↪ ${q}` : `↪ ${normalizeAbs(`${base}/${q}`)}`;
+      row.title = 'open this file or switch root to this directory';
+      row.addEventListener('click', () => {
+        closeQuickOpen();
+        void jumpToPath(q);
+      });
+      qoList.appendChild(row);
+      return;
+    }
     qoShown.forEach((f, i) => {
       const row = document.createElement('div');
       row.className = 'qopen-row' + (i === qoSel ? ' sel' : '');
@@ -1761,7 +1912,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     if (!qoShown.length) {
       const empty = document.createElement('div');
       empty.className = 'qopen-empty';
-      empty.textContent = qoAll.length ? 'no match' : 'not a git repo (or no files)';
+      empty.textContent = qoAll.length ? 'no match (a slash makes it a raw path)' : 'not a git repo (or no files)';
       qoList.appendChild(empty);
     }
   }
@@ -1804,8 +1955,14 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       e.preventDefault();
       qoSel = Math.max(qoSel - 1, 0);
       renderQo();
-    } else if (e.key === 'Enter' && qoShown[qoSel]) {
-      pickQo(qoShown[qoSel]);
+    } else if (e.key === 'Enter') {
+      const q = qoInput.value.trim();
+      if (isPathy(q)) {
+        closeQuickOpen();
+        void jumpToPath(q);
+      } else if (qoShown[qoSel]) {
+        pickQo(qoShown[qoSel]);
+      }
     }
   });
 
@@ -1840,13 +1997,21 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       }
     },
     langFor: (path: string) => [langFor(path)],
-    openAt(root: string, path: string) {
+    openAt(root: string, path: string, line?: number) {
       if (!open) {
         open = true;
         panel.classList.add('show');
       }
       showSession(opts.getActivePane(), root);
-      void openFile(path);
+      if (line != null) void openFileAt(path, line);
+      else void openFile(path);
+    },
+    openRoot(root: string) {
+      if (!open) {
+        open = true;
+        panel.classList.add('show');
+      }
+      showSession(opts.getActivePane(), root);
     },
     toggle() {
       if (open) {

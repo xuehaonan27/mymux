@@ -24,21 +24,28 @@ await page.click('#btn-git');
 await page.locator('.git-panel.show').waitFor({ timeout: 10000 });
 await page.waitForTimeout(900);
 
-// 1. Changes page is the default: uncommitted section + stage affordances.
-check('Changes tab is default', ((await page.locator('.git-tab.on').textContent()) ?? '').includes('Changes'));
+// 1. History is the default landing — the branch graph is what orients you;
+// the swim-lane svg is right there when the surface opens.
+check('History tab is default', ((await page.locator('.git-tab.on').textContent()) ?? '').includes('History'));
+check('swim-lane svg rendered on open', (await page.locator('.git-lanes circle').count()) >= 1);
+
+// 2. Changes page: uncommitted section + stage affordances.
+await page.click('.git-tab[data-page="changes"]');
+await page.waitForTimeout(900);
+check('Changes tab switches over', ((await page.locator('.git-tab.on').textContent()) ?? '').includes('Changes'));
 const sideTitle = (await page.locator('.git-changes-side .git-detail-title').first().textContent()) ?? '';
 check('uncommitted section lists its files (2)', sideTitle.includes('Uncommitted Changes (2)'), sideTitle);
 check('file rows have stage buttons', (await page.locator('.git-changes-side .git-file .git-stage-btn').count()) >= 2);
 check('commit box present', (await page.locator('.git-commit-input').count()) === 1);
 check('stash section present', ((await page.locator('.git-changes-side').textContent()) ?? '').includes('Stashes ('));
 
-// 2. File row → workbench stageable diff.
+// 3. File row → workbench stageable diff.
 await page.locator('.git-changes-side .git-file', { hasText: 'file.txt' }).first().click();
 await page.waitForTimeout(900);
 check('workbench diff for the file', ((await page.locator('.git-workbench .git-detail-title').textContent()) ?? '').includes('file.txt'));
 check('stageable rows render', (await page.locator('.git-workbench .dl.sline').count()) >= 1);
 
-// 3. History page: pure topology (no pseudo-rows), lanes svg, HEAD badge.
+// 4. History page: pure topology (no pseudo-rows), lanes svg, HEAD badge.
 await page.click('.git-tab[data-page="history"]');
 await page.waitForTimeout(900);
 const rowCount = await page.locator('.git-row').count();
