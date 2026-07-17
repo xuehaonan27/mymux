@@ -195,6 +195,15 @@ body.has-winalpha {
 body.has-winalpha #term {
   transform: translateZ(0);
 }
+/* WKWebView + translucent NSWindow text fringing: subpixel AA blends glyph
+ * edges against whatever the UNDERLYING composite held (switch-time redraws
+ * make the colors go visibly wrong until something repaints). Grayscale AA
+ * is the standard remedy for text over alpha content — opaque mode keeps
+ * full subpixel smoothing. */
+body.has-winalpha .xterm-rows,
+body.has-winalpha .xterm-rows span {
+  -webkit-font-smoothing: antialiased;
+}
 
 /* The empty state: every session ended and the host picker was dismissed. */
 #empty {

@@ -25,7 +25,7 @@ await page.addInitScript((host) => {
       if (cmd === 'conn_status') return Promise.resolve(['connected', 8088]);
       if (cmd === 'agent_hook_status') return Promise.resolve({ ...state });
       if (cmd === 'agent_hook') {
-        window.__CALLS__.push([args.agent, args.install]);
+        window.__CALLS__.push([args.agent, args.install, Object.keys(args ?? {})]);
         state[args.agent] = args.install;
         return Promise.resolve(args.install ? `installed ${args.agent}` : `removed ${args.agent}`);
       }
@@ -74,6 +74,11 @@ check('codex dot flipped to missing', ((await dot('codex')) ?? '').includes('mis
 await page.mouse.click(700, 700);
 await page.waitForTimeout(400);
 check('outside click closes it', (await page.locator('.host-hookpop').count()) === 0);
+
+// Tauri commands are all rename_all="snake_case": the UI must pass
+// host_id, NOT hostId — the stub used to accept any shape (this bug shipped).
+const badShapes = (await page.evaluate(() => window.__CALLS__)).filter((c) => !c[2].includes('host_id') || c[2].includes('hostId'));
+check('all recorded calls pass snake_case host_id', badShapes.length === 0, JSON.stringify(badShapes));
 
 await page.screenshot({ path: 'shots/agenthook.png' });
 await browser.close();

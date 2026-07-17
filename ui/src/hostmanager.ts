@@ -261,7 +261,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
       card.dataset.hostId = h.id;
       paintMeta(card, h.id);
       if (!hostMetaCache.has(h.id)) {
-        invoke('host_meta', { hostId: h.id })
+        invoke('host_meta', { host_id: h.id })
           .then((m) => {
             if (m) {
               hostMetaCache.set(h.id, m as HostMeta);
@@ -692,7 +692,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
         up.disabled = true;
         up.textContent = 'updating…';
         try {
-          await invoke('daemon_update', { hostId });
+          await invoke('daemon_update', { host_id: hostId });
           // The post-update probe repaints via mymux:hostmeta; the tunnel
           // flaps (Reconnecting → Connected) while the daemon restarts.
         } catch (err) {
@@ -784,7 +784,7 @@ function toggleHookPop(h: HookHostLike, anchor: HTMLElement) {
     installBtn.onclick = async () => {
       statusEl.textContent = `installing ${label}…`;
       try {
-        const out = (await invoke('agent_hook', { hostId: h.id, agent, install: true })) as string;
+        const out = (await invoke('agent_hook', { host_id: h.id, agent, install: true })) as string;
         statusEl.textContent = out.trim() || `${label} installed`;
       } catch (err) {
         statusEl.textContent = String(err);
@@ -811,7 +811,7 @@ function toggleHookPop(h: HookHostLike, anchor: HTMLElement) {
       void (async () => {
         statusEl.textContent = `uninstalling ${label}…`;
         try {
-          const out = (await invoke('agent_hook', { hostId: h.id, agent, install: false })) as string;
+          const out = (await invoke('agent_hook', { host_id: h.id, agent, install: false })) as string;
           statusEl.textContent = out.trim() || `${label} uninstalled`;
         } catch (err) {
           statusEl.textContent = String(err);
@@ -834,7 +834,7 @@ function toggleHookPop(h: HookHostLike, anchor: HTMLElement) {
   document.addEventListener('mousedown', closeOnDown, true);
   const refresh = async () => {
     try {
-      const st = (await invoke('agent_hook_status', { hostId: h.id })) as Record<string, boolean>;
+      const st = (await invoke('agent_hook_status', { host_id: h.id })) as Record<string, boolean>;
       statusEl.textContent = '';
       for (const { agent, dot, installBtn, unBtn } of rows) {
         const on = !!st[agent];

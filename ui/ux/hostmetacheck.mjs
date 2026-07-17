@@ -35,7 +35,7 @@ await page.addInitScript(() => {
       if (cmd === 'conn_status') return Promise.resolve(['connected', 8088]);
       if (cmd === 'host_meta') return Promise.resolve(meta);
       if (cmd === 'daemon_update') {
-        window.__CALLS__.push(['daemon_update', args.hostId]);
+        window.__CALLS__.push(['daemon_update', args.host_id, Object.keys(args ?? {})]);
         return Promise.resolve('installed');
       }
       if (cmd === 'agent_hook_status') return Promise.resolve(meta.hooks);
@@ -65,7 +65,7 @@ await page.waitForTimeout(300);
 check('first click arms (sure?), no call yet', (await page.locator('.host-update').textContent()) === 'sure?' && (await page.evaluate(() => window.__CALLS__)).length === 0);
 await page.locator('.host-update').click();
 await page.waitForTimeout(500);
-check('second click fires daemon_update(h-1)', (await page.evaluate(() => window.__CALLS__)).some((c) => c[0] === 'daemon_update' && c[1] === 'h-1'));
+check('second click fires daemon_update(h-1) with snake host_id', (await page.evaluate(() => window.__CALLS__)).some((c) => c[0] === 'daemon_update' && c[1] === 'h-1' && c[2].includes('host_id') && !c[2].includes('hostId')));
 
 // ---- phase 2: current daemon + all hooks -------------------------------------
 await page.goto(`${UI}&outdated=0`, { waitUntil: 'domcontentloaded' });
