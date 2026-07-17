@@ -133,6 +133,10 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   async function showList() {
     statusEl = null;
     attempt = null;
+    // Reopening must look free: every card repaints from in-memory state and
+    // the rebuild below keeps the user's scroll position instead of yanking
+    // it to the top.
+    const scrollTop = (panel.querySelector('.host-inner') as HTMLElement | null)?.scrollTop ?? 0;
     const [store, conns] = await Promise.all([loadHosts(), loadConns()]);
     const root = el('div', 'host-inner');
     root.appendChild(el('div', 'host-title', 'Connect to a host'));
@@ -154,6 +158,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     root.appendChild(pref);
     root.appendChild(closeX());
     panel.replaceChildren(root);
+    root.scrollTop = scrollTop;
 
     if (!booted) {
       booted = true;

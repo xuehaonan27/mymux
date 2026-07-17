@@ -2091,6 +2091,16 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     qoEl.style.display = 'none';
   }
 
+  // ⌘P's file index lives per (host, pane, root): opening repaints from the
+  // cached walk first — a full /git/files walk over SSH on every open was
+  // the heavy part — and only a missing or stale (60s) index refreshes,
+  // in the background unless this is the very first walk.
+  interface QoIndex {
+    files: string[];
+    at: number;
+  }
+  const qoIndexCache = new Map<string, QoIndex>();
+
   async function quickOpen() {
     qoVisible = true;
     qoEl.style.display = '';
@@ -2099,8 +2109,20 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     qoShown = [];
     renderQo();
     qoInput.focus();
-    qoAll = await gitFiles(current?.pane ?? null, current?.root ?? null);
+    const pane = current?.pane ?? null;
+    const root = current?.root ?? null;
+    const key = `${opts.getScope()}:${pane ?? -1}|${root ?? ''}`;
+    const cached = qoIndexCache.get(key);
+    if (cached) {
+      qoAll = cached.files;
+      qoShown = fuzzy('', qoAll);
+      renderQo();
+      if (Date.now() - cached.at < 60_000) return;
+    }
+    const files = await gitFiles(pane, root);
+    qoIndexCache.set(key, { files, at: Date.now() });
     if (!qoVisible) return;
+    qoAll = files;
     qoShown = fuzzy('', qoAll);
     renderQo();
   }

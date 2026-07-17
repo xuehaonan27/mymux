@@ -67,26 +67,55 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
     }, 1000);
   }
 
+  interface CatalogCache {
+    api: string;
+    items: CatalogItem[];
+    at: number;
+  }
+  let catalogCache: CatalogCache | null = null;
+  let catalogInflight = false;
+  const CATALOG_TTL = 300_000;
+
+  // Catalog is nearly static per daemon: cache per api-base (host) and paint
+  // it instantly; only a missing or stale (5 min) entry refetches, always in
+  // the background of an already-painted list. Searches stay per-query.
   async function load() {
     const my = ++seq;
-    render([note(query ? `searching “${query}”…` : 'loading…')]);
-    let rows: HTMLElement[];
-    try {
-      if (query) {
-        const r = await fetch(
-          `${opts.getApiBase()}/pkgs/search?q=${encodeURIComponent(query)}`,
-        );
-        const res = (await r.json()) as { hits: SearchHit[] };
-        rows = res.hits.length
-          ? res.hits.map((h) => hitCard(h))
-          : [note(`nothing found for “${query}”`)];
+    if (!query) {
+      const fresh = catalogCache && catalogCache.api === opts.getApiBase() ? catalogCache : null;
+      if (fresh) {
+        render([...fresh.items.map(catalogCard), note('the mymux catalog — curated, pinned upstream releases')]);
       } else {
+        render([note('loading…')]);
+      }
+      if (fresh && Date.now() - fresh.at <= CATALOG_TTL) return;
+      if (catalogInflight) return;
+      catalogInflight = true;
+      try {
         const r = await fetch(`${opts.getApiBase()}/pkgs/catalog`);
         const items = (await r.json()) as CatalogItem[];
-        rows = items.length
-          ? items.map((it) => catalogCard(it))
-          : [note('no packages in the catalog')];
+        catalogCache = { api: opts.getApiBase(), items, at: Date.now() };
+        if (!open || my !== seq) return;
+        const rows = items.length ? items.map(catalogCard) : [note('no packages in the catalog')];
+        rows.push(note('the mymux catalog — curated, pinned upstream releases'));
+        render(rows);
+      } catch {
+        if (!fresh && open && my === seq) render([note('could not reach the daemon')]);
+      } finally {
+        catalogInflight = false;
       }
+      return;
+    }
+    render([note(`searching “${query}”…`)]);
+    let rows: HTMLElement[];
+    try {
+      const r = await fetch(
+        `${opts.getApiBase()}/pkgs/search?q=${encodeURIComponent(query)}`,
+      );
+      const res = (await r.json()) as { hits: SearchHit[] };
+      rows = res.hits.length
+        ? res.hits.map((h) => hitCard(h))
+        : [note(`nothing found for “${query}”`)];
     } catch {
       rows = [note('could not reach the daemon')];
     }
