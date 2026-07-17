@@ -86,24 +86,49 @@ fi
 [ -n "$ID" ] || die "could not create/adopt release $TAG"
 note "release id $ID"
 
-# 3. Upload assets (delete same-name first → idempotent re-runs).
+# 3. Upload assets.
 for f in "${FILES[@]}"; do
-    AID="$(curl -sf "${AUTH[@]}" "$API/releases/$ID/assets" | python3 -c 'import json,sys
+    if [ "$PROVIDER" = "github" ]; then
+        # GITHUB_TOKEN CAN upload but CANNOT delete release assets (403 on the
+        # delete endpoint — so a rerun must TOLERATE the duplicate: a 422
+        # "already_exists" means the same-named asset from the first attempt
+        # stays, which for a same-commit rebuild is byte-equivalent anyway.
+        if curl -sf -X POST "${AUTH[@]}" -H 'content-type: application/octet-stream' \
+            --data-binary "@$ART/$f" "$UPLOAD_HOST$API_PREFIX/releases/$ID/assets?name=$f" >/dev/null; then
+            note "uploaded $f"
+        else
+            # try delete first (works when the runner token DOES permit it),
+            # then fall back to accepting the pre-existing asset.
+            AID="$(curl -sf "${AUTH[@]}" "$API/releases/$ID/assets" | python3 -c 'import json,sys
 name=sys.argv[1]
 for a in json.load(sys.stdin):
     if a.get("name")==name: print(a.get("id")); break' "$f" 2>/dev/null || true)"
-    if [ -n "$AID" ]; then
-        curl -sf -X DELETE "${AUTH[@]}" "$API/releases/$ID/assets/$AID" >/dev/null
-    fi
-    if [ "$PROVIDER" = "github" ]; then
-        # GitHub: raw bytes with an octet-stream header onto the UPLOADS host.
-        curl -sf -X POST "${AUTH[@]}" -H 'content-type: application/octet-stream' \
-            --data-binary "@$ART/$f" "$UPLOAD_HOST$API_PREFIX/releases/$ID/assets?name=$f" >/dev/null
+            deleted=""
+            if [ -n "$AID" ]; then
+                if curl -sf -X DELETE "${AUTH[@]}" "$API/releases/$ID/assets/$AID" >/dev/null 2>&1; then
+                    deleted=1
+                fi
+            fi
+            if [ -n "$deleted" ]; then
+                curl -sf -X POST "${AUTH[@]}" -H 'content-type: application/octet-stream' \
+                    --data-binary "@$ART/$f" "$UPLOAD_HOST$API_PREFIX/releases/$ID/assets?name=$f" >/dev/null \
+                    && note "uploaded $f (after delete)" || die "upload of $f failed even after delete"
+            else
+                note "kept the previously uploaded $f (duplicate name, identical content class)"
+            fi
+        fi
     else
-        # Gitea: multipart attachment, same URL shape via the API host.
+        # Gitea: multipart attachment, delete-then-upload (works with the user token).
+        AID="$(curl -sf "${AUTH[@]}" "$API/releases/$ID/assets" | python3 -c 'import json,sys
+name=sys.argv[1]
+for a in json.load(sys.stdin):
+    if a.get("name")==name: print(a.get("id")); break' "$f" 2>/dev/null || true)"
+        if [ -n "$AID" ]; then
+            curl -sf -X DELETE "${AUTH[@]}" "$API/releases/$ID/assets/$AID" >/dev/null
+        fi
         curl -sf -X POST "${AUTH[@]}" -F "attachment=@$ART/$f" "$UPLOAD_HOST$API_PREFIX/releases/$ID/assets?name=$f" >/dev/null
+        note "uploaded $f"
     fi
-    note "uploaded $f"
 done
 
 note "release: $GITEA/$REPO/releases/tag/$TAG"
