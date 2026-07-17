@@ -444,7 +444,9 @@ whole: grouping, geometry, focused pane, every pane's scrollback.
 More daily-driver guardrails: an `⌁` shell you decide to keep promotes to `∞`
 in place with **⌘K k** (nothing restarts — the flag flips, the pid and
 `MYMUX_PANE` stay); closing a pane whose shell is running something (vim, an
-agent, a build) asks first instead of killing it blind; and **⌘K /** shows
+agent, a build) asks first instead of killing it blind; **⌘= / ⌘- / ⌘0** zoom
+the terminal font (browser: ⌘K =/-/0; iTerm-style, per-device, applied live
+to every pane — the settings panel has the same stepper); and **⌘K /** shows
 the key map.
 
 **Unlimited history**: every native pane's raw output (colors included) is

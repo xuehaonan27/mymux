@@ -190,6 +190,28 @@ export function initSettingsPanel(): SettingsPanel {
       'Pane opacity and dim take effect once a backdrop image is set (inert otherwise). Window opacity (desktop app only) shows the desktop through the whole window and overrides the image.';
     panel.append(bgHint);
 
+    // Terminal font size: −/+ stepper, same live-apply path as ⌘=/⌘-/⌘0.
+    const fontRow = document.createElement('div');
+    fontRow.className = 'settings-row settings-slider-row';
+    const flab = document.createElement('span');
+    flab.textContent = 'Terminal font size (⌘=/⌘-/⌘0)';
+    const mkStep = (label: string, d: number) => {
+      const b = document.createElement('button');
+      b.className = 'pkgs-btn settings-fontstep';
+      b.textContent = label;
+      b.addEventListener('click', () => {
+        const next = Math.min(28, Math.max(8, getPrefs().fontSize + d));
+        setPrefs({ fontSize: next });
+        fval.textContent = `${next}px`;
+      });
+      return b;
+    };
+    const fval = document.createElement('span');
+    fval.className = 'settings-slider-val';
+    fval.textContent = `${p.fontSize}px`;
+    fontRow.append(flab, mkStep('−', -1), fval, mkStep('+', 1));
+    panel.append(fontRow);
+
     const r = document.createElement('div');
     r.className = 'settings-row';
     const lab = document.createElement('span');

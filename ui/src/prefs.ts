@@ -21,6 +21,8 @@ export interface Prefs {
   /** WHOLE-WINDOW opacity (desktop app only): < 1 lets the desktop show
    * through the window — iTerm-style transparency. 0 (see-through) .. 1. */
   windowOpacity: number;
+  /** Terminal font size in px (⌘=/⌘-/⌘0 adjusts live). */
+  fontSize: number;
 }
 
 const DEFAULTS: Prefs = {
@@ -32,7 +34,10 @@ const DEFAULTS: Prefs = {
   bgDim: 0.4,
   paneOpacity: 1,
   windowOpacity: 1,
+  fontSize: 13,
 };
+
+export { DEFAULTS as PREFS_DEFAULTS };
 
 const KEY = 'mymux.prefs';
 
@@ -48,6 +53,7 @@ function load(): Prefs {
     p.bgDim = Math.min(1, Math.max(0, num(p.bgDim, DEFAULTS.bgDim)));
     p.paneOpacity = Math.min(1, Math.max(0, num(p.paneOpacity, DEFAULTS.paneOpacity)));
     p.windowOpacity = Math.min(1, Math.max(0, num(p.windowOpacity, DEFAULTS.windowOpacity)));
+    p.fontSize = Math.min(28, Math.max(8, num(p.fontSize, DEFAULTS.fontSize)));
     if (typeof p.bgImage !== 'string') p.bgImage = '';
     return p;
   } catch {

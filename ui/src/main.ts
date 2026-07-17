@@ -13,7 +13,7 @@ import { Workspace, WinInfo, WsState } from './workspace';
 import { ACTIONS, directAction, leaderAction, helpRows, KeyDeps } from './keymap';
 import { openMenu } from './menu';
 import { initNotify } from './notify';
-import { getPrefs, setPrefs, onPrefsChange } from './prefs';
+import { getPrefs, setPrefs, onPrefsChange, PREFS_DEFAULTS } from './prefs';
 import { initSettingsPanel } from './settings';
 import { presetById } from './theme';
 import type { ITheme } from '@xterm/xterm';
@@ -23,7 +23,9 @@ import type { ITheme } from '@xterm/xterm';
 // overlays, and keybindings routed to the visible workspace.
 
 const FONT = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
-const FONT_SIZE = 13;
+// Boot font size is the persisted per-device pref (⌘=/⌘-/⌘0 zooms live, the
+// settings row too); PREFS_DEFAULTS.fontSize is the ⌘0 reset target.
+const FONT_SIZE = getPrefs().fontSize;
 const LINE_HEIGHT = 1.2;
 
 /** The preset's term theme for the current translucency state. While anything
@@ -1141,11 +1143,12 @@ registerModal('settings', {
 document.getElementById('btn-settings')?.addEventListener('click', toggleSettings);
 // Prefs written anywhere (settings panel, bell, host manager) re-render the
 // surfaces they affect.
-onPrefsChange(() => {
+onPrefsChange((p) => {
   renderHosts();
   renderNotifyBtn();
-  applyTheme(getPrefs().theme);
+  applyTheme(p.theme);
   applyBackground();
+  for (const w of workspaces.values()) w.setTermFont(p.fontSize);
 });
 applyTheme(getPrefs().theme); // boot: dataset + (no workspaces yet, but code panel later reads prefs)
 applyBackground();
@@ -1203,7 +1206,16 @@ const keyDeps: KeyDeps = {
   togglePlugins: () => togglePlugins(),
   toggleGitGraph: () => toggleGitGraph(),
   toggleSettings: () => toggleSettings(),
+  fontZoom: zoomFont,
 };
+
+/** iTerm-style terminal font zoom (⌘=/⌘-/⌘0): step ±1, 0 = factory default.
+ * The pref write persists (per-device) and onPrefsChange applies it live. */
+function zoomFont(step: number) {
+  const cur = getPrefs().fontSize;
+  const next = step === 0 ? PREFS_DEFAULTS.fontSize : Math.min(28, Math.max(8, cur + step));
+  if (next !== cur) setPrefs({ fontSize: next });
+}
 
 function handleLeaderKey(e: KeyboardEvent) {
   const k = e.key;
@@ -1293,8 +1305,9 @@ document.addEventListener(
     }
 
     // Same letter as the leader layer, bound directly under ⌘ where the
-    // platform allows it (shift-free by design).
-    if (!e.shiftKey && !e.altKey) {
+    // platform allows it. Shift-free by design — ONE carve-out: '⌘+' is
+    // shifted '=', and zoom-with-plus is hardwired muscle memory (iTerm).
+    if (!e.altKey && (!e.shiftKey || e.key === '+')) {
       const action = directAction(e.key.toLowerCase(), isTauri);
       if (action) {
         stop();

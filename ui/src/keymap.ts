@@ -33,6 +33,9 @@ export type ActionId =
   | 'plugins'
   | 'gitgraph'
   | 'settings'
+  | 'font-bigger'
+  | 'font-smaller'
+  | 'font-reset'
   | 'help';
 
 /** Everything actions need from the shell, injected once at startup. */
@@ -52,6 +55,8 @@ export interface KeyDeps {
   togglePlugins(): void;
   toggleGitGraph(): void;
   toggleSettings(): void;
+  /** iTerm-style terminal font zoom: ±1 steps, 0 = reset to the default. */
+  fontZoom(step: number): void;
 }
 
 /// Where the letter binds directly under ⌘ (the leader always has it):
@@ -175,6 +180,24 @@ export const ACTIONS: Record<ActionId, ActionDef> = {
     desc: 'settings',
     run: (d) => d.toggleSettings(),
   },
+  'font-bigger': {
+    key: '=',
+    direct: 'app', // browsers reserve ⌘= for page zoom — leader there
+    desc: 'bigger terminal font (⌘+ works too)',
+    run: (d) => d.fontZoom(1),
+  },
+  'font-smaller': {
+    key: '-',
+    direct: 'app', // browsers reserve ⌘- for page zoom — leader there
+    desc: 'smaller terminal font',
+    run: (d) => d.fontZoom(-1),
+  },
+  'font-reset': {
+    key: '0',
+    direct: 'app', // browsers reserve ⌘0 — leader there
+    desc: 'reset terminal font size',
+    run: (d) => d.fontZoom(0),
+  },
   help: { key: '/', direct: 'app', desc: 'key map (this help)', run: (d) => d.toggleHelp() },
 };
 
@@ -182,9 +205,14 @@ const byKey = new Map<string, ActionId>(
   (Object.keys(ACTIONS) as ActionId[]).map((a) => [ACTIONS[a].key, a]),
 );
 
+/** Muscle-memory aliases: '⌘+' (shifted '=') should zoom like '⌘='; the
+ * shifted key IS a different event.key, so it can't share the table entry. */
+const KEY_ALIAS: Record<string, string> = { '+': '=' };
+const lookup = (key: string) => byKey.get(KEY_ALIAS[key] ?? key);
+
 /** ⌘+letter, honoring each action's direct level for the platform. */
 export function directAction(key: string, isApp: boolean): ActionId | undefined {
-  const a = byKey.get(key);
+  const a = lookup(key);
   if (!a) return undefined;
   const d = ACTIONS[a].direct;
   return d === 'all' || (d === 'app' && isApp) ? a : undefined;
@@ -192,7 +220,7 @@ export function directAction(key: string, isApp: boolean): ActionId | undefined 
 
 /** ⌘K+letter — every action, both platforms, same letter. */
 export function leaderAction(key: string): ActionId | undefined {
-  return byKey.get(key);
+  return lookup(key);
 }
 
 /** Rows for the help overlay: [app combo, leader combo, description]. */
@@ -220,6 +248,9 @@ export function helpRows(): Array<[string, string, string]> {
     'plugins',
     'gitgraph',
     'settings',
+    'font-bigger',
+    'font-smaller',
+    'font-reset',
     'help',
   ];
   return order.map((a) => {

@@ -9,6 +9,7 @@ import type { ITheme } from '@xterm/xterm';
 import { modHeld } from './modkey';
 import { pathSpans } from './pathjump';
 import { imeFixEnabled, installImeFix } from './imefix';
+import { measureCell } from './metrics';
 
 export type Kind = 'leaf' | 'cols' | 'rows';
 export interface LayoutNode {
@@ -516,6 +517,19 @@ export class Workspace {
   /** Live-apply a new theme preset to every pane in this workspace. */
   setTermTheme(theme: ITheme) {
     for (const p of this.panes.values()) p.term.options.theme = theme;
+  }
+
+  /** Live-apply a font size (iTerm-style zoom): new cell metrics, resized
+   * xterms (xterm re-measures + refreshes itself on the option change), and a
+   * daemon relayout through the same path a window drag takes. */
+  setTermFont(px: number) {
+    if (this.style.fontSize === px) return;
+    this.style.fontSize = px;
+    const { cellW, cellH } = measureCell(this.style.font, px, this.style.lineHeight);
+    this.style.cellW = cellW;
+    this.style.cellH = cellH;
+    for (const p of this.panes.values()) p.term.options.fontSize = px;
+    this.sendResize();
   }
 
   /** Return keyboard focus to the active pane (e.g. after an inline input). */
