@@ -28,6 +28,8 @@ export type ActionId =
   | 'code'
   | 'proc'
   | 'attention'
+  | 'agent-defer'
+  | 'agent-consume'
   | 'plugins'
   | 'gitgraph'
   | 'settings'
@@ -41,6 +43,10 @@ export interface KeyDeps {
   toggleProc(): void;
   toggleCode(): void;
   jumpAttention(): void;
+  /** ⌘K z — push the active window's agent ask to the back of the queue. */
+  agentDefer(): void;
+  /** ⌘K x — dismiss the active window's ask until the agent asks again. */
+  agentConsume(): void;
   /** ⌁↔∞ toggle on the active window (demote side confirms). */
   keepToggle(): void;
   togglePlugins(): void;
@@ -139,6 +145,18 @@ export const ACTIONS: Record<ActionId, ActionDef> = {
     desc: 'jump to the agent that needs you',
     run: (d) => d.jumpAttention(),
   },
+  'agent-defer': {
+    key: 'z',
+    direct: 'none', // triage sits behind the leader, like the other rare verbs
+    desc: "snooze this window's agent ask — badge stays, queue entry sinks",
+    run: (d) => d.agentDefer(),
+  },
+  'agent-consume': {
+    key: 'x',
+    direct: 'none', // ⌘X is cut — leader-only everywhere
+    desc: "dismiss this window's ask — quiet until the agent asks again",
+    run: (d) => d.agentConsume(),
+  },
   plugins: {
     key: 'g',
     direct: 'none', // ⌘G is find-next in many contexts; leader-only is fine
@@ -197,6 +215,8 @@ export function helpRows(): Array<[string, string, string]> {
     'code',
     'proc',
     'attention',
+    'agent-defer',
+    'agent-consume',
     'plugins',
     'gitgraph',
     'settings',

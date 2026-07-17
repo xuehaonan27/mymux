@@ -134,6 +134,8 @@ async fn run() {
     let app = Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/agent", get(agent::agent_handler))
+        .route("/agent/defer", post(agent::defer_handler))
+        .route("/agent/consume", post(agent::consume_handler))
         .route("/fs/list", get(fs::list))
         .route("/fs/root", get(fs::root))
         .route("/fs/read", get(fs::read))

@@ -2,10 +2,13 @@
 //! fold it into a pane→state map and broadcast so the UI can badge each window.
 //!
 //! `GET /agent?pane=<N>&state=<running|waiting|done|idle>`
+//! `POST /agent/defer {pane}` — push the ask to the back of the attention queue
+//! `POST /agent/consume {pane}` — dismiss the ask until the agent speaks again
 
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
+use axum::Json;
 use serde::Deserialize;
 
 use crate::tmux::Hub;
@@ -105,5 +108,33 @@ pub async fn agent_handler(
     Query(q): Query<AgentQuery>,
 ) -> &'static str {
     hub.set_agent(q.pane, AgentState::parse(&q.state));
+    "ok"
+}
+
+#[derive(Deserialize)]
+pub struct PaneReq {
+    pane: u32,
+}
+
+/// Defer = triage, not dismissal: re-stamp the ask so it sinks to the tail of
+/// the UI's attention queue (which sorts by needy-since ascending). The badge
+/// stays on. For "I saw it, I'll get to it after the others".
+pub async fn defer_handler(
+    State(hub): State<Arc<Hub>>,
+    Json(q): Json<PaneReq>,
+) -> &'static str {
+    hub.defer_agent(q.pane);
+    "ok"
+}
+
+/// Consume = "I'm consciously NOT handling this notification": drop the badge
+/// and hush heuristic re-badging until the agent opens a NEW exchange (next
+/// hook report, attention bell, or alt-screen exit — the daemon lifts the
+/// suppression there). For "it told me to come back later, stop nagging me".
+pub async fn consume_handler(
+    State(hub): State<Arc<Hub>>,
+    Json(q): Json<PaneReq>,
+) -> &'static str {
+    hub.consume_agent(q.pane);
     "ok"
 }

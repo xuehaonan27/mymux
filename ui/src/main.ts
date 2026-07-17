@@ -10,6 +10,7 @@ import { initPkgsPanel } from './pkgs';
 import { initHostManager, type HostManager } from './hostmanager';
 import { Workspace, WinInfo, WsState } from './workspace';
 import { ACTIONS, directAction, leaderAction, helpRows, KeyDeps } from './keymap';
+import { openMenu } from './menu';
 import { initNotify } from './notify';
 import { getPrefs, setPrefs, onPrefsChange } from './prefs';
 import { initSettingsPanel } from './settings';
@@ -224,6 +225,39 @@ function jumpToAttention() {
     return;
   }
   jumpTo(entry);
+}
+
+// Triage one window's agent ask, from the tab badge's right-click menu or the
+// ⌘K leader (which targets the ACTIVE window). DEFER re-stamps the daemon's
+// needy-since so the queue entry sinks to the tail while the badge stays on
+// ("saw it, others first"); CONSUME drops the badge and hushes heuristic
+// re-badging until the agent opens a new exchange ("it told me to come back
+// later, stop nagging me"). The daemon owns the semantics; the state
+// broadcast re-sorts the queue here on its own.
+async function agentAskOp(op: 'defer' | 'consume', w?: Workspace, win?: WinInfo) {
+  const ws = w ?? active();
+  const target = win ?? ws?.windowList.find((x) => x.id === ws.activeWindow);
+  // Only waiting|done are asks: a running badge holds no question (the daemon
+  // would no-op a defer and mute a live pane on consume) — say so instead.
+  if (!ws || !target || target.agent_pane == null || target.agent === 'running') {
+    toast('No agent ask on this window.');
+    return;
+  }
+  try {
+    await fetch(`${ws.apiBase}/agent/${op}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pane: target.agent_pane }),
+    });
+  } catch {
+    toast('daemon unreachable — ask not updated.');
+    return;
+  }
+  toast(
+    op === 'defer'
+      ? 'Deferred — moved to the back of the queue.'
+      : 'Consumed — quiet until the agent asks again.',
+  );
 }
 
 // Transient notice (bottom center, auto-fades).
@@ -568,6 +602,26 @@ function renderTabs(w: Workspace | null) {
       e.preventDefault();
       beginRename(tab, w, win);
     });
+    // Right-click triage on an agent ASK (waiting|done only — a running badge
+    // holds no question): defer sinks it in the attention queue, consume
+    // dismisses it until the agent asks again. ⌘K z / ⌘K x do the same for
+    // the active window.
+    if (win.agent === 'waiting' || win.agent === 'done') {
+      tab.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openMenu(e.clientX, e.clientY, [
+          {
+            label: 'Defer — back of the queue (⌘K z)',
+            action: () => void agentAskOp('defer', w, win),
+          },
+          {
+            label: 'Consume — dismiss this ask (⌘K x)',
+            action: () => void agentAskOp('consume', w, win),
+          },
+        ]);
+      });
+    }
     // Drag to reorder (any engine — the daemon owns one global tab order).
     tab.draggable = true;
     tab.addEventListener('dragstart', (e) => {
@@ -1077,6 +1131,8 @@ const keyDeps: KeyDeps = {
   toggleProc: () => toggleProc(),
   toggleCode: () => toggleCode(),
   jumpAttention: () => jumpToAttention(),
+  agentDefer: () => void agentAskOp('defer'),
+  agentConsume: () => void agentAskOp('consume'),
   keepToggle,
   togglePlugins: () => togglePlugins(),
   toggleGitGraph: () => toggleGitGraph(),

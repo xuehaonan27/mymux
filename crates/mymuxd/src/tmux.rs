@@ -69,6 +69,22 @@ struct PaneHeur {
     /// BELs are the TITLE STRING's terminator, not an attention bell — a
     /// fancy shell prompt would otherwise "ring" on every redraw.
     in_osc: bool,
+    /// The user CONSUMED this pane's ask (`POST /agent/consume`): suppress
+    /// heuristic re-badging until the agent opens a new exchange (hook
+    /// report, attention bell, or alt-screen exit lifts this).
+    consumed: Option<Instant>,
+}
+
+impl PaneHeur {
+    fn new(now: Instant) -> PaneHeur {
+        PaneHeur {
+            alt: false,
+            last_activity: now,
+            last_bell: None,
+            in_osc: false,
+            consumed: None,
+        }
+    }
 }
 
 /// Scan one output chunk for an ATTENTION bell: a 0x07 outside any OSC
@@ -962,6 +978,11 @@ impl Hub {
                     agents
                         .entries
                         .insert(pane, AgentEntry::new(s, Source::Hook, prev.as_ref()));
+                    // A hook report is a fresh exchange: lift any consume
+                    // suppression so the next ask badges normally.
+                    if let Some(h) = agents.heur.get_mut(&pane) {
+                        h.consumed = None;
+                    }
                 }
                 None => {
                     agents.entries.remove(&pane);
@@ -971,17 +992,49 @@ impl Hub {
         self.emit(ServerEvent::State(self.state_json()));
     }
 
+    /// Push a pane's ask to the BACK of the attention queue: the UI sorts by
+    /// needy-since ascending, so re-stamping it to "now" sinks it to the
+    /// tail. The badge stays on — deferring is triage, not dismissal.
+    pub fn defer_agent(&self, pane: u32) {
+        {
+            let mut agents = self.agents.lock().unwrap();
+            let Some(e) = agents.entries.get_mut(&pane) else {
+                return;
+            };
+            if e.needy_since_ms.is_none() {
+                return; // running entries aren't queued — nothing to defer
+            }
+            e.needy_since_ms = Some(crate::agent::epoch_ms());
+        }
+        self.emit(ServerEvent::State(self.state_json()));
+    }
+
+    /// Dismiss THIS notification: drop the pane's badge and suppress heuristic
+    /// re-badging until the agent opens a new exchange (hook report, bell, or
+    /// alt-screen exit lifts it — see set_agent / note_output).
+    pub fn consume_agent(&self, pane: u32) {
+        {
+            let mut agents = self.agents.lock().unwrap();
+            agents.entries.remove(&pane);
+            agents
+                .heur
+                .entry(pane)
+                .or_insert_with(|| PaneHeur::new(Instant::now()))
+                .consumed = Some(Instant::now());
+        }
+        self.emit(ServerEvent::State(self.state_json()));
+    }
+
     /// ptyd's authoritative alt-screen report (chunk-split safe, covers the
     /// 1047/1048 flavors the note_output byte-scan doesn't). Just updates the
     /// heuristic signal; the 2s sweep turns it into badges.
     pub(crate) fn note_alt(&self, pane: u32, on: bool) {
         let mut agents = self.agents.lock().unwrap();
-        agents.heur.entry(pane).or_insert(PaneHeur {
-            alt: false,
-            last_activity: Instant::now(),
-            last_bell: None,
-            in_osc: false,
-        }).alt = on;
+        agents
+            .heur
+            .entry(pane)
+            .or_insert_with(|| PaneHeur::new(Instant::now()))
+            .alt = on;
     }
 
     /// Fold a pane's output into the heuristic signals (alt-screen, activity, bell).
@@ -993,12 +1046,10 @@ impl Hub {
         let bell;
         {
             let mut agents = self.agents.lock().unwrap();
-            let h = agents.heur.entry(pane).or_insert(PaneHeur {
-                alt: false,
-                last_activity: now,
-                last_bell: None,
-                in_osc: false,
-            });
+            let h = agents
+                .heur
+                .entry(pane)
+                .or_insert_with(|| PaneHeur::new(now));
             h.last_activity = now;
             bell = scan_bell(&mut h.in_osc, data);
             if alt_on {
@@ -1006,9 +1057,13 @@ impl Hub {
             }
             if alt_off {
                 h.alt = false;
+                // The full-screen app left — any consumed ask died with it.
+                h.consumed = None;
             }
             if bell {
                 h.last_bell = Some(now);
+                // A bell is an explicit NEW ask — un-hush a consumed pane.
+                h.consumed = None;
             }
             // Fresh output means the pane is active again, so a stale "done" badge
             // (e.g. from Codex's turn-complete notify) is wrong — clear it and let
@@ -1030,12 +1085,28 @@ impl Hub {
         }
     }
 
+    /// Any heuristic signals at all? Cheap gate the 2s sweep checks before
+    /// spending a tmux call on the pane→pid map.
+    pub(crate) fn has_heur_signals(&self) -> bool {
+        !self.agents.lock().unwrap().heur.is_empty()
+    }
+
     /// Recompute heuristic badges for background full-screen panes (hook reports
-    /// always win; the window you're currently viewing gets no badge).
-    fn run_heuristics(&self) {
+    /// always win; the window you're currently viewing gets no badge). `pids`
+    /// maps pane → shell pid (both engines, from `pane_pids`): the foreground
+    /// command behind it decides whether a full-screen pane is an AGENT at all
+    /// — vim/less/htop in the alt screen must never raise an attention badge.
+    fn run_heuristics(&self, pids: &BTreeMap<u32, u32>) {
         const IDLE: Duration = Duration::from_secs(8);
         const BELL_WINDOW: Duration = Duration::from_secs(25);
         let now = Instant::now();
+        // Classify agents OUTSIDE the agents lock: /proc reads are cheap but
+        // not free, and the sweep shouldn't hold up note_output for them.
+        let agentish: BTreeSet<u32> = pids
+            .iter()
+            .filter(|(_, &pid)| foreground_cmd(pid).is_some_and(|c| is_agent_cmd(&c)))
+            .map(|(&p, _)| p)
+            .collect();
         // The "viewed" set spans engines: the active tmux window's panes, or
         // the active native window's VISIBLE layout leaves (zoom-aware) —
         // panes you're looking at get no badge. Before this read the tmux
@@ -1066,11 +1137,11 @@ impl Hub {
                 if agents.entries.get(&p).map(|e| e.source) == Some(Source::Hook) {
                     continue; // hooks own this pane
                 }
-                let (alt, last_activity, last_bell) = {
+                let (alt, last_activity, last_bell, consumed) = {
                     let h = &agents.heur[&p];
-                    (h.alt, h.last_activity, h.last_bell)
+                    (h.alt, h.last_activity, h.last_bell, h.consumed.is_some())
                 };
-                let desired = if active.contains(&p) || !alt {
+                let desired = if active.contains(&p) || !alt || consumed || !agentish.contains(&p) {
                     None
                 } else if now.duration_since(last_activity) > IDLE {
                     let belled = last_bell.is_some_and(|b| now.duration_since(b) < BELL_WINDOW);
@@ -1579,11 +1650,42 @@ fn foreground_cmd(shell_pid: u32) -> Option<String> {
     (!c.is_empty()).then_some(c)
 }
 
+/// Foreground commands whose full-screen TUIs count as AGENTS the heuristic
+/// may badge. Anything else in the alt screen (vim, less, htop, fzf…) is just
+/// a UI you left open and must never raise an attention badge.
+fn is_agent_cmd(comm: &str) -> bool {
+    const AGENTS: [&str; 10] = [
+        "claude",
+        "codex",
+        "kimi",
+        "kimi-cli",
+        "opencode",
+        "aider",
+        "gemini",
+        "copilot",
+        "cursor-agent",
+        "continue",
+    ];
+    AGENTS.contains(&comm)
+}
+
 /// Periodically recompute heuristic agent badges for un-hooked panes.
 pub async fn heuristic_sweep(hub: Arc<Hub>) {
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
-        hub.run_heuristics();
+        // pane → shell pid across both engines (one tmux call per sweep). The
+        // proc gate inside run_heuristics depends on this, so skip the whole
+        // sweep when no pane has produced heuristic signals yet.
+        if !hub.has_heur_signals() {
+            continue;
+        }
+        let pids: BTreeMap<u32, u32> = hub
+            .pane_pids()
+            .await
+            .into_iter()
+            .map(|(_, pane, pid, _, _)| (pane, pid))
+            .collect();
+        hub.run_heuristics(&pids);
     }
 }
 
