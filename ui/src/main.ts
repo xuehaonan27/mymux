@@ -107,10 +107,23 @@ function applyBackground() {
 const termArea = document.getElementById('term') as HTMLDivElement;
 const tabsEl = document.getElementById('tabs') as HTMLDivElement;
 const hostsEl = document.getElementById('hostbar') as HTMLElement;
+const barEl = document.getElementById('bar') as HTMLElement;
 const statusEl = document.getElementById('status')!;
 const metaEl = document.getElementById('meta')!;
 const agentsEl = document.getElementById('agents')!;
 const hintEl = document.getElementById('hint')!;
+
+// Overlay sheets (code/git/proc/pkgs/settings + the confirm banner) anchor
+// their tops to --bar-bottom so the host strip + bar can never cover them.
+// The var must move with anything that changes the top chrome's height —
+// host strip toggles (renderHosts) and window resizes (font reflow / wraps).
+function syncChromeVar() {
+  document.documentElement.style.setProperty(
+    '--bar-bottom',
+    `${Math.round(barEl.getBoundingClientRect().bottom)}px`,
+  );
+}
+window.addEventListener('resize', syncChromeVar);
 
 // The empty state: shown when every session has ended and the host picker was
 // dismissed without connecting — instead of a void window (reported bug).
@@ -738,7 +751,10 @@ function renderHosts() {
   const show = workspaces.size >= 2 || (getPrefs().hostBarAlways && workspaces.size >= 1);
   hostsEl.style.display = show ? 'flex' : 'none';
   document.body.classList.toggle('has-hostbar', show);
-  if (!show) return;
+  if (!show) {
+    syncChromeVar(); // the strip just vanished — sheets move back up
+    return;
+  }
   let i = 0;
   for (const w of workspaces.values()) {
     i += 1;
@@ -757,6 +773,7 @@ function renderHosts() {
     // Many hosts overflow into a horizontal scroll — keep the active one visible.
     if (w === activeWs) chip.scrollIntoView({ inline: 'nearest', block: 'nearest' });
   }
+  syncChromeVar(); // the host strip just appeared/disappeared — sheets follow
 }
 
 // Glance summary across ALL hosts: how many windows want your attention.

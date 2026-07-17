@@ -234,3 +234,170 @@ pub async fn write(Json(req): Json<WriteReq>) -> StatusCode {
         None => StatusCode::FORBIDDEN,
     }
 }
+
+#[derive(Deserialize)]
+pub struct SearchQuery {
+    #[serde(default)]
+    q: String,
+    /// "name" (default): case-insensitive substring over the relative path;
+    /// "content": grep-style line matches with line numbers.
+    #[serde(default)]
+    mode: String,
+    pane: Option<u32>,
+    /// Optional absolute root override (the panel's root switcher).
+    root: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct SearchHit {
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+}
+
+/// Directories the walker never enters — dependency/build forests and VCS
+/// internals are huge and searching them is never the intent.
+const SKIP_DIRS: [&str; 9] = [
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "__pycache__",
+    ".venv",
+];
+const MAX_HITS: usize = 200;
+const MAX_DEPTH: usize = 12;
+const MAX_SEARCH_FILE: u64 = 1024 * 1024; // 1 MiB
+
+/// `GET /fs/search?pane=&root=&q=<needle>&mode=name|content` — bounded walk of
+/// the effective root. Never follows symlinks (the root is canonicalized, so
+/// the walk can't escape it), skips [`SKIP_DIRS`], stops at [`MAX_HITS`].
+pub async fn search(Query(q): Query<SearchQuery>) -> Result<Json<Vec<SearchHit>>, StatusCode> {
+    let root = root_for_req(q.pane, &q.root)
+        .await
+        .canonicalize()
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let needle = q.q.trim().to_lowercase();
+    if needle.len() < 2 {
+        return Ok(Json(vec![])); // one-char queries flood the walker for nothing
+    }
+    let content = q.mode == "content";
+    // The walk is blocking std::fs; keep it off the async workers.
+    tokio::task::spawn_blocking(move || walk_search(&root, &needle, content))
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn walk_search(root: &Path, needle: &str, content: bool) -> Vec<SearchHit> {
+    let mut hits: Vec<SearchHit> = Vec::new();
+    let mut stack: Vec<(PathBuf, String, usize)> = vec![(root.to_path_buf(), String::new(), 0)];
+    while let Some((dir, rel, depth)) = stack.pop() {
+        if depth > MAX_DEPTH || hits.len() >= MAX_HITS {
+            break;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.filter_map(|e| e.ok()) {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_symlink() {
+                continue; // stay inside the canonicalized root
+            }
+            let child_rel = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
+            if ft.is_dir() {
+                if !SKIP_DIRS.contains(&name.as_str()) {
+                    stack.push((e.path(), child_rel, depth + 1));
+                }
+                continue;
+            }
+            if !content {
+                if child_rel.to_lowercase().contains(needle) {
+                    hits.push(SearchHit {
+                        path: child_rel,
+                        line: None,
+                        text: None,
+                    });
+                }
+                continue;
+            }
+            let Ok(md) = e.metadata() else { continue };
+            if md.len() > MAX_SEARCH_FILE {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(e.path()) else { continue };
+            if bytes.iter().take(8192).any(|&b| b == 0) {
+                continue; // binary sniff (same trick as the editor)
+            }
+            let text = String::from_utf8_lossy(&bytes);
+            for (i, line) in text.lines().enumerate() {
+                if hits.len() >= MAX_HITS {
+                    break;
+                }
+                if line.to_lowercase().contains(needle) {
+                    hits.push(SearchHit {
+                        path: child_rel.clone(),
+                        line: Some(i as u32 + 1),
+                        text: Some(line.trim().chars().take(160).collect()),
+                    });
+                }
+            }
+        }
+    }
+    // DFS pop order is arbitrary across dirs; give the UI something stable:
+    // name mode ranks short paths first, content mode groups by file.
+    hits.sort_by(|a, b| match (a.line, b.line) {
+        (None, None) => a.path.len().cmp(&b.path.len()).then(a.path.cmp(&b.path)),
+        _ => a.path.cmp(&b.path).then(a.line.cmp(&b.line)),
+    });
+    hits
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn touch(dir: &Path, rel: &str, content: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, content).unwrap();
+    }
+
+    #[test]
+    fn search_matches_names_and_contents_skipping_forests() {
+        let root = std::env::temp_dir().join(format!("mymux-fs-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        touch(&root, "src/main.rs", "fn main() { println!(\"needle\"); }\n");
+        touch(&root, "src/needle_helper.rs", "// needle\n");
+        touch(&root, "node_modules/dep/index.js", "needle\n");
+        std::fs::write(root.join("bin.dat"), b"nee\0dle").unwrap(); // NUL byte → binary
+
+        let names = walk_search(&root, "needle", false);
+        assert!(
+            names.iter().any(|h| h.path == "src/needle_helper.rs"),
+            "{names:?}"
+        );
+        // The content of needle_helper.rs doesn't matter for name mode.
+        assert!(!names.iter().any(|h| h.path.contains("node_modules")), "{names:?}");
+
+        let contents = walk_search(&root, "needle", true);
+        assert!(
+            contents
+                .iter()
+                .any(|h| h.path == "src/main.rs" && h.line == Some(1)),
+            "{contents:?}"
+        );
+        assert!(!contents.iter().any(|h| h.path.contains("node_modules")), "{contents:?}");
+        assert!(!contents.iter().any(|h| h.path == "bin.dat"), "{contents:?}"); // binary-sniffed out
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

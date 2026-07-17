@@ -140,6 +140,7 @@ async fn run() {
         .route("/fs/root", get(fs::root))
         .route("/fs/read", get(fs::read))
         .route("/fs/raw", get(fs::raw))
+        .route("/fs/search", get(fs::search))
         .route("/fs/write", post(fs::write))
         .route("/git/status", get(git::status))
         .route("/git/diff", get(git::diff))

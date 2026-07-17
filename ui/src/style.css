@@ -1,4 +1,8 @@
 :root {
+  /* Bottom edge of the top chrome (#hostbar? + #bar) — overlay sheets anchor
+   * their tops to it (kept current by main.ts) so the bar never covers them.
+   */
+  --bar-bottom: 40px;
   color-scheme: dark;
   /* macOS glass tokens */
   --chrome: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI", sans-serif;
@@ -367,7 +371,7 @@ body.has-winalpha #hostbar {
 .confirm-bar {
   display: none;
   position: fixed;
-  top: 64px;
+  top: calc(var(--bar-bottom, 40px) + 24px);
   left: 50%;
   transform: translateX(-50%);
   z-index: 40;
@@ -457,7 +461,7 @@ body.has-winalpha #hostbar {
 .pkgs-panel {
   display: none;
   position: fixed;
-  inset: 40px 15% 40px 15%;
+  inset: calc(var(--bar-bottom, 40px) + 0px) 15% 40px 15%;
   z-index: 22;
   flex-direction: column;
   gap: 8px;
@@ -476,7 +480,7 @@ body.has-winalpha #hostbar {
 .settings-panel {
   display: none;
   position: fixed;
-  inset: 40px 25% 40px 25%;
+  inset: calc(var(--bar-bottom, 40px) + 0px) 25% 40px 25%;
   z-index: 22;
   flex-direction: column;
   gap: 4px;
@@ -774,7 +778,7 @@ body.has-winalpha #hostbar {
 /* ⌘E code overlay: file tree + CodeMirror editor, as a glass sheet. */
 .code-panel {
   position: fixed;
-  inset: 48px 4% 28px;
+  inset: calc(var(--bar-bottom, 40px) + 8px) 4% 28px;
   z-index: 20;
   display: none;
   background: var(--glass-bg-strong);
@@ -988,6 +992,60 @@ body.has-winalpha #hostbar {
 }
 .trow.tsubinit:hover {
   background: var(--control-bg-hover);
+}
+.code-tool {
+  font: 10px ui-monospace, Menlo, monospace;
+  color: #9aa5b1;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 0 5px;
+  cursor: pointer;
+}
+.code-tool:hover {
+  color: #c5cdd9;
+  border-color: var(--hairline);
+}
+.code-tool:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.code-search {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--hairline);
+}
+.code-search input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  outline: none;
+  color: #c5cdd9;
+  font: 11px ui-monospace, Menlo, monospace;
+  padding: 2px 0;
+}
+.code-search input::placeholder {
+  color: #5b6673;
+}
+.chit {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chit-path {
+  color: #9aa5b1;
+}
+.chit-text {
+  color: #6b7684;
+  margin-left: 6px;
+}
+.chit-empty {
+  padding: 6px 8px;
+  font: 11px ui-monospace, Menlo, monospace;
+  color: #5b6673;
 }
 #code-path {
   color: #c5cdd9;
@@ -1268,7 +1326,7 @@ body.has-winalpha #hostbar {
 /* Process-tree overlay (mini-htop): window → pane → indented process rows. */
 .proc-panel {
   position: fixed;
-  inset: 56px 6% 40px;
+  inset: calc(var(--bar-bottom, 40px) + 16px) 6% 40px;
   z-index: 21;
   display: none;
   flex-direction: column;
@@ -1774,7 +1832,7 @@ body.has-winalpha #hostbar {
 /* Git graph panel (ui/src/gitgraph.ts): toolbar + swim-lane graph + detail. */
 .git-panel {
   position: fixed;
-  inset: 48px 4% 28px;
+  inset: calc(var(--bar-bottom, 40px) + 8px) 4% 28px;
   z-index: 20;
   display: none;
   flex-direction: column;

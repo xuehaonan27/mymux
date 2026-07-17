@@ -560,6 +560,10 @@ interface Session {
   root: string | null;
   path: string | null; // buffer currently in the editor, or null
   buffers: Map<string, Buffer>;
+  /** Tree dirs the user has opened — the session outlives panel close/reopen,
+   * so a reopened panel rebuilds the same expansion instead of collapsing
+   * everything back to the root. */
+  expanded: Set<string>;
   /** The override the last fsRoot fetch was for (cache key for read-back). */
   fsRootReq?: string | null;
   /** Effective absolute root the daemon actually honored (LSP-URI mapping +
@@ -596,13 +600,18 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     <div class="code-side">
       <div class="code-side-hd">changes</div>
       <div class="code-changes" id="code-changes"></div>
-      <div class="code-side-hd">files</div>
+      <div class="code-side-hd"><span>files</span><button id="tree-fold" class="code-tool" title="expand all folders">▸ all</button></div>
       <div class="code-root" id="code-root">
         <button id="root-up" title="up one level">↑</button>
         <button id="root-home" title="back to the pane's cwd">⌂</button>
         <button id="root-repo" title="git repo root">⎇</button>
         <span id="code-root-path"></span>
       </div>
+      <div class="code-search">
+        <input id="code-search-input" placeholder="search this root (2+ chars)…" spellcheck="false">
+        <button id="code-search-mode" class="code-tool" title="toggle: match file names / match file contents">name</button>
+      </div>
+      <div class="code-hits" id="code-hits" style="display:none"></div>
       <div class="code-tree" id="code-tree"></div>
     </div>
     <div class="code-main">
@@ -616,6 +625,10 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   document.body.appendChild(panel);
 
   const treeEl = panel.querySelector('#code-tree') as HTMLElement;
+  const hitsEl = panel.querySelector('#code-hits') as HTMLElement;
+  const foldBtn = panel.querySelector('#tree-fold') as HTMLButtonElement;
+  const searchInput = panel.querySelector('#code-search-input') as HTMLInputElement;
+  const searchModeBtn = panel.querySelector('#code-search-mode') as HTMLButtonElement;
   const changesEl = panel.querySelector('#code-changes') as HTMLElement;
   const rootEl = panel.querySelector('#code-root') as HTMLElement;
   const rootPathEl = panel.querySelector('#code-root-path') as HTMLElement;
@@ -660,7 +673,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     const k = keyOf(p, root);
     let s = sessions.get(k);
     if (!s) {
-      s = { pane: p, root, path: null, buffers: new Map() };
+      s = { pane: p, root, path: null, buffers: new Map(), expanded: new Set() };
       sessions.set(k, s);
     }
     return s;
@@ -1116,15 +1129,18 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     const row = document.createElement('div');
     row.className = 'trow' + (dir ? ' tdir' : ' tfile');
     row.style.paddingLeft = `${depth * 12 + 8}px`;
-    row.textContent = (dir ? '▸ ' : '') + name;
     wrap.appendChild(row);
 
     if (dir) {
       const kids = document.createElement('div');
-      kids.style.display = 'none';
       wrap.appendChild(kids);
       let loaded = false;
-      let expanded = false;
+      let expanded = current?.expanded.has(path) ?? false;
+      const paint = () => {
+        row.textContent = (expanded ? '▾ ' : '▸ ') + name;
+        kids.style.display = expanded ? '' : 'none';
+      };
+      paint();
       const renderKids = async () => {
         kids.replaceChildren();
         const pane = current?.pane ?? null;
@@ -1170,14 +1186,27 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       row.addEventListener('click', async (e) => {
         e.stopPropagation();
         expanded = !expanded;
-        row.textContent = (expanded ? '▾ ' : '▸ ') + name;
-        kids.style.display = expanded ? '' : 'none';
+        // The session's set is the source of truth the NEXT tree build reads —
+        // closing and reopening the panel no longer loses your place.
+        const mem = current?.expanded;
+        if (mem) {
+          if (expanded) mem.add(path);
+          else mem.delete(path);
+        }
+        paint();
         if (expanded && !loaded) {
           loaded = true;
           await renderKids();
         }
       });
+      // A dir the session remembers as open renders open right away (and its
+      // remembered-open descendants cascade once their rows fetch in).
+      if (expanded) {
+        loaded = true;
+        void renderKids();
+      }
     } else {
+      row.textContent = name;
       row.addEventListener('click', (e) => {
         e.stopPropagation();
         void openFile(path);
@@ -1193,6 +1222,171 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     const items = await fsList(s?.pane ?? null, '', s?.root ?? null);
     if (current !== s) return; // switched panes mid-fetch
     for (const c of items) treeEl.appendChild(treeItem(c.name, c.name, c.dir, 0));
+    syncFoldBtn();
+  }
+
+  // ---- expand/collapse-all + search -----------------------------------------
+
+  /** Dependency/build forests the walker never enters (matches the daemon's
+   * /fs/search skip list — expanding greendale is never the intent either). */
+  const TREE_SKIP = new Set([
+    '.git',
+    '.hg',
+    '.svn',
+    'node_modules',
+    'target',
+    'dist',
+    'build',
+    '__pycache__',
+    '.venv',
+  ]);
+  const EXPAND_CAP = 500;
+
+  function syncFoldBtn() {
+    const any = (current?.expanded.size ?? 0) > 0;
+    foldBtn.textContent = any ? '▾ all' : '▸ all';
+    foldBtn.title = any ? 'collapse all folders' : 'expand all folders';
+  }
+
+  foldBtn.addEventListener('click', async () => {
+    const s = current;
+    if (!s) return;
+    if (s.expanded.size) {
+      s.expanded.clear();
+      await loadTree();
+      return;
+    }
+    // Expand-all: BFS the root collecting every dir (capped, forests skipped),
+    // then let the normal rebuild render it — the session set IS the state.
+    foldBtn.disabled = true;
+    foldBtn.textContent = '…';
+    try {
+      let frontier = [''];
+      while (frontier.length && s.expanded.size < EXPAND_CAP) {
+        const batch = frontier.splice(0, 8); // modest parallelism, shell-friendly
+        const lists = await Promise.all(batch.map((d) => fsList(s.pane, d, s.root)));
+        if (current !== s) return; // root hopped mid-walk
+        for (let i = 0; i < batch.length; i++) {
+          for (const e of lists[i]) {
+            if (!e.dir || TREE_SKIP.has(e.name) || s.expanded.size >= EXPAND_CAP) continue;
+            const p = batch[i] ? `${batch[i]}/${e.name}` : e.name;
+            if (!s.expanded.has(p)) {
+              s.expanded.add(p);
+              frontier.push(p);
+            }
+          }
+        }
+      }
+    } finally {
+      foldBtn.disabled = false;
+    }
+    await loadTree();
+  });
+
+  interface SearchHit {
+    path: string;
+    line?: number;
+    text?: string;
+  }
+  let searchTimer: number | undefined;
+  let searchSeq = 0;
+
+  function hideHits() {
+    hitsEl.style.display = 'none';
+    treeEl.style.display = '';
+  }
+
+  /** A session/root swap invalidates the query (hits are root-relative). */
+  function resetSearch() {
+    searchInput.value = '';
+    searchSeq++;
+    hideHits();
+  }
+
+  function renderHits(hits: SearchHit[], content: boolean) {
+    hitsEl.replaceChildren();
+    for (const h of hits.slice(0, 100)) {
+      const row = document.createElement('div');
+      row.className = 'trow chit';
+      if (content) {
+        const head = document.createElement('span');
+        head.className = 'chit-path';
+        head.textContent = `${h.path}:${h.line}`;
+        const snip = document.createElement('span');
+        snip.className = 'chit-text';
+        snip.textContent = h.text ?? '';
+        row.append(head, snip);
+        row.addEventListener('click', () => void openFileAt(h.path, h.line ?? 1));
+      } else {
+        row.textContent = h.path;
+        row.addEventListener('click', () => void openFile(h.path));
+      }
+      hitsEl.appendChild(row);
+    }
+    if (!hits.length) {
+      const d = document.createElement('div');
+      d.className = 'chit-empty';
+      d.textContent = 'no matches';
+      hitsEl.appendChild(d);
+    } else if (hits.length > 100) {
+      const d = document.createElement('div');
+      d.className = 'chit-empty';
+      d.textContent = `…${hits.length - 100} more (daemon cap)`;
+      hitsEl.appendChild(d);
+    }
+    treeEl.style.display = 'none';
+    hitsEl.style.display = '';
+  }
+
+  async function runSearch() {
+    const s = current;
+    const q = searchInput.value.trim();
+    if (!s || q.length < 2) {
+      hideHits();
+      return;
+    }
+    const content = searchModeBtn.dataset.mode === 'content';
+    const seq = ++searchSeq;
+    try {
+      const r = await fetch(
+        `${apiBase()}/fs/search?${paneQ(s.pane)}${rootQ(s.root)}q=${encodeURIComponent(q)}&mode=${content ? 'content' : 'name'}`,
+      );
+      if (seq !== searchSeq || current !== s) return; // a newer query/root won
+      const hits = r.ok ? ((await r.json()) as SearchHit[]) : [];
+      renderHits(hits, content);
+    } catch {
+      /* daemon unreachable — leave the tree be */
+    }
+  }
+
+  searchInput.addEventListener('input', () => {
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(() => void runSearch(), 250);
+  });
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.stopPropagation();
+      (hitsEl.querySelector('.chit') as HTMLElement | null)?.click();
+    }
+  });
+  searchModeBtn.addEventListener('click', () => {
+    const content = searchModeBtn.dataset.mode === 'content';
+    searchModeBtn.dataset.mode = content ? 'name' : 'content';
+    searchModeBtn.textContent = content ? 'name' : 'content';
+    void runSearch();
+  });
+
+  /** Open a file and land the cursor on a line (content-search click-through). */
+  async function openFileAt(path: string, line: number) {
+    await openFile(path);
+    if (!editor || current?.path !== path) return;
+    const l = Math.max(1, Math.min(line, editor.state.doc.lines));
+    const pos = editor.state.doc.line(l).from;
+    editor.dispatch({
+      selection: { anchor: pos },
+      effects: EditorView.scrollIntoView(pos, { y: 'center' }),
+    });
+    editor.focus();
   }
 
   /** .gitmodules registry for the session (used by the tree's init rows). */
@@ -1275,6 +1469,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     else mount(b?.kind === 'text' ? b.state : emptyState());
     renderHeader();
     renderRootBar();
+    resetSearch(); // hits are root-relative; a pane/root swap invalidates them
     void loadTree();
     void loadChanges();
     editor?.focus();
@@ -1487,6 +1682,11 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       }
       if (qoVisible) {
         closeQuickOpen();
+        return true;
+      }
+      // An active search query clears before the panel itself closes.
+      if (searchInput.value) {
+        resetSearch();
         return true;
       }
       return false;
