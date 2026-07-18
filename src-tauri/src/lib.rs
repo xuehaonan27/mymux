@@ -29,7 +29,7 @@ struct Active {
 #[derive(Default)]
 struct ConnState {
     /// Live tunnels, one per host id.
-    conns: Mutex<HashMap<String, Active>>,
+    conns: Arc<Mutex<HashMap<String, Active>>>,
     /// Latest tunnel status per host id (kept by each forwarder task).
     statuses: Arc<Mutex<HashMap<String, Status>>>,
     /// The LAST explanatory reason per host ("bind 8089 in use", "health
@@ -38,7 +38,7 @@ struct ConnState {
     reasons: Arc<Mutex<HashMap<String, String>>>,
     /// Last local port used per host, so a host keeps a stable URL across
     /// reconnects of its tunnel.
-    ports: Mutex<HashMap<String, u16>>,
+    ports: Arc<Mutex<HashMap<String, u16>>>,
     /// Latest post-connect meta probe per host (daemon version + hook map).
     metas: Arc<Mutex<HashMap<String, HostMeta>>>,
 }
@@ -79,20 +79,30 @@ struct ConnInfo {
     why: Option<String>,
 }
 
-/// A free local port for a host's tunnel: its remembered port when available,
-/// else probe upward from 8088, skipping ports held by other live tunnels.
-fn alloc_port(state: &ConnState, host_id: &str) -> Result<u16, String> {
-    let in_use: Vec<u16> = state.conns.lock().unwrap().values().map(|a| a.port).collect();
+/// A free local port for a host's tunnel, from explicit maps (also usable
+/// from spawned closures that only hold Arc clones): its remembered port
+/// when available, else probe upward from 8088, skipping ports held by other
+/// live tunnels. None when the whole 8088-8187 range is taken.
+fn alloc_port_maps(
+    conns: &Mutex<HashMap<String, Active>>,
+    ports: &Mutex<HashMap<String, u16>>,
+    host_id: &str,
+) -> Option<u16> {
+    let in_use: Vec<u16> = conns.lock().unwrap().values().map(|a| a.port).collect();
     let free = |p: u16| {
         !in_use.contains(&p) && std::net::TcpListener::bind(("127.0.0.1", p)).is_ok()
     };
-    if let Some(&p) = state.ports.lock().unwrap().get(host_id) {
+    if let Some(&p) = ports.lock().unwrap().get(host_id) {
         if free(p) {
-            return Ok(p);
+            return Some(p);
         }
     }
-    (8088u16..8188)
-        .find(|&p| free(p))
+    (8088u16..8188).find(|&p| free(p))
+}
+
+/// A free local port for a host's tunnel, as a Result for command paths.
+fn alloc_port(state: &ConnState, host_id: &str) -> Result<u16, String> {
+    alloc_port_maps(&state.conns, &state.ports, host_id)
         .ok_or_else(|| "no free local port in 8088-8187".to_string())
 }
 
@@ -396,8 +406,16 @@ async fn connect(
         }
     });
     let master2 = master.clone();
-    let task = tauri::async_runtime::spawn(async move {
-        run_russh_tunnel(cfg, &master2, tx).await;
+    let task = tauri::async_runtime::spawn({
+        let conns_c = state.conns.clone();
+        let ports_c = state.ports.clone();
+        let hid_c = host_id.clone();
+        async move {
+            // A held port is transient: the supervisor re-asks for a fresh
+            // port and retries instead of dying on the first failed bind.
+            let realloc = move || alloc_port_maps(&conns_c, &ports_c, &hid_c);
+            run_russh_tunnel(cfg, &master2, tx, realloc).await;
+        }
     });
 
     state

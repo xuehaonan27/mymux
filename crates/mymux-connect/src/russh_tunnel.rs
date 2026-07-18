@@ -64,6 +64,8 @@ pub enum Status {
 }
 
 /// Terminal states that shouldn't be retried in a tight loop (need user action).
+/// BindFailed is deliberately NOT here: a held port is transient contention —
+/// the supervisor evicts it and retries on a freshly allocated one instead.
 fn is_fatal(s: &Status) -> bool {
     matches!(
         s,
@@ -71,7 +73,6 @@ fn is_fatal(s: &Status) -> bool {
             | Status::HostKeyUnknown { .. }
             | Status::HostKeyMismatch
             | Status::DaemonUnreachable
-            | Status::BindFailed(_)
     )
 }
 
@@ -731,7 +732,12 @@ async fn maybe_install(
 /// re-authenticates). Fatal states (bad auth / unknown or changed host key)
 /// stop the loop and are reported so the UI can prompt; transient drops
 /// reconnect silently.
-pub async fn run_russh_tunnel(cfg: HostConfig, master: &Master, status: mpsc::Sender<Status>) {
+pub async fn run_russh_tunnel<R: Fn() -> Option<u16> + Send>(
+    mut cfg: HostConfig,
+    master: &Master,
+    status: mpsc::Sender<Status>,
+    realloc: R,
+) {
     let min = Duration::from_millis(500);
     let max = Duration::from_secs(30);
     let mut backoff = min;
@@ -749,6 +755,30 @@ pub async fn run_russh_tunnel(cfg: HostConfig, master: &Master, status: mpsc::Se
             .unwrap_or(Status::Reconnecting);
         if !matches!(end, Status::DaemonUnreachable) {
             daemon_tries = 0; // any other outcome resets the install-breaker
+        }
+
+        // A held port is transient contention (previous instance of ourselves,
+        // a teardown still closing, another app): evict and retry on a FRESH
+        // port — never fatal, so a reconnect race can't kill the host for good.
+        if let Status::BindFailed(held) = end {
+            match realloc() {
+                Some(p) => {
+                    let _ = status
+                        .send(Status::Error(format!(
+                            "forward port {held} is held — retrying on fresh port {p}"
+                        )))
+                        .await;
+                    cfg.local_port = p;
+                    backoff = min;
+                    continue;
+                }
+                None => {
+                    let _ = status
+                        .send(Status::Error("no free local port in 8088-8187".to_string()))
+                        .await;
+                    return;
+                }
+            }
         }
 
         if is_fatal(&end) {

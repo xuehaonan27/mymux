@@ -31,7 +31,7 @@ async fn main() {
     let passphrase = env("PASSPHRASE");
     let (tx, mut rx) = mpsc::channel(32);
     let master = Master::new(cfg.clone(), passphrase);
-    tokio::spawn(async move { run_russh_tunnel(cfg, &master, tx).await });
+    tokio::spawn(async move { run_russh_tunnel(cfg, &master, tx, || None).await });
     while let Some(s) = rx.recv().await {
         println!("STATUS {s:?}");
     }
