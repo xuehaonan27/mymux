@@ -123,7 +123,9 @@ async fn ssh_connect(
 
     let config = Arc::new(Config {
         keepalive_interval: Some(Duration::from_secs(15)),
-        keepalive_max: 3,
+        // 2 minutes of silence before russh itself gives up — jittery NATs
+        // eat one 45s stretch all the time (3 was far too trigger-happy).
+        keepalive_max: 8,
         // No inactivity timeout: the session doubles as the host's persistent
         // MASTER (ControlMaster semantics) — an idle master between forward
         // cycles must survive, or every reconnect costs a fresh auth.
@@ -427,22 +429,40 @@ async fn connect_and_serve(
         }
     };
     let health = async {
+        // Two-strike rule + 4s budget: one jittery second must never declare
+        // a live link dead (that loop is what painted 'connecting' on healthy
+        // but lossy NAT paths). russh's own keepalive (15s × 8) keeps the
+        // final say on a truly dead socket.
+        let mut misses = 0u32;
         loop {
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(Duration::from_secs(4)).await;
             // Probe liveness with a session channel; the timeout guards against a
             // hang on a half-dead socket (russh may not have noticed the drop yet).
-            match tokio::time::timeout(Duration::from_secs(3), handle.channel_open_session()).await
+            match tokio::time::timeout(Duration::from_secs(4), handle.channel_open_session()).await
             {
-                Ok(Ok(_ch)) => {} // healthy (channel closes on drop)
+                Ok(Ok(_ch)) => {
+                    misses = 0; // healthy (channel closes on drop)
+                }
                 _ => {
+                    misses += 1;
+                    if misses < 2 {
+                        let _ = status
+                            .send(Status::Error(
+                                "health probe missed once — double-checking before declaring the link dead"
+                                    .to_string(),
+                            ))
+                            .await;
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        continue;
+                    }
                     master.invalidate().await;
                     let _ = status
                         .send(Status::Error(
-                            "3s health probe timed out — the SSH session is presumed dead; reconnecting"
+                            "two consecutive health probes timed out — the link is down; reconnecting"
                                 .to_string(),
                         ))
                         .await;
-                    return Status::Reconnecting; // timed out or errored → session dead
+                    return Status::Reconnecting;
                 }
             }
         }

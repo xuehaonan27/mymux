@@ -117,12 +117,22 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
             .await;
     }
 
-    // Server events → client.
+    // Server events → client. A Ping every 20s keeps the forward's byte
+    // stream alive on idle links (enterprise NATs love eating quiet TCP —
+    // that's what made the app's health probes declare live links dead).
     let mut send_task = tokio::spawn({
         let hub = hub.clone();
         async move {
+            let mut ping = tokio::time::interval(std::time::Duration::from_secs(20));
+            ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                match rx.recv().await {
+                tokio::select! {
+                    _ = ping.tick() => {
+                        if sender.send(Message::Ping(Vec::new().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    ev = rx.recv() => match ev {
                     Ok(ServerEvent::Output { pane, data }) => {
                         if sender
                             .send(Message::Binary(frame(pane, &data).into()))
@@ -158,6 +168,7 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
+                }
                 }
             }
         }
