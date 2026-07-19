@@ -115,6 +115,8 @@ export class Workspace {
   /** Set while the link is down (banner up) — cleared on the next healthy
    * state, which is the moment to fire onReconnected. */
   private wasDown = false;
+  /** One-time arm for the document.fonts.ready metric re-derive (see makePane). */
+  private fontHealArmed = false;
 
   constructor(opts: {
     id: string;
@@ -491,6 +493,19 @@ export class Workspace {
       allowProposedApi: true,
     });
     term.open(el);
+    // The DOM renderer bakes letter-spacing into spans from glyph probes AT
+    // RENDER TIME, and a WRONG probe gets cached — a pane born before font
+    // metrics settle (fallback CJK fonts load late) keeps a wide-spaced bake
+    // in its snapshot rows forever ("the band right above the page" in TUI
+    // history). Re-derive metrics IMMEDIATELY, before the first snapshot
+    // byte can paint: a font-size ping-pong forces measure() +
+    // WidthCache.clear() + default-spacing recalc; the 0.001px excursion is
+    // invisible and ends on the real size.
+    {
+      const px = this.style.fontSize;
+      term.options.fontSize = px + 0.001;
+      term.options.fontSize = px;
+    }
     // Unicode 11 widths: xterm's default V6 table treats every emoji as
     // width 1 — the DOM renderer's negative letter-spacing then COLLAPSES
     // the span (typed 👌🏻 paints over the next glyph's left half) and every
@@ -554,6 +569,20 @@ export class Workspace {
       el.appendChild(chip);
       term.onScroll((ydisp: number) => {
         chip.style.display = ydisp === 0 ? '' : 'none';
+      });
+    }
+
+    // And once more when the fallback fonts (CJK & co.) finish loading —
+    // that's the moment the early probes stop lying. Once per workspace.
+    if (!this.fontHealArmed) {
+      this.fontHealArmed = true;
+      void document.fonts.ready.then(() => {
+        if (this.dead) return;
+        for (const p of this.panes.values()) {
+          const px = this.style.fontSize;
+          p.term.options.fontSize = px + 0.001;
+          p.term.options.fontSize = px;
+        }
       });
     }
 

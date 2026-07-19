@@ -3,9 +3,12 @@
 // and an editor ⌘+click on a path token inside a file. Fixture: ~/ux-git-tree
 // (reused by gittreecheck; refs.txt is added here).
 import { chromium } from 'playwright-core';
+import { startSandbox } from './sandbox.mjs';
 import { execSync } from 'node:child_process';
 
-const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
+const sb = await startSandbox(8094, 'pathjump');
+process.on('exit', () => sb.kill());
+const UI = process.env.UI ?? sb.ui;
 const fails = [];
 const check = (name, cond, detail = '') => {
   console.log(`${cond ? '✓' : '✗ FAIL'} ${name}${cond || !detail ? '' : ` — ${detail}`}`);
@@ -133,6 +136,7 @@ check('editor ⌘+click jumps to inner.txt', ((await page.locator('#code-path').
 
 await page.screenshot({ path: 'shots/pathjump.png' });
 await browser.close();
+sb.kill();
 if (fails.length) {
   console.error('FAILURES:', fails.join(' | '));
   process.exit(1);

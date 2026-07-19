@@ -4,9 +4,12 @@
 // Ignored files must NOT pollute the changes list. Saving an edit in the
 // editor flips the file's porcelain state live. Fixture: ~/ux-git-tree repo.
 import { chromium } from 'playwright-core';
+import { startSandbox } from './sandbox.mjs';
 import { execSync } from 'node:child_process';
 
-const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
+const sb = await startSandbox(8092, 'gittree');
+process.on('exit', () => sb.kill());
+const UI = process.env.UI ?? sb.ui;
 const fails = [];
 const check = (name, cond, detail = '') => {
   console.log(`${cond ? '✓' : '✗ FAIL'} ${name}${cond || !detail ? '' : ` — ${detail}`}`);
@@ -73,6 +76,7 @@ check('save flips file to git-m live', (await cls(page, 'clean.txt'))?.includes(
 
 await page.screenshot({ path: 'shots/gittree.png' });
 await browser.close();
+sb.kill();
 if (fails.length) {
   console.error('FAILURES:', fails.join(' | '));
   process.exit(1);

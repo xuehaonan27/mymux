@@ -3,9 +3,12 @@
 // (Copy Relative/Absolute Path). Fixture ~/ux-git-tree (sub/inner.txt among
 // others); the unreadable-dir case is staged live via chmod.
 import { chromium } from 'playwright-core';
+import { startSandbox } from './sandbox.mjs';
 import { execSync } from 'node:child_process';
 
-const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
+const sb = await startSandbox(8093, 'treectx');
+process.on('exit', () => sb.kill());
+const UI = process.env.UI ?? sb.ui;
 const fails = [];
 const check = (name, cond, detail = '') => {
   console.log(`${cond ? '✓' : '✗ FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
@@ -104,6 +107,7 @@ try {
 execSync('rm -rf ~/ux-git-tree/locked');
 await page.screenshot({ path: 'shots/treectx.png' });
 await browser.close();
+sb.kill();
 if (fails.length) {
   console.error('FAILURES:', fails.join(' | '));
   process.exit(1);
