@@ -1,8 +1,12 @@
 //! WebSocket bridge to the UI (protocol v2).
 //!
 //! Server→client:
-//! - **binary** `[u32 LE paneId][raw bytes]` — pane output (and screen reseeds).
-//! - **text** JSON `{"t":"state",...}` — window/pane/layout snapshot.
+//! - **binary** `[u32 LE paneId][u8 flags][raw bytes]` — live pane output
+//!   (flags=0), or a self-contained screen reseed (flags & FRAME_SEED):
+//!   clients holding the pane live drop reseeds, frozen/fresh ones apply.
+//! - **text** JSON — `{"t":"state",...}` structure snapshots,
+//!   `{"t":"exit","pane":N}` authoritative pane death (dispose, don't hide),
+//!   `{"t":"resync"}` the client fell behind: reseed every held pane.
 //!
 //! Client→server:
 //! - **binary** `[u32 LE paneId][key bytes]` — keystrokes for that pane.
@@ -91,10 +95,17 @@ enum ClientMsg {
     },
 }
 
-/// Prepend the pane id as a 4-byte LE header to a payload.
-fn frame(pane: u32, data: &[u8]) -> Vec<u8> {
-    let mut f = Vec::with_capacity(4 + data.len());
+/// Output-frame flag: the payload is a self-contained reseed (snapshot), not
+/// live output. Native panes keep streaming while backgrounded, so a client
+/// holding one live must drop routine reseeds; a fresh, resync-marked, or
+/// frozen (backgrounded tmux) terminal applies them wholesale.
+const FRAME_SEED: u8 = 1;
+
+/// Prepend the pane id (4-byte LE) + flags byte header to a payload.
+fn frame(pane: u32, flags: u8, data: &[u8]) -> Vec<u8> {
+    let mut f = Vec::with_capacity(5 + data.len());
     f.extend_from_slice(&pane.to_le_bytes());
+    f.push(flags);
     f.extend_from_slice(data);
     f
 }
@@ -113,7 +124,7 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
     let _ = sender.send(Message::Text(hub.state_json().into())).await;
     for (pane, seed) in hub.snapshot_visible().await {
         let _ = sender
-            .send(Message::Binary(frame(pane, &seed).into()))
+            .send(Message::Binary(frame(pane, FRAME_SEED, &seed).into()))
             .await;
     }
 
@@ -135,10 +146,25 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
                     ev = rx.recv() => match ev {
                     Ok(ServerEvent::Output { pane, data }) => {
                         if sender
-                            .send(Message::Binary(frame(pane, &data).into()))
+                            .send(Message::Binary(frame(pane, 0, &data).into()))
                             .await
                             .is_err()
                         {
+                            break;
+                        }
+                    }
+                    Ok(ServerEvent::Seed { pane, data }) => {
+                        if sender
+                            .send(Message::Binary(frame(pane, FRAME_SEED, &data).into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(ServerEvent::Exit { pane }) => {
+                        let msg = serde_json::json!({ "t": "exit", "pane": pane });
+                        if sender.send(Message::Text(msg.to_string().into())).await.is_err() {
                             break;
                         }
                     }
@@ -149,7 +175,16 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
                     }
                     // P2 lossless: we fell behind. Rather than drop bytes and
                     // corrupt the stream, resync from tmux's authoritative state.
+                    // The "resync" heads-up tells the client to distrust every
+                    // buffer it holds BEFORE the state+seeds below land.
                     Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if sender
+                            .send(Message::Text(r#"{"t":"resync"}"#.into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                         if sender
                             .send(Message::Text(hub.state_json().into()))
                             .await
@@ -159,7 +194,7 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
                         }
                         for (pane, seed) in hub.snapshot_visible().await {
                             if sender
-                                .send(Message::Binary(frame(pane, &seed).into()))
+                                .send(Message::Binary(frame(pane, FRAME_SEED, &seed).into()))
                                 .await
                                 .is_err()
                             {

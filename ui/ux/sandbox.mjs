@@ -34,6 +34,9 @@ export async function startSandbox(port, name) {
           port,
           sock,
           ui: `http://127.0.0.1:5173/?port=${port}`,
+          /** [0]=ptyd, [1]=mymuxd — checks that simulate a daemon/ptyd death
+           * kill one directly; everyone else just calls kill(). */
+          procs,
           kill() {
             for (const p of procs) p.kill();
             rmSync(sock, { force: true });

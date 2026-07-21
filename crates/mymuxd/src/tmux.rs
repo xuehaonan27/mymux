@@ -6,7 +6,7 @@
 //! types `exit`), the supervisor resets state so the next connection respawns it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -24,6 +24,14 @@ use crate::state::{build_state_json, ActiveNative, NativeTab};
 /// Any daemon-native (non-tmux) pane id: local ephemeral or ptyd persistent.
 fn is_native_id(id: u32) -> bool {
     is_ephemeral(id) || is_persistent(id)
+}
+
+/// The kind a split INHERITS from its target pane: the mirror's CURRENT flag
+/// is truth (promotion/demotion flips it without changing the id); the id
+/// bit is only the birth kind, kept as a fallback for unmirrored panes — the
+/// same source the state rendering path uses (P1-01).
+fn split_kind(current: Option<bool>, pane: u32) -> bool {
+    current.unwrap_or_else(|| is_ephemeral(pane))
 }
 
 /// tmux control socket (`tmux -L <socket>`). Overridable via `MYMUX_SOCKET` so a
@@ -45,11 +53,92 @@ set -g exit-empty off
 setenv -g COLORTERM truecolor
 ";
 
+/// Scrollback lines a tmux-pane snapshot restores (matches the native grid's
+/// 4,096-line history cap).
+const SNAPSHOT_HISTORY: u32 = 4096;
+/// Total seed budget: on ultra-wide panes the oldest scrollback rows are
+/// dropped first so a reseed can't balloon the WebSocket frame.
+const MAX_SEED_BYTES: usize = 3 * 1024 * 1024;
+
+/// The per-user state dir for daemon runtime files: `<base>/mymux`, created
+/// 0700 when WE create it (a pre-existing dir — ptyd's socket dir, the
+/// history dir — keeps its perms; XDG_RUNTIME_DIR itself is 0700 anyway).
+fn conf_dir(base: &Path) -> Option<PathBuf> {
+    let dir = base.join("mymux");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .ok()?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// Where the generated tmux config lives. NOT a predictable shared
+/// /tmp/mymux.tmux.conf (audit C-29): that path is symlink-prone and parallel
+/// daemons (each with its own MYMUX_SOCKET) would fight over one file. Use a
+/// per-user state dir, a 0600 file, and this daemon's socket identity in the
+/// name so sandboxes never collide.
+fn tmux_conf_path() -> PathBuf {
+    let ident: String = socket()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let name = format!("tmux.{ident}.conf");
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")));
+    if let Some(dir) = base.and_then(|b| conf_dir(&b)) {
+        return dir.join(name);
+    }
+    // Last resort (no HOME / no XDG): a per-process name in temp_dir.
+    std::env::temp_dir().join(format!("mymux-{}-{ident}.tmux.conf", std::process::id()))
+}
+
+/// Write the conf (0600), never following a pre-existing symlink at the path
+/// (the 0700 dir is the real guard; this is belt-and-braces).
+fn write_tmux_conf(path: &Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if let Ok(md) = std::fs::symlink_metadata(path) {
+        if md.file_type().is_symlink() {
+            std::fs::remove_file(path)?;
+        }
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    opts.open(path)?.write_all(TMUX_CONF.as_bytes())
+}
+
 /// A message fanned out to every connected UI.
 #[derive(Clone)]
 pub enum ServerEvent {
-    /// Raw bytes from one pane (already un-escaped).
+    /// Raw bytes from one pane (already un-escaped) — LIVE output.
     Output { pane: u32, data: Vec<u8> },
+    /// A self-contained screen reseed for one pane. Native panes stream
+    /// continuously (even backgrounded), so clients holding one live drop
+    /// routine reseeds; only fresh, resync-marked, or frozen (backgrounded
+    /// tmux) terminals apply them — see ws.rs/workspace.ts.
+    Seed { pane: u32, data: Vec<u8> },
+    /// A native pane is authoritatively gone (exited or closed): clients
+    /// must DISPOSE it. A mere layout absence only HIDES live terminals.
+    Exit { pane: u32 },
     /// A pre-serialized `{"t":"state",...}` snapshot (structure changed).
     State(String),
 }
@@ -158,8 +247,8 @@ pub struct Hub {
 impl Hub {
     pub fn new() -> Arc<Self> {
         let (events_tx, _) = broadcast::channel(4096);
-        let conf_path = std::env::temp_dir().join("mymux.tmux.conf");
-        if let Err(e) = std::fs::write(&conf_path, TMUX_CONF) {
+        let conf_path = tmux_conf_path();
+        if let Err(e) = write_tmux_conf(&conf_path) {
             eprintln!("mymuxd: could not write tmux config: {e}");
         }
         Arc::new(Self {
@@ -545,7 +634,7 @@ impl Hub {
     /// Reseed every visible pane (used after zoom changes re-created panes).
     async fn reseed_visible(&self) {
         for (pane, seed) in self.snapshot_visible().await {
-            self.emit(ServerEvent::Output { pane, data: seed });
+            self.emit(ServerEvent::Seed { pane, data: seed });
         }
     }
 
@@ -560,7 +649,7 @@ impl Hub {
             self.snapshot_pane(pane).await
         };
         if !seed.is_empty() {
-            self.emit(ServerEvent::Output { pane, data: seed });
+            self.emit(ServerEvent::Seed { pane, data: seed });
         }
     }
 
@@ -689,7 +778,7 @@ impl Hub {
             self.resize_native_window(id, cols, rows);
             self.emit(ServerEvent::State(self.state_json()));
             for (pane, seed) in self.snapshot_visible().await {
-                self.emit(ServerEvent::Output { pane, data: seed });
+                self.emit(ServerEvent::Seed { pane, data: seed });
             }
             // Landing on this window means its finished work has been seen.
             self.clear_done_on_focus();
@@ -703,7 +792,7 @@ impl Hub {
         if cur == Some(id) {
             self.emit(ServerEvent::State(self.state_json()));
             for (pane, seed) in self.snapshot_visible().await {
-                self.emit(ServerEvent::Output { pane, data: seed });
+                self.emit(ServerEvent::Seed { pane, data: seed });
             }
         }
     }
@@ -826,6 +915,9 @@ impl Hub {
     /// A native pane is gone (killed or exited on its own): collapse its
     /// window's layout, resize the survivors, fix the view, repaint.
     async fn native_pane_removed(&self, pane: u32) {
+        // Authoritative death — clients must DISPOSE the terminal (a layout
+        // absence alone only hides it: background panes stay alive now).
+        self.emit(ServerEvent::Exit { pane });
         // Drop any agent badge/heuristic state the dead pane left behind.
         {
             let mut agents = self.agents.lock().unwrap();
@@ -904,7 +996,7 @@ impl Hub {
             .map(|p| p.display().to_string());
         let new_id = match self
             .persist
-            .spawn_pane(self, cwd, new_w, new_h, is_ephemeral(pane))
+            .spawn_pane(self, cwd, new_w, new_h, split_kind(self.persist.pane_ephemeral(pane), pane))
             .await
         {
             Ok(id) => id,
@@ -1228,17 +1320,35 @@ impl Hub {
     /// Snapshot one pane's current screen (with colors): clear+home + content,
     /// then restore the real cursor position (capture-pane loses it — without
     /// this the prompt/cursor ends up stuck at the bottom of the pane).
+    /// Scrollback is captured too (`-S -<N>`, bounded by the pane's history
+    /// and by [`SNAPSHOT_HISTORY`]) so a reseed restores backlog instead of
+    /// just the visible page (audit #39).
     pub async fn snapshot_pane(&self, pane: u32) -> Vec<u8> {
         let target = format!("%{pane}");
+        // State first: the scrollback start is bounded by the pane's ACTUAL
+        // history. An alt-screen pane reports 0 → the capture stays
+        // visible-only there, exactly as before.
+        let (cy, cx, alt, hist) = self.pane_state(&target).await;
+        let start = hist.min(SNAPSHOT_HISTORY);
+        let start_arg = format!("-{start}");
         let cap = Command::new("tmux")
-            .args(["-L", socket(), "capture-pane", "-e", "-p", "-t", &target])
+            .args([
+                "-L",
+                socket(),
+                "capture-pane",
+                "-e",
+                "-p",
+                "-S",
+                &start_arg,
+                "-t",
+                &target,
+            ])
             .output()
             .await;
         let Ok(cap) = cap else { return Vec::new() };
         if !cap.status.success() {
             return Vec::new();
         }
-        let (cy, cx, alt) = self.pane_state(&target).await;
 
         let mut seed = Vec::new();
         if alt {
@@ -1253,7 +1363,20 @@ impl Hub {
         // Drop one trailing newline so we don't paint an extra row (which would
         // scroll the top line away).
         let content = cap.stdout.strip_suffix(b"\n").unwrap_or(&cap.stdout);
-        for (i, row) in content.split(|&b| b == b'\n').enumerate() {
+        let rows: Vec<&[u8]> = content.split(|&b| b == b'\n').collect();
+        // Keep the seed sane on ultra-wide panes: drop the OLDEST rows first
+        // (they'd only scroll into client scrollback — the cheapest loss; the
+        // visible page must survive).
+        let mut total = 0usize;
+        let mut keep_from = 0usize;
+        for (i, row) in rows.iter().enumerate().rev() {
+            total += row.len() + 2;
+            if total > MAX_SEED_BYTES {
+                keep_from = (i + 1).min(rows.len().saturating_sub(1));
+                break;
+            }
+        }
+        for (i, row) in rows[keep_from..].iter().enumerate() {
             if i > 0 {
                 seed.extend_from_slice(b"\r\n");
             }
@@ -1263,9 +1386,10 @@ impl Hub {
         seed
     }
 
-    /// The pane's cursor position (0-based `row, col`) and whether it is on the
-    /// alternate screen.
-    async fn pane_state(&self, target: &str) -> (u32, u32, bool) {
+    /// The pane's cursor position (0-based `row, col`), whether it is on the
+    /// alternate screen, and its scrollback fill (`#{history_size}` — lines
+    /// above the visible page; 0 on the alternate screen).
+    async fn pane_state(&self, target: &str) -> (u32, u32, bool, u32) {
         let out = Command::new("tmux")
             .args([
                 "-L",
@@ -1274,7 +1398,7 @@ impl Hub {
                 "-p",
                 "-t",
                 target,
-                "#{cursor_y} #{cursor_x} #{alternate_on}",
+                "#{cursor_y} #{cursor_x} #{alternate_on} #{history_size}",
             ])
             .output()
             .await;
@@ -1285,10 +1409,11 @@ impl Hub {
                 let cy = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
                 let cx = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
                 let alt = it.next() == Some("1");
-                return (cy, cx, alt);
+                let hist = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                return (cy, cx, alt, hist);
             }
         }
-        (0, 0, false)
+        (0, 0, false, 0)
     }
 
     /// Snapshot every pane in the active window: `(paneId, seedBytes)`.
@@ -1617,7 +1742,7 @@ async fn reader_loop(stdout: ChildStdout, hub: Arc<Hub>) {
             hub.fix_active_pane();
             hub.emit(ServerEvent::State(hub.state_json()));
             for (pane, seed) in hub.snapshot_visible().await {
-                hub.emit(ServerEvent::Output { pane, data: seed });
+                hub.emit(ServerEvent::Seed { pane, data: seed });
             }
             if switched {
                 hub.clear_done_on_focus();
@@ -1756,5 +1881,81 @@ mod tests {
         assert!(!scan_bell(&mut osc, b"two\x07"));
         assert!(!osc); // the BEL in this chunk was the title terminator
         assert!(scan_bell(&mut osc, b"\x07")); // a later real bell counts
+    }
+
+    /// P1-01: a split must inherit the target's CURRENT kind — promotion and
+    /// demotion flip the mirror flag without touching the birth-ID bit.
+    #[test]
+    fn split_inherits_the_current_kind_not_the_birth_bit() {
+        use super::split_kind;
+        use crate::persist::{EPH_BIT, PERSIST_BIT};
+        let born_ephemeral = EPH_BIT | 7;
+        let born_persistent = PERSIST_BIT | 9;
+        // Promoted ⌁→∞: the flag (Some(false)) wins over the ⌁ birth bit.
+        assert!(!split_kind(Some(false), born_ephemeral));
+        // Demoted ∞→⌁: the flag (Some(true)) wins over the ∞ birth bit.
+        assert!(split_kind(Some(true), born_persistent));
+        // Never touched: same answer as the birth kind.
+        assert!(split_kind(Some(true), born_ephemeral));
+        assert!(!split_kind(Some(false), born_persistent));
+        // Unmirrored pane (legacy/adoption race): fall back to the id bit.
+        assert!(split_kind(None, born_ephemeral));
+        assert!(!split_kind(None, born_persistent));
+    }
+
+    /// C-29: the generated tmux conf lives under a per-user dir, named after
+    /// this daemon's socket identity (parallel daemons can't collide), and is
+    /// written 0600 without following a pre-planted symlink.
+    #[test]
+    fn tmux_conf_path_is_per_user_and_socket_scoped() {
+        let path = super::tmux_conf_path();
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(
+            name.contains(super::socket()),
+            "conf name carries the daemon's socket identity: {name}"
+        );
+        assert_ne!(path, std::env::temp_dir().join("mymux.tmux.conf"));
+    }
+
+    /// A state dir WE create is 0700 (a pre-existing app dir keeps its perms).
+    #[cfg(unix)]
+    #[test]
+    fn conf_dir_created_0700() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let base = std::env::temp_dir().join(format!("mymux-confdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = super::conf_dir(&base).unwrap();
+        assert!(dir.ends_with("mymux"));
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tmux_conf_write_replaces_a_symlink_without_following_it() {
+        let dir = std::env::temp_dir().join(format!("mymux-conf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let outside = dir.join("outside.conf");
+        std::fs::write(&outside, "precious").unwrap();
+        let conf = dir.join("tmux.test.conf");
+        std::os::unix::fs::symlink(&outside, &conf).unwrap();
+
+        super::write_tmux_conf(&conf).unwrap();
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "precious");
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), super::TMUX_CONF);
+        assert!(std::fs::symlink_metadata(&conf).unwrap().file_type().is_file());
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&conf).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "the conf is 0600"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

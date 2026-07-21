@@ -86,6 +86,14 @@ export interface WorkspaceHooks {
 interface Pane {
   term: Terminal;
   el: HTMLDivElement;
+  /** Has live output (or an applied reseed) arrived since creation / a
+   * distrust mark? Routine reseeds (every window switch broadcasts them)
+   * apply only while false: a LIVE native pane's buffer is already a
+   * faithful mirror — replaying a snapshot over it would duplicate/mangle
+   * the screen and cap its scrollback. Hidden native panes keep streaming,
+   * so they stay live across window switches; a stale one (size drift,
+   * reconnect, server lag) is marked false and healed by exactly one reseed. */
+  live: boolean;
 }
 
 export class Workspace {
@@ -159,6 +167,9 @@ export class Workspace {
     this.ws = ws;
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => {
+      // A reconnect means output was missed while the link was down: no held
+      // buffer is trustworthy. (First connect has an empty map — a no-op.)
+      this.distrustAll();
       this.setWsState('open');
       this.sendResize();
     };
@@ -221,7 +232,10 @@ export class Workspace {
     this.visible = true;
     this.root.style.display = '';
     // Repaint after display:none and pick up any size drift while hidden.
-    for (const p of this.panes.values()) p.term.refresh(0, Math.max(0, p.term.rows - 1));
+    // (Connected panes only — preserved background terminals need nothing.)
+    for (const p of this.panes.values()) {
+      if (p.el.isConnected) p.term.refresh(0, Math.max(0, p.term.rows - 1));
+    }
     this.sendResize();
     // Un-hiding a workspace is the same re-composite moment (host switch on a
     // translucent window): nudge once the reflowed content is on screen.
@@ -242,12 +256,29 @@ export class Workspace {
       this.ws.onerror = null;
       this.ws.close();
     }
-    for (const [pid, p] of this.panes) {
-      p.term.dispose();
-      p.el.remove();
-      this.panes.delete(pid);
-    }
+    for (const pid of [...this.panes.keys()]) this.disposePane(pid);
     this.root.remove();
+  }
+
+  /** Authoritative teardown of one terminal: daemon Exit event, distrust
+   * sweep, or tmux-lane backgrounding. Native panes leaving the layout are
+   * merely HIDDEN instead — see applyLayout. */
+  private disposePane(pid: number) {
+    const p = this.panes.get(pid);
+    if (!p) return;
+    p.term.dispose();
+    p.el.remove();
+    this.panes.delete(pid);
+  }
+
+  /** Output was (or may have been) missed — reconnect or server Lagged:
+   * dispose hidden terminals (they re-create fresh on return) and mark
+   * visible ones stale so the reseeds that follow actually apply. */
+  private distrustAll() {
+    for (const [pid, p] of [...this.panes]) {
+      if (p.el.isConnected) p.live = false;
+      else this.disposePane(pid);
+    }
   }
 
   // ---- protocol ------------------------------------------------------------
@@ -275,6 +306,17 @@ export class Workspace {
       this.hooks.onError?.(this, msg.msg ?? 'unknown daemon error');
       return;
     }
+    if (msg.t === 'exit') {
+      // Authoritative pane death (native): DISPOSE — a layout absence alone
+      // only hides live terminals (background panes stay alive).
+      if (msg.pane != null) this.disposePane(msg.pane);
+      return;
+    }
+    if (msg.t === 'resync') {
+      // We fell behind the daemon's broadcast; distrust every held buffer.
+      this.distrustAll();
+      return;
+    }
     if (msg.t !== 'state') return;
     this.windowList = msg.windows;
     this.activeWindow = msg.active_window;
@@ -288,12 +330,19 @@ export class Workspace {
   }
 
   private onBinary(buf: ArrayBuffer) {
-    if (buf.byteLength < 4) return;
-    const pane = new DataView(buf).getUint32(0, true);
-    // Only panes in this workspace's active-window layout exist; output for a
-    // background window is dropped (switching windows triggers a snapshot).
+    // [u32 LE paneId][u8 flags][payload] — flags & 1 = reseed (snapshot).
+    if (buf.byteLength < 5) return;
+    const view = new DataView(buf);
+    const pane = view.getUint32(0, true);
+    const seed = (view.getUint8(4) & 1) !== 0;
     const p = this.panes.get(pane);
-    if (p) p.term.write(new Uint8Array(buf, 4));
+    if (!p) return; // unknown here (disposed/never held) — nothing to paint on
+    // A routine reseed for a pane we're mirroring live must NOT replay over
+    // the real stream (duplicate screen + capped scrollback). Frozen panes
+    // (fresh / stale-marked / backgrounded tmux) apply it wholesale.
+    if (seed && p.live) return;
+    p.term.write(new Uint8Array(buf, 5));
+    p.live = true;
   }
 
   /** macOS translucent-compositor nudge, retargeted per layer family (the
@@ -316,7 +365,11 @@ export class Workspace {
     else flick();
   }
 
-  // Place each leaf pane at its exact cell rectangle; dispose vanished panes.
+  // Place each leaf pane at its exact cell rectangle. Native panes absent
+  // from the layout are PRESERVED (hidden, still fed) — they keep their
+  // xterm, scrollback, selection and DOM identity across window switches;
+  // only the daemon's Exit event disposes them. tmux panes freeze while
+  // backgrounded, so they're disposed and re-seeded on return as before.
   private applyLayout(root: LayoutNode) {
     const { cellW, cellH } = this.style;
     const seen = new Set<number>();
@@ -324,12 +377,17 @@ export class Workspace {
     const place = (n: LayoutNode) => {
       if (n.kind === 'leaf' && n.pane != null) {
         const p = this.panes.get(n.pane) ?? this.makePane(n.pane, n);
+        const wasHidden = !p.el.isConnected;
+        if (wasHidden) this.root.appendChild(p.el); // reattach a preserved pane
         p.el.style.left = `${n.x * cellW}px`;
         p.el.style.top = `${n.y * cellH}px`;
         p.el.style.width = `${n.w * cellW}px`;
         p.el.style.height = `${n.h * cellH}px`;
         if (p.term.cols !== n.w || p.term.rows !== n.h) {
           p.term.resize(Math.max(1, n.w), Math.max(1, n.h));
+          // A hidden pane whose size drifted while backgrounded painted live
+          // bytes at the wrong width — mark stale; exactly one reseed heals.
+          if (wasHidden) p.live = false;
         }
         seen.add(n.pane);
       } else {
@@ -340,9 +398,14 @@ export class Workspace {
 
     for (const [pid, p] of [...this.panes]) {
       if (!seen.has(pid)) {
-        p.term.dispose();
-        p.el.remove();
-        this.panes.delete(pid);
+        if (pid >= 0x40000000) {
+          // Native background pane: detach the element, KEEP the terminal.
+          p.el.remove();
+        } else {
+          // tmux background pane: no live stream while hidden → dispose;
+          // the return reseed (scrollback included) rebuilds it faithfully.
+          this.disposePane(pid);
+        }
       }
     }
     // Transparent-window ghost buster: removed pixels linger in the macOS
@@ -352,7 +415,7 @@ export class Workspace {
     // fires both at once and after they have painted.
     const setSwapped = seen.size !== idsBefore.size || [...seen].some((id) => !idsBefore.has(id));
     if (setSwapped) {
-      const paneEls = [...this.panes.values()].map((p) => p.el);
+      const paneEls = [...this.panes.values()].filter((p) => p.el.isConnected).map((p) => p.el);
       this.ghostBust(0, paneEls);
       this.ghostBust(120, paneEls);
       // xterm's DOM renderer bakes letter-spacing into spans from glyph-width
@@ -363,26 +426,30 @@ export class Workspace {
       // 0.001px excursion is invisible and ends on the real size.
       window.setTimeout(() => {
         for (const p of this.panes.values()) {
+          if (!p.el.isConnected) continue;
           const px = this.style.fontSize;
           p.term.options.fontSize = px + 0.001;
           p.term.options.fontSize = px;
         }
       }, 150);
-      // And ask the daemon for a truth-repaint of every NEW pane (on-by-one,
-      // now that this client's resize has landed server-side on the same
-      // ordered channel): a stale-size snapshot — whose remnants the app's
-      // own SIGWINCH repaint doesn't fully cover — is overwritten wholesale,
-      // every snapshot being self-contained behind its reset prefix.
+      // And ask the daemon for a truth-repaint of every pane that still
+      // needs one (fresh, or stale-marked by size drift / distrust): a
+      // stale-size snapshot — whose remnants the app's own SIGWINCH repaint
+      // doesn't fully cover — is overwritten wholesale, every snapshot
+      // being self-contained behind its reset prefix. LIVE panes (native
+      // panes preserved across the switch) skip this entirely: no reseed,
+      // no scrollback loss, no flicker.
       window.setTimeout(() => {
         if (idsBefore.size === 0) return; // initial adoption just snapshotted
-        for (const id of this.panes.keys()) {
-          if (!idsBefore.has(id)) this.sendJson({ t: 'refresh', pane: id });
+        for (const [id, p] of this.panes) {
+          if (p.el.isConnected && !p.live) this.sendJson({ t: 'refresh', pane: id });
         }
       }, 280);
     }
     // The active-pane ring exists to tell SPLIT panes apart — around a single
-    // full-window pane it's just an ugly frame.
-    this.root.classList.toggle('multi', this.panes.size > 1);
+    // full-window pane it's just an ugly frame. Count VISIBLE panes: preserved
+    // background terminals sit in the map too.
+    this.root.classList.toggle('multi', seen.size > 1);
     this.renderDividers(root);
   }
 
@@ -568,7 +635,11 @@ export class Workspace {
       });
       el.appendChild(chip);
       term.onScroll((ydisp: number) => {
-        chip.style.display = ydisp === 0 ? '' : 'none';
+        // "older output" exists only in a normal buffer with real scrollback —
+        // alt-screen TUIs (vim, agents) and fresh panes fire ydisp=0 spuriously
+        // and the chip would linger over them.
+        const buf = term.buffer.active;
+        chip.style.display = ydisp === 0 && buf.type === 'normal' && buf.baseY > 0 ? '' : 'none';
       });
     }
 
@@ -586,7 +657,7 @@ export class Workspace {
       });
     }
 
-    const pane: Pane = { term, el };
+    const pane: Pane = { term, el, live: false };
     this.panes.set(id, pane);
     return pane;
   }
@@ -629,8 +700,15 @@ export class Workspace {
     // Also refocus when focus fell back to <body>: switching windows disposes
     // the previously-focused terminal, and no one else has claimed focus.
     const orphaned = document.activeElement === document.body;
-    // Never steal focus from a text input (tab rename, host manager, …).
-    const typing = document.activeElement instanceof HTMLInputElement;
+    // Never steal focus from anywhere the user is typing: inputs (tab rename,
+    // host manager), textareas, selects, and contenteditable surfaces
+    // (CodeMirror's .cm-content, the termhist pager's focused div).
+    const ae = document.activeElement;
+    const typing =
+      ae instanceof HTMLInputElement ||
+      ae instanceof HTMLTextAreaElement ||
+      ae instanceof HTMLSelectElement ||
+      (ae instanceof HTMLElement && ae.isContentEditable);
     if ((changed || orphaned) && !typing && id != null && this.visible) {
       this.panes.get(id)?.term.focus();
     }

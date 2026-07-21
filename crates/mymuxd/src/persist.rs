@@ -329,6 +329,14 @@ async fn pump(hub: Arc<Hub>, mut events: mpsc::UnboundedReceiver<PtydEvent>) {
     }
 }
 
+/// Our real uid, parsed from /proc (this crate has no libc dep; the code
+/// below is Linux-only anyway — tmux, /proc/<pid>/cwd, pty sockets).
+fn own_uid() -> Option<u32> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|l| l.starts_with("Uid:"))?;
+    line.split_whitespace().nth(1)?.parse().ok()
+}
+
 /// Start ptyd: the systemd --user service when available, else a sibling
 /// binary next to the current executable (dev builds). Never kill-on-drop —
 /// ptyd must outlive us; that's its whole purpose.
@@ -347,12 +355,35 @@ async fn bootstrap_ptyd() {
         // OUR socket actually ANSWERS; a stale socket file (dead ptyd) is not
         // an answer — unlink it and fall through to the sibling binary.
         for _ in 0..10 {
-            if tokio::net::UnixStream::connect(socket_path()).await.is_ok() {
-                return;
+            if let Ok(s) = tokio::net::UnixStream::connect(socket_path()).await {
+                // Trust only a peer running as OUR uid: a fallback-location
+                // socket can be pre-bound by another local user (P1-19) —
+                // ptyd makes the same SO_PEERCRED check before claiming it.
+                match s.peer_cred().map(|c| c.uid()) {
+                    Ok(uid) if Some(uid) == own_uid() => return,
+                    other => {
+                        eprintln!(
+                            "mymuxd: {} answers but its peer uid doesn't match ours ({other:?}) — refusing to trust it",
+                            socket_path().display(),
+                        );
+                        // Do NOT remove or shadow a foreign socket; the
+                        // sibling spawn below fails its own probe closed.
+                        break;
+                    }
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        let _ = std::fs::remove_file(socket_path()); // stale socket file
+        // Stale socket file — remove only if it's OURS (never a foreign one).
+        let ours = std::fs::metadata(socket_path())
+            .map(|m| {
+                use std::os::unix::fs::MetadataExt;
+                Some(m.uid()) == own_uid()
+            })
+            .unwrap_or(false);
+        if ours {
+            let _ = std::fs::remove_file(socket_path());
+        }
     }
     let bin = std::env::current_exe()
         .ok()
