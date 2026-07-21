@@ -9,6 +9,16 @@ use tokio::process::Command;
 
 use crate::fs::{root_for_req, safe_path};
 
+/// Hard deadline for every git READ (mutations get their own, longer ones).
+const READ_TIMEOUT: u64 = 30;
+/// Collection caps for the shared read runner (`read_capped`): listings vs.
+/// small one-value probes vs. blob bodies.
+const LIST_CAP: usize = 8 * 1024 * 1024;
+const META_CAP: usize = 1024 * 1024;
+const BLOB_CAP: usize = 8 * 1024 * 1024;
+/// Unified-diff cap for show/compare/diff (~4 MiB, as displayed).
+const DIFF_CAP: usize = 4_000_000;
+
 #[derive(Serialize)]
 pub struct GitFile {
     /// Two-char porcelain status, e.g. " M", "A ", "??", "R ".
@@ -30,40 +40,23 @@ pub struct StatusQuery {
 }
 
 /// `GET /git/status?pane=<id>` — working-tree + staged changes.
-pub async fn status(Query(q): Query<StatusQuery>) -> Json<Vec<GitFile>> {
-    let root = root_for_req(q.pane, &q.root).await;
-    let mut args = vec!["status", "--porcelain=v1"];
+pub async fn status(Query(q): Query<StatusQuery>) -> Result<Json<Vec<GitFile>>, StatusCode> {
+    let root = root_for_req(q.pane, &q.root).await?;
+    let mut args = vec!["status", "--porcelain=v1", "-z"];
     if q.ignored.as_deref() == Some("1") {
         // "matching" collapses ignored dirs to one row (node_modules/ itself,
         // not its whole forest) — exactly what a tree needs to dim.
         args.push("--ignored=matching");
     }
-    let out = Command::new("git").arg("-C").arg(&root).args(&args).output().await;
-    let Ok(out) = out else { return Json(vec![]) };
-    if !out.status.success() {
-        return Json(vec![]);
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(&root).args(&args);
+    let Some(out) = read_capped(cmd, LIST_CAP, READ_TIMEOUT).await else {
+        return Ok(Json(vec![]));
+    };
+    if !out.ok {
+        return Ok(Json(vec![]));
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut files: Vec<GitFile> = text
-        .lines()
-        .filter_map(|l| {
-            if l.len() < 4 {
-                return None;
-            }
-            let status = l[..2].to_string();
-            // Rename/copy rows read "old -> new"; the tree colors the NEW path.
-            let path = if status.contains('R') || status.contains('C') {
-                l[3..].rsplit(" -> ").next().unwrap_or(l[3..].trim()).to_string()
-            } else {
-                l[3..].trim().to_string()
-            };
-            Some(GitFile {
-                status,
-                path,
-                submodule: false,
-            })
-        })
-        .collect();
+    let mut files = parse_status_z(&out.stdout);
     // Mark gitlinks. .gitmodules lives at the toplevel while status paths are
     // prefix-relative, so re-root the submodule paths at the current prefix.
     if let Some(subs) = submodule_paths(&root).await {
@@ -73,35 +66,57 @@ pub async fn status(Query(q): Query<StatusQuery>) -> Json<Vec<GitFile>> {
             }
         }
     }
-    Json(files)
+    Ok(Json(files))
+}
+
+/// Parse `status --porcelain=v1 -z`: NUL-terminated `XY <path>` records with
+/// RAW filenames (no C-quoting — Chinese, newline, tab and quote characters
+/// all survive). Rename/copy records are `XY <new>\0<old>\0`: git reverses
+/// the human "old -> new" order under -z, and the tree colors the NEW path.
+fn parse_status_z(bytes: &[u8]) -> Vec<GitFile> {
+    let mut files = Vec::new();
+    let mut it = bytes.split(|&b| b == 0);
+    while let Some(rec) = it.next() {
+        if rec.len() < 4 {
+            continue;
+        }
+        let status = String::from_utf8_lossy(&rec[..2]).into_owned();
+        let path = String::from_utf8_lossy(&rec[3..]).into_owned();
+        if status.contains('R') || status.contains('C') {
+            it.next(); // the original path — the panel tracks the new one
+        }
+        files.push(GitFile {
+            status,
+            path,
+            submodule: false,
+        });
+    }
+    files
 }
 
 /// Submodule paths relative to the CURRENT root (status/diff path style):
 /// .gitmodules values are toplevel-relative, so strip the pane's prefix (""
 /// at the toplevel; a subdir prefix keeps out-of-view subs from matching).
 /// None outside a work tree; Some(vec![]) when there's no .gitmodules.
-async fn submodule_paths(root: &std::path::Path) -> Option<Vec<String>> {    let out = Command::new("git")
-        .arg("-C")
+async fn submodule_paths(root: &std::path::Path) -> Option<Vec<String>> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
         .arg(root)
-        .args(["rev-parse", "--show-toplevel", "--show-prefix"])
-        .output()
-        .await
-        .ok()?;
-    if !out.status.success() {
+        .args(["rev-parse", "--show-toplevel", "--show-prefix"]);
+    let out = read_capped(cmd, META_CAP, READ_TIMEOUT).await?;
+    if !out.ok {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines();
     let top = lines.next()?.trim().to_string();
     let prefix = lines.next().unwrap_or("").trim().to_string();
-    let cfgs = Command::new("git")
-        .arg("-C")
+    let mut cfg = Command::new("git");
+    cfg.arg("-C")
         .arg(&top)
-        .args(["config", "-f", ".gitmodules", "--get-regexp", "\\.path$"])
-        .output()
-        .await
-        .ok()?;
-    if !cfgs.status.success() {
+        .args(["config", "-f", ".gitmodules", "--get-regexp", "\\.path$"]);
+    let cfgs = read_capped(cfg, META_CAP, READ_TIMEOUT).await?;
+    if !cfgs.ok {
         return Some(vec![]); // no .gitmodules
     }
     let subs = String::from_utf8_lossy(&cfgs.stdout)
@@ -121,10 +136,12 @@ pub struct SubmoduleInfo {
 }
 
 /// `GET /git/submodules?pane=&root=` — .gitmodules entries + init state.
-pub async fn submodules(Query(q): Query<StatusQuery>) -> Json<Vec<SubmoduleInfo>> {
-    let root = root_for_req(q.pane, &q.root).await;
+pub async fn submodules(
+    Query(q): Query<StatusQuery>,
+) -> Result<Json<Vec<SubmoduleInfo>>, StatusCode> {
+    let root = root_for_req(q.pane, &q.root).await?;
     let Some(paths) = submodule_paths(&root).await else {
-        return Json(vec![]);
+        return Ok(Json(vec![]));
     };
     let infos = paths
         .into_iter()
@@ -137,29 +154,27 @@ pub async fn submodules(Query(q): Query<StatusQuery>) -> Json<Vec<SubmoduleInfo>
             }
         })
         .collect();
-    Json(infos)
+    Ok(Json(infos))
 }
 
 /// `GET /git/files?pane=<id>` — tracked + untracked (non-ignored) files, for
 /// the code panel's quick-open. Empty outside a repo; capped.
-pub async fn files(Query(q): Query<StatusQuery>) -> Json<Vec<String>> {
+pub async fn files(Query(q): Query<StatusQuery>) -> Result<Json<Vec<String>>, StatusCode> {
     const CAP: usize = 20_000;
-    let root = root_for_req(q.pane, &q.root).await;
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .args([
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ])
-        .output()
-        .await;
-    let Ok(out) = out else { return Json(vec![]) };
-    if !out.status.success() {
-        return Json(vec![]);
+    let root = root_for_req(q.pane, &q.root).await?;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(&root).args([
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+    ]);
+    let Some(out) = read_capped(cmd, LIST_CAP, READ_TIMEOUT).await else {
+        return Ok(Json(vec![]));
+    };
+    if !out.ok {
+        return Ok(Json(vec![]));
     }
     let files = out
         .stdout
@@ -168,7 +183,7 @@ pub async fn files(Query(q): Query<StatusQuery>) -> Json<Vec<String>> {
         .take(CAP)
         .map(|p| String::from_utf8_lossy(p).into_owned())
         .collect();
-    Json(files)
+    Ok(Json(files))
 }
 
 #[derive(Deserialize)]
@@ -183,9 +198,9 @@ pub struct DiffQuery {
 }
 
 /// `GET /git/diff?pane=<id>&path=<rel>&staged=<bool>` — unified diff. New /
-/// untracked files are shown as all-added.
+/// untracked files are shown as all-added. Capped at ~4 MiB like show/compare.
 pub async fn diff(Query(q): Query<DiffQuery>) -> Result<String, StatusCode> {
-    let root = root_for_req(q.pane, &q.root).await;
+    let root = root_for_req(q.pane, &q.root).await?;
     let abs = if q.path.is_empty() {
         None
     } else {
@@ -200,35 +215,41 @@ pub async fn diff(Query(q): Query<DiffQuery>) -> Result<String, StatusCode> {
     if !q.path.is_empty() {
         cmd.arg("--").arg(&q.path);
     }
-    let out = cmd
-        .output()
+    let out = read_capped(cmd, DIFF_CAP, READ_TIMEOUT)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut diff = String::from_utf8_lossy(&out.stdout).into_owned();
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut diff = lossy_capped(&out.stdout, DIFF_CAP);
+    if out.truncated {
+        diff.push_str("\n… (diff truncated at 4 MiB)\n");
+    }
 
     if diff.trim().is_empty() && !q.staged && abs.is_some() {
         // The all-added fallback is for UNTRACKED files only — an empty
         // tracked diff (nothing unstaged, or nothing staged) is just empty.
-        let untracked = Command::new("git")
+        // (-z: an exotic filename would be C-quoted in human porcelain and
+        // the `??` prefix check could still pass, but stay consistent.)
+        let mut probe = Command::new("git");
+        probe
             .arg("-C")
             .arg(&root)
-            .args(["status", "--porcelain", "--", &q.path])
-            .output()
+            .args(["status", "--porcelain", "-z", "--", &q.path]);
+        let untracked = read_capped(probe, META_CAP, READ_TIMEOUT)
             .await
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).starts_with("??"))
+            .map(|o| o.stdout.starts_with(b"??"))
             .unwrap_or(false);
         if untracked {
             // Untracked file: fake an all-added diff. Pass the RELATIVE path
             // (validated above) so the header doesn't leak the absolute one.
-            if let Ok(out) = Command::new("git")
-                .arg("-C")
+            // --no-index exits 1 when files differ — the diff is still there.
+            let mut cmd = Command::new("git");
+            cmd.arg("-C")
                 .arg(&root)
-                .args(["diff", "--no-color", "--no-index", "--", "/dev/null", &q.path])
-                .output()
-                .await
-            {
-                diff = String::from_utf8_lossy(&out.stdout).into_owned();
+                .args(["diff", "--no-color", "--no-index", "--", "/dev/null", &q.path]);
+            if let Some(out) = read_capped(cmd, DIFF_CAP, READ_TIMEOUT).await {
+                diff = lossy_capped(&out.stdout, DIFF_CAP);
+                if out.truncated {
+                    diff.push_str("\n… (diff truncated at 4 MiB)\n");
+                }
             }
         }
     }
@@ -237,20 +258,16 @@ pub async fn diff(Query(q): Query<DiffQuery>) -> Result<String, StatusCode> {
 
 /// `GET /git/toplevel?pane=<id>&root=` — the repo root for the panel's root
 /// switcher (null when the effective root isn't inside a work tree).
-pub async fn toplevel(Query(q): Query<StatusQuery>) -> Json<serde_json::Value> {
-    let root = root_for_req(q.pane, &q.root).await;
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .await;
-    let top = out
-        .ok()
-        .filter(|o| o.status.success())
+pub async fn toplevel(Query(q): Query<StatusQuery>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let root = root_for_req(q.pane, &q.root).await?;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(&root).args(["rev-parse", "--show-toplevel"]);
+    let top = read_capped(cmd, META_CAP, READ_TIMEOUT)
+        .await
+        .filter(|o| o.ok)
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty());
-    Json(serde_json::json!({ "toplevel": top }))
+    Ok(Json(serde_json::json!({ "toplevel": top })))
 }
 
 #[derive(Deserialize)]
@@ -268,22 +285,25 @@ pub struct BlobQuery {
 /// blob when staged) for the split diff's left side. 404 when absent
 /// (untracked file, or no staged copy).
 pub async fn blob(Query(q): Query<BlobQuery>) -> Result<String, StatusCode> {
-    let root = root_for_req(q.pane, &q.root).await;
+    let root = root_for_req(q.pane, &q.root).await?;
     safe_path(&root, &q.path, false).ok_or(StatusCode::FORBIDDEN)?;
     let spec = if q.staged {
         format!(":{}", q.path)
     } else {
         format!("HEAD:{}", q.path)
     };
-    let out = Command::new("git")
-        .arg("-C")
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
         .arg(&root)
-        .args(["show", "--no-color", "--no-textconv", &spec])
-        .output()
+        .args(["show", "--no-color", "--no-textconv", &spec]);
+    let out = read_capped(cmd, BLOB_CAP, READ_TIMEOUT)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if !out.status.success() {
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !out.ok {
         return Err(StatusCode::NOT_FOUND);
+    }
+    if out.truncated {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
     String::from_utf8(out.stdout).map_err(|_| StatusCode::UNSUPPORTED_MEDIA_TYPE)
 }
@@ -351,8 +371,8 @@ pub struct LogQuery {
 /// `GET /git/log?pane=&root=&limit=&skip=&all=` — commit topology for the
 /// graph (HEAD + every ref by default), plus the current branch and its
 /// upstream ahead/behind for the push/pull affordances.
-pub async fn log(Query(q): Query<LogQuery>) -> Json<serde_json::Value> {
-    let root = root_for_req(q.pane, &q.root).await;
+pub async fn log(Query(q): Query<LogQuery>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let root = root_for_req(q.pane, &q.root).await?;
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
     let skip = q.skip.unwrap_or(0);
     let mut cmd = Command::new("git");
@@ -370,7 +390,7 @@ pub async fn log(Query(q): Query<LogQuery>) -> Json<serde_json::Value> {
     let path = match &path {
         Some(p) => match safe_path(&root, p, false) {
             Some(_) => Some(p.clone()),
-            None => return Json(serde_json::json!({ "error": "path outside the root" })),
+            None => return Ok(Json(serde_json::json!({ "error": "path outside the root" }))),
         },
         None => None,
     };
@@ -388,46 +408,44 @@ pub async fn log(Query(q): Query<LogQuery>) -> Json<serde_json::Value> {
     if let Some(p) = &path {
         cmd.arg("--").arg(p);
     }
-    let commits = cmd
-        .output()
+    let commits = read_capped(cmd, LIST_CAP, READ_TIMEOUT)
         .await
-        .ok()
-        .filter(|o| o.status.success())
+        .filter(|o| o.ok)
         .map(|o| parse_log(&String::from_utf8_lossy(&o.stdout)))
         .unwrap_or_default();
 
-    let branch = Command::new("git")
+    let mut branch_cmd = Command::new("git");
+    branch_cmd
         .arg("-C")
         .arg(&root)
-        .args(["branch", "--show-current"])
-        .output()
+        .args(["branch", "--show-current"]);
+    let branch = read_capped(branch_cmd, META_CAP, READ_TIMEOUT)
         .await
-        .ok()
-        .filter(|o| o.status.success())
+        .filter(|o| o.ok)
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty());
 
     // HEAD...@{upstream}: "ahead<TAB>behind" — fails when there's no upstream
     // (detached, never pushed) — both counts stay null then.
     let (upstream, ahead, behind) = {
-        let name = Command::new("git")
+        let mut name_cmd = Command::new("git");
+        name_cmd
             .arg("-C")
             .arg(&root)
-            .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
-            .output()
+            .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+        let name = read_capped(name_cmd, META_CAP, READ_TIMEOUT)
             .await
-            .ok()
-            .filter(|o| o.status.success())
+            .filter(|o| o.ok)
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|s| !s.is_empty());
-        let counts = Command::new("git")
+        let mut count_cmd = Command::new("git");
+        count_cmd
             .arg("-C")
             .arg(&root)
-            .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
-            .output()
+            .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]);
+        let counts = read_capped(count_cmd, META_CAP, READ_TIMEOUT)
             .await
-            .ok()
-            .filter(|o| o.status.success())
+            .filter(|o| o.ok)
             .and_then(|o| {
                 let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
                 let mut it = t.split_whitespace();
@@ -440,14 +458,14 @@ pub async fn log(Query(q): Query<LogQuery>) -> Json<serde_json::Value> {
     };
 
     // Local branch names for the filter dropdown (bounded, silent on error).
-    let branches: Vec<String> = Command::new("git")
+    let mut ref_cmd = Command::new("git");
+    ref_cmd
         .arg("-C")
         .arg(&root)
-        .args(["for-each-ref", "--format=%(refname:short)", "refs/heads"])
-        .output()
+        .args(["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
+    let branches: Vec<String> = read_capped(ref_cmd, META_CAP, READ_TIMEOUT)
         .await
-        .ok()
-        .filter(|o| o.status.success())
+        .filter(|o| o.ok)
         .map(|o| {
             String::from_utf8_lossy(&o.stdout)
                 .lines()
@@ -458,14 +476,14 @@ pub async fn log(Query(q): Query<LogQuery>) -> Json<serde_json::Value> {
         })
         .unwrap_or_default();
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "branch": branch,
         "upstream": upstream,
         "ahead": ahead,
         "behind": behind,
         "commits": commits,
         "branches": branches,
-    }))
+    })))
 }
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
@@ -487,23 +505,35 @@ pub struct ShowQuery {
     root: Option<String>,
 }
 
-/// Name-status rows of `git show --name-status --format=`: "M\tpath",
-/// "R100\told\tnew" (take the new path on renames/copies).
-fn parse_name_status(text: &str) -> Vec<ShowFile> {
-    text.lines()
-        .filter_map(|line| {
-            let mut parts = line.split('\t');
-            let st = parts.next()?;
-            let p = parts.next()?;
-            if st.is_empty() || p.is_empty() {
-                return None;
-            }
-            Some(ShowFile {
-                status: st.chars().next().unwrap_or('M').to_string(),
-                path: parts.next().unwrap_or(p).to_string(),
-            })
-        })
-        .collect()
+/// Name-status rows of `git show/diff --name-status --format= -z`: NUL-
+/// terminated fields with RAW filenames — `M\0path\0`, and rename/copy
+/// `R100\0old\0new\0` (diff order is source-first; the panel lists the
+/// destination).
+fn parse_name_status_z(bytes: &[u8]) -> Vec<ShowFile> {
+    let mut files = Vec::new();
+    let mut it = bytes.split(|&b| b == 0);
+    while let Some(st) = it.next() {
+        if st.is_empty() {
+            continue;
+        }
+        let letter = String::from_utf8_lossy(st).chars().next().unwrap_or('M');
+        let Some(first) = it.next().filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        let path = if letter == 'R' || letter == 'C' {
+            let Some(new) = it.next().filter(|p| !p.is_empty()) else {
+                continue;
+            };
+            new
+        } else {
+            first
+        };
+        files.push(ShowFile {
+            status: letter.to_string(),
+            path: String::from_utf8_lossy(path).into_owned(),
+        });
+    }
+    files
 }
 
 /// `GET /git/show?pane=&root=&rev=` — one commit's meta, its name-status file
@@ -512,18 +542,19 @@ pub async fn show(Query(q): Query<ShowQuery>) -> Result<Json<serde_json::Value>,
     if !valid_rev(&q.rev) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let root = root_for_req(q.pane, &q.root).await;
+    let root = root_for_req(q.pane, &q.root).await?;
 
     // Meta and name-status are separate spawns on purpose: an empty --or
     // arbitrary—commit body makes a one-shot format unparseable.
-    let meta = Command::new("git")
+    let mut meta_cmd = Command::new("git");
+    meta_cmd
         .arg("-C")
         .arg(&root)
-        .args(["show", "-s", "--format=%H%x1f%an%x1f%aI%x1f%s%x1f%b", &q.rev])
-        .output()
+        .args(["show", "-s", "--format=%H%x1f%an%x1f%aI%x1f%s%x1f%b", &q.rev]);
+    let meta = read_capped(meta_cmd, META_CAP, READ_TIMEOUT)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if !meta.status.success() {
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !meta.ok {
         return Err(StatusCode::NOT_FOUND);
     }
     let (hash, author, date, subject, body) = {
@@ -537,18 +568,17 @@ pub async fn show(Query(q): Query<ShowQuery>) -> Result<Json<serde_json::Value>,
         (hash, author, date, subject, body)
     };
 
-    let files = Command::new("git")
+    let mut files_cmd = Command::new("git");
+    files_cmd
         .arg("-C")
         .arg(&root)
-        .args(["show", "--name-status", "--format=", &q.rev])
-        .output()
+        .args(["show", "--name-status", "--format=", "-z", &q.rev]);
+    let files = read_capped(files_cmd, LIST_CAP, READ_TIMEOUT)
         .await
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| parse_name_status(&String::from_utf8_lossy(&o.stdout)))
+        .filter(|o| o.ok)
+        .map(|o| parse_name_status_z(&o.stdout))
         .unwrap_or_default();
 
-    const DIFF_CAP: usize = 4_000_000;
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(&root)
@@ -557,13 +587,11 @@ pub async fn show(Query(q): Query<ShowQuery>) -> Result<Json<serde_json::Value>,
         safe_path(&root, &q.path, false).ok_or(StatusCode::FORBIDDEN)?;
         cmd.arg("--").arg(&q.path);
     }
-    let diff_out = cmd
-        .output()
+    let diff_out = read_capped(cmd, DIFF_CAP, READ_TIMEOUT)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut diff = String::from_utf8_lossy(&diff_out.stdout).into_owned();
-    if diff.len() > DIFF_CAP {
-        diff.truncate(DIFF_CAP);
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut diff = lossy_capped(&diff_out.stdout, DIFF_CAP);
+    if diff_out.truncated {
         diff.push_str("\n… (diff truncated at 4 MiB)\n");
     }
 
@@ -596,18 +624,17 @@ pub async fn compare(Query(q): Query<CompareQuery>) -> Result<Json<serde_json::V
     if !valid_rev(&q.rev) || !valid_rev(&q.rev2) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let root = root_for_req(q.pane, &q.root).await;
-    let files = Command::new("git")
+    let root = root_for_req(q.pane, &q.root).await?;
+    let mut files_cmd = Command::new("git");
+    files_cmd
         .arg("-C")
         .arg(&root)
-        .args(["diff", "--name-status", "--format=", &q.rev, &q.rev2])
-        .output()
+        .args(["diff", "--name-status", "--format=", "-z", &q.rev, &q.rev2]);
+    let files = read_capped(files_cmd, LIST_CAP, READ_TIMEOUT)
         .await
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| parse_name_status(&String::from_utf8_lossy(&o.stdout)))
+        .filter(|o| o.ok)
+        .map(|o| parse_name_status_z(&o.stdout))
         .unwrap_or_default();
-    const DIFF_CAP: usize = 4_000_000;
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(&root)
@@ -616,16 +643,14 @@ pub async fn compare(Query(q): Query<CompareQuery>) -> Result<Json<serde_json::V
         safe_path(&root, &q.path, false).ok_or(StatusCode::FORBIDDEN)?;
         cmd.arg("--").arg(&q.path);
     }
-    let diff_out = cmd
-        .output()
+    let diff_out = read_capped(cmd, DIFF_CAP, READ_TIMEOUT)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if !diff_out.status.success() {
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !diff_out.ok {
         return Err(StatusCode::NOT_FOUND);
     }
-    let mut diff = String::from_utf8_lossy(&diff_out.stdout).into_owned();
-    if diff.len() > DIFF_CAP {
-        diff.truncate(DIFF_CAP);
+    let mut diff = lossy_capped(&diff_out.stdout, DIFF_CAP);
+    if diff_out.truncated {
         diff.push_str("\n… (diff truncated at 4 MiB)\n");
     }
     Ok(Json(serde_json::json!({ "files": files, "diff": diff })))
@@ -666,7 +691,10 @@ pub struct WriteResp {
 
 /// Run one user-initiated git mutation. Network verbs get 120s, the rest 60s.
 async fn run_op(q: &WriteReq, args: &[&str], timeout_secs: u64) -> WriteResp {
-    let root = root_for_req(q.pane, &q.root).await;
+    let root = match root_for_req(q.pane, &q.root).await {
+        Ok(r) => r,
+        Err(code) => return root_err_resp(code),
+    };
     if let Some(p) = &q.path {
         if !p.is_empty() && safe_path(&root, p, false).is_none() {
             return WriteResp {
@@ -677,20 +705,101 @@ async fn run_op(q: &WriteReq, args: &[&str], timeout_secs: u64) -> WriteResp {
     }
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(&root).args(args);
-    run_git(cmd, timeout_secs).await
+    run_git(cmd, timeout_secs, None).await
 }
 
-/// Spawn + timeout + tail-collect, shared by run_op and the sequencer driver.
-async fn run_git(mut cmd: Command, timeout_secs: u64) -> WriteResp {
-    let out = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output()).await;
+/// A mutation rejected before git even ran because the pane/root failed
+/// resolution (audit C-26: never silently act on the default root).
+fn root_err_resp(code: StatusCode) -> WriteResp {
+    let what = match code {
+        StatusCode::NOT_FOUND => "unknown (or gone) pane",
+        StatusCode::FORBIDDEN => "root override outside the home directory",
+        _ => "bad pane/root",
+    };
+    WriteResp {
+        ok: false,
+        out: what.into(),
+    }
+}
+
+/// SIGKILL a timed-out child's whole process group (hooks and helpers spawn
+/// their own children), then reap the leader. The child leads its own group
+/// (`process_group(0)`), so its pid IS the pgid; `kill` takes the negative
+/// form for a group target.
+async fn kill_process_group(child: &mut tokio::process::Child) {
+    kill_process_group_by_pid(child.id()).await;
+    let _ = child.kill().await; // belt: the leader, if the group signal missed it
+    let _ = child.wait().await; // reap — no zombie left behind
+}
+
+/// The pid-only half of [`kill_process_group`], for a timeout that dropped
+/// the child future with it: kill_on_drop already SIGKILLed the leader
+/// (tokio's orphan reaper collects it) — the GROUP still needs its signal.
+/// (`--` before the negative pid is load-bearing: without it procps kill
+/// misreads the number as an option and signals the CALLER'S group instead.)
+async fn kill_process_group_by_pid(pid: Option<u32>) {
+    let _ = pid;
+    #[cfg(unix)]
+    if let Some(pid) = pid {
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg("--")
+            .arg(format!("-{pid}"))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+    }
+}
+
+/// Spawn + timeout + tail-collect, shared by run_op, the apply lane, and the
+/// sequencer driver. The timeout must actually STOP the mutation (P1-15):
+/// tokio children survive a dropped future by default, so a timed-out
+/// pull/rebase/checkout/hook would keep rewriting the repo after the UI
+/// reported failure. kill_on_drop covers abandon paths (the pkgs.rs pattern);
+/// on deadline we SIGKILL the process GROUP and reap. Stdin (the apply lane's
+/// patch) is written INSIDE the deadline — a child that never reads its pipe
+/// must time out too, not park forever.
+async fn run_git(mut cmd: Command, timeout_secs: u64, stdin_data: Option<&[u8]>) -> WriteResp {
+    cmd.kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    if stdin_data.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return WriteResp {
+                ok: false,
+                out: format!("git failed to start: {e}"),
+            }
+        }
+    };
+    let pid = child.id(); // wait_with_output consumes the handle; keep the pgid key
+    let work = async move {
+        if let (Some(data), Some(mut stdin)) = (stdin_data, child.stdin.take()) {
+            use tokio::io::AsyncWriteExt as _;
+            let _ = stdin.write_all(data).await;
+            let _ = stdin.shutdown().await;
+        }
+        child.wait_with_output().await
+    };
+    let out = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), work).await;
     match out {
-        Err(_) => WriteResp {
-            ok: false,
-            out: format!("timed out after {timeout_secs}s"),
-        },
+        Err(_) => {
+            // Dropping the future fired kill_on_drop (SIGKILL to the leader);
+            // the GROUP (hooks, helpers) gets its own signal now.
+            kill_process_group_by_pid(pid).await;
+            WriteResp {
+                ok: false,
+                out: format!("timed out after {timeout_secs}s"),
+            }
+        }
         Ok(Err(e)) => WriteResp {
             ok: false,
-            out: format!("git failed to start: {e}"),
+            out: format!("git failed: {e}"),
         },
         Ok(Ok(o)) => {
             let tail: String = String::from_utf8_lossy(&o.stderr)
@@ -706,6 +815,68 @@ async fn run_git(mut cmd: Command, timeout_secs: u64) -> WriteResp {
             }
         }
     }
+}
+
+/// One git READ, collected. Same kill discipline as [`run_git`] (a wedged
+/// read dies with its group), plus stdout capped DURING collection so a huge
+/// diff can't allocate past the cap (audit C-33 — a full streaming byte-tail
+/// ring is deliberately deferred; callers get a `truncated` flag instead).
+struct ReadOut {
+    ok: bool,
+    stdout: Vec<u8>,
+    /// The cap cut output short (the child saw SIGPIPE once we stopped reading).
+    truncated: bool,
+}
+
+async fn read_capped(mut cmd: Command, cap: usize, timeout_secs: u64) -> Option<ReadOut> {
+    cmd.kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn().ok()?;
+    let work = async {
+        let mut out = Vec::new();
+        let mut truncated = false;
+        {
+            use tokio::io::AsyncReadExt as _;
+            let stdout = child.stdout.take().expect("piped stdout");
+            // cap+1: the extra byte tells "truncated" from "exactly full".
+            let mut take = stdout.take(cap as u64 + 1);
+            if take.read_to_end(&mut out).await.is_ok() {
+                truncated = out.len() > cap;
+                out.truncate(cap);
+            }
+        } // stdout dropped here: a still-writing git dies by SIGPIPE
+        let status = child.wait().await;
+        (out, truncated, status)
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), work).await {
+        Ok((stdout, truncated, status)) => Some(ReadOut {
+            ok: status.map(|s| s.success()).unwrap_or(false),
+            stdout,
+            truncated,
+        }),
+        Err(_) => {
+            kill_process_group(&mut child).await;
+            None
+        }
+    }
+}
+
+/// Lossy-convert at most `cap` bytes, ending on a char boundary: a raw
+/// `String::truncate` at a byte cap PANICS off-boundary (audit #32 — near-
+/// certain for CJK/emoji diffs), and `from_utf8_lossy` alone would splice
+/// U+FFFD into the middle of a cut multi-byte sequence.
+fn lossy_capped(bytes: &[u8], cap: usize) -> String {
+    let mut end = bytes.len().min(cap);
+    // Walk back off any UTF-8 continuation bytes (10xx_xxxx) — the same rule
+    // str::is_char_boundary uses (a method [u8] doesn't have).
+    while end > 0 && end < bytes.len() && (bytes[end] & 0xC0) == 0x80 {
+        end -= 1;
+    }
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
 /// `POST /git/add {path?}` — stage one file, or everything when absent.
@@ -762,7 +933,10 @@ pub async fn submodule_update(Json(q): Json<WriteReq>) -> Json<WriteResp> {
 /// back to HEAD, or delete an untracked file (clean). The panel two-clicks
 /// this per row; untracked detection is a porcelain probe first.
 pub async fn discard(Json(q): Json<WriteReq>) -> Json<WriteResp> {
-    let root = root_for_req(q.pane, &q.root).await;
+    let root = match root_for_req(q.pane, &q.root).await {
+        Ok(r) => r,
+        Err(code) => return Json(root_err_resp(code)),
+    };
     let Some(path) = q.path.clone().filter(|p| !p.is_empty()) else {
         return Json(WriteResp {
             ok: false,
@@ -775,14 +949,16 @@ pub async fn discard(Json(q): Json<WriteReq>) -> Json<WriteResp> {
             out: "path outside the root".into(),
         });
     }
-    let untracked = Command::new("git")
+    // -z: the raw (unquoted) filename comes back, so an exotic name still
+    // matches the `??` prefix instead of failing the probe mis-quoted.
+    let mut probe = Command::new("git");
+    probe
         .arg("-C")
         .arg(&root)
-        .args(["status", "--porcelain", "--", &path])
-        .output()
+        .args(["status", "--porcelain", "-z", "--", &path]);
+    let untracked = read_capped(probe, META_CAP, READ_TIMEOUT)
         .await
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).starts_with("??"))
+        .map(|o| o.stdout.starts_with(b"??"))
         .unwrap_or(false);
     if untracked {
         Json(run_op(&q, &["clean", "-f", "--", &path], 60).await)
@@ -802,7 +978,10 @@ pub async fn discard(Json(q): Json<WriteReq>) -> Json<WriteResp> {
 /// panel rebuilds a reduced unified diff and we `git apply --cached` it
 /// (reverse = unstaging). Stdin-fed, no shell, 120s.
 pub async fn apply_patch(Json(q): Json<WriteReq>) -> Json<WriteResp> {
-    let root = root_for_req(q.pane, &q.root).await;
+    let root = match root_for_req(q.pane, &q.root).await {
+        Ok(r) => r,
+        Err(code) => return Json(root_err_resp(code)),
+    };
     let Some(patch) = q.patch.clone().filter(|p| !p.trim().is_empty() && p.len() <= 8_000_000)
     else {
         return Json(WriteResp {
@@ -818,43 +997,7 @@ pub async fn apply_patch(Json(q): Json<WriteReq>) -> Json<WriteResp> {
         cmd.arg("--reverse");
     }
     cmd.arg("-");
-    cmd.stdin(std::process::Stdio::piped());
-    let child = cmd.spawn();
-    let Ok(mut child) = child else {
-        return Json(WriteResp {
-            ok: false,
-            out: "git failed to start".into(),
-        });
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let _ = stdin.write_all(patch.as_bytes()).await;
-        let _ = stdin.shutdown().await;
-    }
-    let out = tokio::time::timeout(std::time::Duration::from_secs(120), child.wait_with_output()).await;
-    match out {
-        Err(_) => Json(WriteResp {
-            ok: false,
-            out: "timed out after 120s".into(),
-        }),
-        Ok(Err(e)) => Json(WriteResp {
-            ok: false,
-            out: format!("git apply failed: {e}"),
-        }),
-        Ok(Ok(o)) => {
-            let tail: String = String::from_utf8_lossy(&o.stderr)
-                .lines()
-                .chain(String::from_utf8_lossy(&o.stdout).lines())
-                .filter(|l| !l.trim().is_empty())
-                .take(8)
-                .collect::<Vec<_>>()
-                .join("\n");
-            Json(WriteResp {
-                ok: o.status.success(),
-                out: tail,
-            })
-        }
-    }
+    Json(run_git(cmd, 120, Some(patch.as_bytes())).await)
 }
 
 /// `POST /git/fetch` — fetch all remotes (prune).
@@ -992,17 +1135,17 @@ pub struct StashEntry {
 }
 
 /// `GET /git/stash/list?pane=&root=` — the stash stack, top first (capped).
-pub async fn stash_list(Query(q): Query<StatusQuery>) -> Json<Vec<StashEntry>> {
-    let root = root_for_req(q.pane, &q.root).await;
-    let out = Command::new("git")
-        .arg("-C")
+pub async fn stash_list(Query(q): Query<StatusQuery>) -> Result<Json<Vec<StashEntry>>, StatusCode> {
+    let root = root_for_req(q.pane, &q.root).await?;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
         .arg(&root)
-        .args(["stash", "list", "--format=%H%x1f%gd%x1f%gs"])
-        .output()
-        .await;
-    let Ok(out) = out else { return Json(vec![]) };
-    if !out.status.success() {
-        return Json(vec![]);
+        .args(["stash", "list", "--format=%H%x1f%gd%x1f%gs"]);
+    let Some(out) = read_capped(cmd, META_CAP, READ_TIMEOUT).await else {
+        return Ok(Json(vec![]));
+    };
+    if !out.ok {
+        return Ok(Json(vec![]));
     }
     let entries = String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -1019,7 +1162,7 @@ pub async fn stash_list(Query(q): Query<StatusQuery>) -> Json<Vec<StashEntry>> {
         })
         .take(50)
         .collect();
-    Json(entries)
+    Ok(Json(entries))
 }
 
 /// `POST /git/stash {message?}` — stash the tracked working tree (untracked
@@ -1060,14 +1203,13 @@ const CONFLICT_CODES: [&str; 7] = ["DD", "AU", "UD", "UA", "DU", "AA", "UU"];
 /// Resolve a git dir entry (rebase-merge …) to an absolute path via
 /// --git-path; None when git itself fails.
 async fn git_path_abs(root: &std::path::Path, name: &str) -> Option<String> {
-    Command::new("git")
-        .arg("-C")
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
         .arg(root)
-        .args(["rev-parse", "--path-format=absolute", "--git-path", name])
-        .output()
+        .args(["rev-parse", "--path-format=absolute", "--git-path", name]);
+    read_capped(cmd, META_CAP, READ_TIMEOUT)
         .await
-        .ok()
-        .filter(|o| o.status.success())
+        .filter(|o| o.ok)
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
@@ -1086,13 +1228,13 @@ async fn op_state(root: &std::path::Path) -> Option<&'static str> {
         ("CHERRY_PICK_HEAD", "cherry-pick"),
         ("REVERT_HEAD", "revert"),
     ] {
-        let ok = Command::new("git")
-            .arg("-C")
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
             .arg(root)
-            .args(["rev-parse", "-q", "--verify", head])
-            .output()
+            .args(["rev-parse", "-q", "--verify", head]);
+        let ok = read_capped(cmd, META_CAP, READ_TIMEOUT)
             .await
-            .map(|o| o.status.success())
+            .map(|o| o.ok)
             .unwrap_or(false);
         if ok {
             return Some(label);
@@ -1103,36 +1245,35 @@ async fn op_state(root: &std::path::Path) -> Option<&'static str> {
 
 /// `GET /git/state?pane=&root=` — sequencer state + conflicted paths for the
 /// graph panel's conflict banner.
-pub async fn state(Query(q): Query<StatusQuery>) -> Json<serde_json::Value> {
-    let root = root_for_req(q.pane, &q.root).await;
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .args(["status", "--porcelain=v1"])
-        .output()
-        .await;
-    let conflicts: Vec<String> = out
-        .ok()
-        .filter(|o| o.status.success())
+pub async fn state(Query(q): Query<StatusQuery>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let root = root_for_req(q.pane, &q.root).await?;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(&root).args(["status", "--porcelain=v1", "-z"]);
+    let conflicts: Vec<String> = read_capped(cmd, LIST_CAP, READ_TIMEOUT)
+        .await
+        .filter(|o| o.ok)
         .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter(|l| l.len() >= 4 && CONFLICT_CODES.contains(&&l[..2]))
-                .map(|l| l[3..].trim().to_string())
+            parse_status_z(&o.stdout)
+                .into_iter()
+                .filter(|f| CONFLICT_CODES.contains(&f.status.as_str()))
+                .map(|f| f.path)
                 .collect()
         })
         .unwrap_or_default();
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "state": op_state(&root).await,
         "conflicts": conflicts,
-    }))
+    })))
 }
 
 /// `POST /git/op {action: "continue"|"abort"}` — drive the in-progress
 /// sequencer (rebase/merge/cherry-pick/revert, whichever actually exists).
 /// Continue runs with GIT_EDITOR=true so git never blocks on an editor.
 pub async fn sequencer_op(Json(q): Json<WriteReq>) -> Json<WriteResp> {
-    let root = root_for_req(q.pane, &q.root).await;
+    let root = match root_for_req(q.pane, &q.root).await {
+        Ok(r) => r,
+        Err(code) => return Json(root_err_resp(code)),
+    };
     let verb = q.action.as_deref().unwrap_or("");
     if verb != "continue" && verb != "abort" {
         return Json(WriteResp {
@@ -1158,7 +1299,7 @@ pub async fn sequencer_op(Json(q): Json<WriteReq>) -> Json<WriteResp> {
         .arg(sub)
         .arg(format!("--{verb}"))
         .env("GIT_EDITOR", "true");
-    Json(run_git(cmd, 120).await)
+    Json(run_git(cmd, 120, None).await)
 }
 
 // ---- blame (the code panel's gutter) -------------------------------------------
@@ -1242,24 +1383,19 @@ pub async fn blame(Query(q): Query<BlameQuery>) -> Result<Json<serde_json::Value
     if q.path.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let root = root_for_req(q.pane, &q.root).await;
+    let root = root_for_req(q.pane, &q.root).await?;
     safe_path(&root, &q.path, false).ok_or(StatusCode::FORBIDDEN)?;
-    let out = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(["blame", "--line-porcelain", "--", &q.path])
-            .output(),
-    )
-    .await;
-    let Ok(Ok(out)) = out else {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(&root)
+        .args(["blame", "--line-porcelain", "--", &q.path]);
+    let Some(out) = read_capped(cmd, BLOB_CAP, READ_TIMEOUT).await else {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     };
-    if !out.status.success() {
+    if !out.ok {
         return Err(StatusCode::NOT_FOUND);
     }
-    if out.stdout.len() > 8 * 1024 * 1024 {
+    if out.truncated {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
     Ok(Json(serde_json::json!({
@@ -1286,14 +1422,73 @@ mod tests {
 
     #[test]
     fn name_status_rows_parse() {
-        let text = "M\tui/src/main.ts\nA\tui/ux/gitcheck.mjs\nD\tdocs/old.md\nR100\told/name.ts\tnew/name.ts\n";
-        let files = parse_name_status(text);
-        assert_eq!(files.len(), 4);
+        // -z fixtures (fields NUL-terminated, names RAW): M/A/D, a rename
+        // (old then new), and the audit C-32 gallery — Chinese, newline, tab,
+        // quote — which human porcelain would have C-quoted into literals.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"M\0ui/src/main.ts\0");
+        bytes.extend_from_slice(b"A\0ui/ux/gitcheck.mjs\0");
+        bytes.extend_from_slice(b"D\0docs/old.md\0");
+        bytes.extend_from_slice(b"R100\0old/name.ts\0new/name.ts\0");
+        bytes.extend_from_slice("M\0sub/中文 文件.txt\0".as_bytes());
+        bytes.extend_from_slice(b"A\0new\nline.txt\0");
+        bytes.extend_from_slice(b"M\0tab\tname.txt\0");
+        bytes.extend_from_slice(b"M\0quote\"name.txt\0");
+        let files = parse_name_status_z(&bytes);
+        assert_eq!(files.len(), 8);
         assert_eq!(files[0], ShowFile { status: "M".into(), path: "ui/src/main.ts".into() });
         assert_eq!(files[1].status, "A");
         assert_eq!(files[2].status, "D");
-        assert_eq!(files[3].path, "new/name.ts");
-        assert_eq!(files[3].status, "R");
+        assert_eq!(files[3], ShowFile { status: "R".into(), path: "new/name.ts".into() });
+        assert_eq!(files[4].path, "sub/中文 文件.txt");
+        assert_eq!(files[5].path, "new\nline.txt");
+        assert_eq!(files[6].path, "tab\tname.txt");
+        assert_eq!(files[7].path, "quote\"name.txt");
+    }
+
+    #[test]
+    fn status_z_rows_parse() {
+        // -z porcelain: `XY <path>\0`, renames `XY <new>\0<old>\0` (NEW first
+        // — git reverses the human order under -z).
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b" M src/touched.rs\0");
+        bytes.extend_from_slice(b"A  src/added.rs\0");
+        bytes.extend_from_slice(b"RM sub/renamed file.txt\0ordinary.txt\0");
+        bytes.extend_from_slice("?? 未跟踪 文件.txt\0".as_bytes());
+        bytes.extend_from_slice(b"?? new\nline.txt\0");
+        bytes.extend_from_slice(b"UU tab\tand \"quote\".rs\0");
+        bytes.extend_from_slice(b"!! node_modules/\0");
+        let files = parse_status_z(&bytes);
+        assert_eq!(files.len(), 7);
+        assert_eq!(files[0].status, " M");
+        assert_eq!(files[0].path, "src/touched.rs");
+        assert_eq!(files[1].status, "A ");
+        assert_eq!(files[2].status, "RM");
+        assert_eq!(files[2].path, "sub/renamed file.txt", "rename keeps the NEW path");
+        assert_eq!(files[3].status, "??");
+        assert_eq!(files[3].path, "未跟踪 文件.txt");
+        assert_eq!(files[4].path, "new\nline.txt");
+        assert_eq!(files[5].status, "UU");
+        assert_eq!(files[5].path, "tab\tand \"quote\".rs");
+        assert_eq!(files[6].status, "!!");
+    }
+
+    #[test]
+    fn lossy_capped_ends_on_a_char_boundary() {
+        // "中" is 3 bytes: a byte cap landing inside it must walk back, never
+        // panic (String::truncate would) and never splice U+FFFD mid-sequence.
+        let text = "aaaaaaaaa中rest"; // 9 ascii + 中(3) + 4 ascii
+        let bytes = text.as_bytes();
+        assert_eq!(lossy_capped(bytes, 9), "aaaaaaaaa");
+        assert_eq!(lossy_capped(bytes, 10), "aaaaaaaaa");
+        assert_eq!(lossy_capped(bytes, 11), "aaaaaaaaa");
+        assert_eq!(lossy_capped(bytes, 12), "aaaaaaaaa中");
+        assert_eq!(lossy_capped(bytes, 1000), text, "cap beyond len keeps everything");
+        // Same for a 4-byte emoji.
+        let emoji = "ab🎉cd".as_bytes(); // 🎉 = 4 bytes at index 2..6
+        assert_eq!(lossy_capped(emoji, 4), "ab");
+        assert_eq!(lossy_capped(emoji, 6), "ab🎉");
+        assert_eq!(lossy_capped(b"", 10), "");
     }
 
     #[test]
@@ -1328,5 +1523,65 @@ mod tests {
         assert_eq!(groups[1].count, 2);
         assert_eq!(groups[1].summary, "feat x");
         assert_eq!(groups[1].time, 1700000100);
+    }
+
+    /// /proc liveness with a small grace window: a SIGKILLed group member is
+    /// reaped by init, which is prompt but not synchronous.
+    #[cfg(unix)]
+    fn proc_gone_soon(pid: u32) -> bool {
+        for _ in 0..50 {
+            if std::fs::metadata(format!("/proc/{pid}")).is_err() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        false
+    }
+
+    /// P1-15: a timed-out mutation must DIE — the process AND the children it
+    /// spawned (a hook's helpers share its process group), not linger and keep
+    /// mutating after the UI heard "failed".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_git_timeout_kills_the_whole_process_group() {
+        let dir = std::env::temp_dir().join(format!("mymux-git-kill-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let leader = dir.join("leader.pid");
+        let kid = dir.join("child.pid");
+        // A blocking "git": records its own pid, spawns a child that would
+        // outlive a leader-only kill, then blocks forever.
+        let script = format!(
+            "echo $$ > '{}'; sleep 300 & echo $! > '{}'; sleep 300",
+            leader.display(),
+            kid.display()
+        );
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(&script);
+        let resp = run_git(cmd, 1, None).await;
+        assert!(!resp.ok, "a blocking git must fail: {}", resp.out);
+        assert!(resp.out.contains("timed out"), "{:?}", resp.out);
+        let leader_pid: u32 = std::fs::read_to_string(&leader).unwrap().trim().parse().unwrap();
+        let kid_pid: u32 = std::fs::read_to_string(&kid).unwrap().trim().parse().unwrap();
+        assert!(proc_gone_soon(leader_pid), "leader {leader_pid} survived the timeout");
+        assert!(proc_gone_soon(kid_pid), "spawned child {kid_pid} was orphaned, not group-killed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P1-15 (stdin lane): the patch write is INSIDE the deadline — a child
+    /// that never reads its stdin pipe must still time out (and die).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_git_stdin_write_is_inside_the_timeout() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("sleep 300");
+        let patch = vec![b'x'; 4 * 1024 * 1024]; // far beyond the 64 KiB pipe buffer
+        let started = std::time::Instant::now();
+        let resp = run_git(cmd, 1, Some(&patch)).await;
+        assert!(!resp.ok);
+        assert!(resp.out.contains("timed out"), "{:?}", resp.out);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the blocked stdin write escaped the deadline"
+        );
     }
 }

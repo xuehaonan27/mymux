@@ -32,9 +32,12 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "-_.@:/".contains(c))
 }
 
-/// Names with an install/remove in flight. Two installs of the SAME package
-/// would race on its staging directory; different packages are fine in
-/// parallel. Guard drops keep the set honest across timeouts and panics.
+/// Resolved package DIRS with an install/remove in flight. Keyed by the
+/// directory mymux-pkg stages into, not the raw spec: `npm:foo` and
+/// `npm:foo@1.0.0` are different specs but the SAME `.tmp-<dir>`/dest dir, and
+/// two installs racing one staging dir is exactly what this guard exists to
+/// prevent (audit #35). Guard drops keep the set honest across timeouts and
+/// panics.
 static INFLIGHT: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 struct InflightGuard(String);
@@ -51,6 +54,30 @@ fn claim(name: &str) -> Option<InflightGuard> {
         return None;
     }
     Some(InflightGuard(name.to_string()))
+}
+
+/// The directory mymux-pkg resolves a spec to (staging `.tmp-<dir>` and dest
+/// `<base>/<dir>` both derive from it). MUST match mymux-pkg's own mapping
+/// (`cmd_remove` / `install_npm_dynamic`): an `npm:` spec loses its @version
+/// (the separator is the LAST '@' that isn't the leading one), and every
+/// char outside [alnum . - _] becomes '_'.
+fn resolved_dir(name: &str) -> String {
+    let bare = match name.split_once(':') {
+        Some(("npm", rest)) => match rest.rfind('@') {
+            Some(i) if i > 0 => &rest[..i],
+            _ => rest,
+        },
+        _ => name,
+    };
+    bare.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// `GET /pkgs/search?q=` — relay `mymux-pkg search` (curated index only).
@@ -187,7 +214,7 @@ pub async fn install(Json(req): Json<PkgReq>) -> Json<PkgResp> {
     if !valid_name(&req.name) {
         return fail("bad package name");
     }
-    let Some(_guard) = claim(&req.name) else {
+    let Some(_guard) = claim(&resolved_dir(&req.name)) else {
         return fail(format!("{} is already being installed", req.name));
     };
     Json(run(&["install", &req.name], Duration::from_secs(600)).await)
@@ -198,8 +225,42 @@ pub async fn remove(Json(req): Json<PkgReq>) -> Json<PkgResp> {
     if !valid_name(&req.name) {
         return fail("bad package name");
     }
-    let Some(_guard) = claim(&req.name) else {
+    let Some(_guard) = claim(&resolved_dir(&req.name)) else {
         return fail(format!("{} has an operation in flight", req.name));
     };
     Json(run(&["remove", &req.name], Duration::from_secs(60)).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_dir_collapses_specs_the_way_mymux_pkg_does() {
+        assert_eq!(resolved_dir("npm:foo"), resolved_dir("npm:foo@1.0.0"));
+        assert_eq!(
+            resolved_dir("npm:@scope/pkg"),
+            resolved_dir("npm:@scope/pkg@2.0.0")
+        );
+        assert_eq!(resolved_dir("npm:@scope/pkg"), "_scope_pkg");
+        assert_eq!(resolved_dir("npm:foo"), "foo");
+        assert_ne!(resolved_dir("npm:foo"), resolved_dir("npm:bar"));
+        // Curated (non-npm) names pass through safe_dir unchanged.
+        assert_eq!(resolved_dir("rust-analyzer"), "rust-analyzer");
+        // And an install spec matches the remove spec's dir.
+        assert_eq!(resolved_dir("npm:foo@1.0.0"), resolved_dir("npm:foo"));
+    }
+
+    #[test]
+    fn inflight_claim_blocks_the_same_resolved_dir() {
+        let g1 = claim(&resolved_dir("npm:mymux-test-pkg-a")).expect("first claim");
+        // Same package, different spec → same dir → blocked.
+        assert!(claim(&resolved_dir("npm:mymux-test-pkg-a@9.9.9")).is_none());
+        // A different package installs in parallel just fine.
+        let g2 = claim(&resolved_dir("npm:mymux-test-pkg-b")).expect("other package");
+        drop(g2);
+        drop(g1);
+        // Guard drop releases the dir for the next operation.
+        assert!(claim(&resolved_dir("npm:mymux-test-pkg-a@9.9.9")).is_some());
+    }
 }

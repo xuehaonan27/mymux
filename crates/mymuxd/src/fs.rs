@@ -2,6 +2,9 @@
 //! focused pane's working directory (`#{pane_current_path}`) when a `pane` is
 //! given, else `MYMUX_ROOT`/cwd. [`safe_path`] confines every access to that
 //! root (rejecting `..`/symlink escapes); reads are text-only and size-capped.
+//! A PRESENT-but-invalid pane/root fails (404/403) instead of falling back to
+//! a plausible-but-wrong directory; writes reject symlink leaves and land
+//! atomically (temp + rename).
 
 use std::path::{Path, PathBuf};
 
@@ -48,37 +51,62 @@ pub(crate) fn init_hub(hub: std::sync::Arc<crate::tmux::Hub>) {
     let _ = HUB.set(hub);
 }
 
-/// The root a request is relative to: the focused pane's cwd, else the default.
-pub(crate) async fn root_for(pane: Option<u32>) -> PathBuf {
+/// A present pane's root, or 404 when the id is unknown/gone — a stale
+/// request must FAIL, not silently act on a plausible-but-wrong directory.
+/// An ABSENT pane param is explicit default-root intent (the path-jump
+/// probes and root-only callers send no pane).
+pub(crate) async fn root_for_strict(pane: Option<u32>) -> Result<PathBuf, StatusCode> {
     let Some(p) = pane else {
-        return default_root();
+        return Ok(default_root());
     };
     // A pane in the ptyd mirror is native: its shell's cwd comes from /proc.
     if let Some(pid) = HUB.get().and_then(|h| h.persist.pid_of(p)) {
-        return std::fs::read_link(format!("/proc/{pid}/cwd")).unwrap_or_else(|_| default_root());
+        return std::fs::read_link(format!("/proc/{pid}/cwd")).map_err(|_| StatusCode::NOT_FOUND);
     }
-    pane_cwd(p).await.unwrap_or_else(default_root)
+    pane_cwd(p).await.ok_or(StatusCode::NOT_FOUND)
 }
 
-/// An explicit absolute root from the client (the code panel's root switcher)
-/// — honored only when it resolves to a real directory INSIDE the user's home.
-/// The origin guard is the security layer; this just keeps casual path games
-/// out. Anything else falls back to the pane root.
-fn override_root(param: &Option<String>) -> Option<PathBuf> {
-    let p = param.as_deref()?.trim();
-    if p.is_empty() {
-        return None;
+/// The `root` override param, three ways. An explicit absolute root from the
+/// client (the code panel's root switcher) is honored only when it resolves
+/// to a real directory INSIDE the user's home. The origin guard is the
+/// security layer; this just keeps casual path games out. A PRESENT-but-
+/// invalid override is an error (403), never a silent fallback.
+enum OverrideRoot {
+    /// No `root` param (or blank): resolve from the pane/default.
+    Absent,
+    /// `root` given but not a real directory inside the user's home.
+    Invalid,
+    Valid(PathBuf),
+}
+
+fn override_root(param: &Option<String>) -> OverrideRoot {
+    let Some(p) = param.as_deref().map(str::trim).filter(|p| !p.is_empty()) else {
+        return OverrideRoot::Absent;
+    };
+    let Some(home) = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|h| h.canonicalize().ok())
+    else {
+        return OverrideRoot::Invalid;
+    };
+    match PathBuf::from(p).canonicalize() {
+        Ok(abs) if abs.is_dir() && abs.starts_with(&home) => OverrideRoot::Valid(abs),
+        _ => OverrideRoot::Invalid,
     }
-    let home = PathBuf::from(std::env::var_os("HOME")?).canonicalize().ok()?;
-    let abs = PathBuf::from(p).canonicalize().ok()?;
-    (abs.is_dir() && abs.starts_with(&home)).then_some(abs)
 }
 
 /// Effective root for a request carrying an optional `root` override.
-pub(crate) async fn root_for_req(pane: Option<u32>, root: &Option<String>) -> PathBuf {
+/// Errors: 404 for a present-but-unknown pane, 403 for a present-but-invalid
+/// root override (audit C-26 — stale pane/root requests previously fell back
+/// to the daemon cwd and read/wrote the wrong directory).
+pub(crate) async fn root_for_req(
+    pane: Option<u32>,
+    root: &Option<String>,
+) -> Result<PathBuf, StatusCode> {
     match override_root(root) {
-        Some(r) => r,
-        None => root_for(pane).await,
+        OverrideRoot::Valid(r) => Ok(r),
+        OverrideRoot::Invalid => Err(StatusCode::FORBIDDEN),
+        OverrideRoot::Absent => root_for_strict(pane).await,
     }
 }
 
@@ -116,14 +144,14 @@ pub struct PathQuery {
 /// /fs and /lsp requests are rooted at (the code panel needs it to map LSP
 /// `file://` URIs back to panel-relative paths, and the root switcher to show
 /// what it actually got after server-side validation).
-pub async fn root(Query(q): Query<PathQuery>) -> Json<serde_json::Value> {
-    let root = root_for_req(q.pane, &q.root).await;
-    Json(serde_json::json!({ "root": root.display().to_string() }))
+pub async fn root(Query(q): Query<PathQuery>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let root = root_for_req(q.pane, &q.root).await?;
+    Ok(Json(serde_json::json!({ "root": root.display().to_string() })))
 }
 
 /// `GET /fs/list?pane=<id>&path=<rel>` — directory entries (dirs first).
 pub async fn list(Query(q): Query<PathQuery>) -> Result<Json<Vec<Entry>>, StatusCode> {
-    let root = root_for_req(q.pane, &q.root).await;
+    let root = root_for_req(q.pane, &q.root).await?;
     let dir = safe_path(&root, &q.path, true).ok_or(StatusCode::FORBIDDEN)?;
     let rd = std::fs::read_dir(&dir).map_err(|_| StatusCode::NOT_FOUND)?;
     let mut entries: Vec<Entry> = rd
@@ -143,7 +171,7 @@ pub async fn list(Query(q): Query<PathQuery>) -> Result<Json<Vec<Entry>>, Status
 
 /// `GET /fs/read?pane=<id>&path=<rel>` — file contents (text, size-capped).
 pub async fn read(Query(q): Query<PathQuery>) -> Result<String, StatusCode> {
-    let root = root_for_req(q.pane, &q.root).await;
+    let root = root_for_req(q.pane, &q.root).await?;
     let file = safe_path(&root, &q.path, true).ok_or(StatusCode::FORBIDDEN)?;
     let md = std::fs::metadata(&file).map_err(|_| StatusCode::NOT_FOUND)?;
     if md.is_dir() || md.len() > MAX_READ {
@@ -167,6 +195,17 @@ pub struct RawQuery {
 /// Cap for raw serves — generous enough for photos, still bounded.
 const MAX_RAW: u64 = 50 * 1024 * 1024;
 
+/// Read at most `cap` bytes of `file` — viewers ask for a prefix (hex = a few
+/// KiB, the path-jump probe = 1 byte), so never slurp the whole file to serve
+/// a few bytes.
+fn read_capped(file: &Path, cap: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let f = std::fs::File::open(file)?;
+    let mut bytes = Vec::new();
+    f.take(cap).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 fn mime_for(path: &str) -> &'static str {
     let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
     match ext.as_deref() {
@@ -189,16 +228,14 @@ fn mime_for(path: &str) -> &'static str {
 pub async fn raw(
     Query(q): Query<RawQuery>,
 ) -> Result<([(axum::http::HeaderName, String); 2], Vec<u8>), StatusCode> {
-    let root = root_for_req(q.pane, &q.root).await;
+    let root = root_for_req(q.pane, &q.root).await?;
     let file = safe_path(&root, &q.path, true).ok_or(StatusCode::FORBIDDEN)?;
     let md = std::fs::metadata(&file).map_err(|_| StatusCode::NOT_FOUND)?;
     if md.is_dir() || md.len() > MAX_RAW {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let mut bytes = std::fs::read(&file).map_err(|_| StatusCode::NOT_FOUND)?;
-    if let Some(limit) = q.limit {
-        bytes.truncate(limit.min(MAX_RAW) as usize);
-    }
+    let bytes = read_capped(&file, q.limit.unwrap_or(MAX_RAW).min(MAX_RAW))
+        .map_err(|_| StatusCode::NOT_FOUND)?;
     Ok((
         [
             (
@@ -225,14 +262,75 @@ pub struct WriteReq {
 
 /// `POST /fs/write` `{path, content, pane?, root?}` — save a file.
 pub async fn write(Json(req): Json<WriteReq>) -> StatusCode {
-    let root = root_for_req(req.pane, &req.root).await;
+    let root = match root_for_req(req.pane, &req.root).await {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
     match safe_path(&root, &req.path, false) {
-        Some(file) => match std::fs::write(&file, req.content) {
-            Ok(_) => StatusCode::NO_CONTENT,
-            Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        Some(file) => match write_confined(&file, req.content.as_bytes()) {
+            Ok(()) => StatusCode::NO_CONTENT,
+            Err(code) => code,
         },
         None => StatusCode::FORBIDDEN,
     }
+}
+
+/// The /fs/write leaf discipline, split out for tests. A final-component
+/// symlink (or any other non-regular existing file) is REJECTED, never
+/// followed out of the confined root (P0-02); the content then lands via a
+/// same-directory temp + atomic rename, so a mid-write failure can't leave a
+/// truncated original (#8).
+fn write_confined(file: &Path, content: &[u8]) -> Result<(), StatusCode> {
+    match std::fs::symlink_metadata(file) {
+        Ok(md) => {
+            let ft = md.file_type();
+            if ft.is_symlink() || !ft.is_file() {
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+    atomic_write(file, content).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Monotonic suffix so concurrent saves of the SAME file don't collide on
+/// one temp name (last rename wins, atomically).
+static TMP_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Write `content` to `file` atomically: a same-directory temp file, then a
+/// rename over the target. rename REPLACES whatever leaf is there — a symlink
+/// raced in after the [`write_confined`] check is overwritten, never followed
+/// (rename does not follow a destination symlink). A replacement keeps the
+/// old file's permission bits; a new file gets fresh 0666&~umask semantics.
+fn atomic_write(file: &Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let parent = file
+        .parent()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no parent dir"))?;
+    let leaf = file.file_name().unwrap_or_default().to_string_lossy();
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = parent.join(format!(".{leaf}.mymux-tmp-{}-{seq}", std::process::id()));
+    let result = (|| {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o666);
+        }
+        let mut f = opts.open(&tmp)?;
+        if let Ok(md) = std::fs::metadata(file) {
+            let _ = std::fs::set_permissions(&tmp, md.permissions());
+        }
+        f.write_all(content)?;
+        drop(f);
+        std::fs::rename(&tmp, file)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp); // never leave a temp behind
+    }
+    result
 }
 
 #[derive(Deserialize)]
@@ -279,7 +377,7 @@ const MAX_SEARCH_FILE: u64 = 1024 * 1024; // 1 MiB
 /// the walk can't escape it), skips [`SKIP_DIRS`], stops at [`MAX_HITS`].
 pub async fn search(Query(q): Query<SearchQuery>) -> Result<Json<Vec<SearchHit>>, StatusCode> {
     let root = root_for_req(q.pane, &q.root)
-        .await
+        .await?
         .canonicalize()
         .map_err(|_| StatusCode::NOT_FOUND)?;
     let needle = q.q.trim().to_lowercase();
@@ -371,6 +469,13 @@ mod tests {
         std::fs::write(p, content).unwrap();
     }
 
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("mymux-fs-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn search_matches_names_and_contents_skipping_forests() {
         let root = std::env::temp_dir().join(format!("mymux-fs-search-{}", std::process::id()));
@@ -399,5 +504,159 @@ mod tests {
         assert!(!contents.iter().any(|h| h.path == "bin.dat"), "{contents:?}"); // binary-sniffed out
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn raw_read_is_bounded_by_the_limit() {
+        let dir = test_dir("rawcap");
+        let file = dir.join("big.bin");
+        let data: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&file, &data).unwrap();
+        let got = read_capped(&file, 4096).unwrap();
+        assert_eq!(got.len(), 4096);
+        assert_eq!(got, data[..4096]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_creates_a_new_file() {
+        let dir = test_dir("new");
+        let file = dir.join("created.txt");
+        write_confined(&file, b"hello").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello");
+        assert_no_temps(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    fn nofollow_mode(p: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_replaces_existing_and_keeps_its_mode() {
+        let dir = test_dir("replace");
+        let file = dir.join("keep.txt");
+        std::fs::write(&file, "old content").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        write_confined(&file, b"new content").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new content");
+        assert_eq!(nofollow_mode(&file), 0o640, "replacement kept the old mode");
+        assert_no_temps(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn assert_no_temps(dir: &Path) {
+        let temps: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".mymux-tmp-"))
+            .collect();
+        assert!(temps.is_empty(), "leftover temp files: {temps:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_rejects_a_symlink_leaf() {
+        let dir = test_dir("symlink");
+        let outside = dir.join("outside.txt");
+        std::fs::write(&outside, "precious").unwrap();
+        let link = dir.join("escape.txt");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert_eq!(
+            write_confined(&link, b"escaped-write"),
+            Err(StatusCode::FORBIDDEN)
+        );
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "precious");
+        assert!(
+            std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+            "the symlink itself must survive the rejection"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_rejects_a_non_regular_leaf() {
+        let dir = test_dir("nonregular");
+        let sub = dir.join("subdir");
+        std::fs::create_dir(&sub).unwrap();
+        assert_eq!(write_confined(&sub, b"x"), Err(StatusCode::FORBIDDEN));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The swap race: an attacker flips the leaf between symlink and regular
+    /// file while saves land. rename() replaces WHATEVER leaf exists — the
+    /// outside target must never be written, on any interleaving.
+    #[cfg(unix)]
+    #[test]
+    fn write_swap_race_never_follows_the_symlink() {
+        let dir = test_dir("swaprace");
+        let outside = dir.join("outside.txt");
+        std::fs::write(&outside, "precious").unwrap();
+        let link = dir.join("race.txt");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let swapper = {
+            let outside = outside.clone();
+            let link = link.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut regular = false;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::fs::remove_file(&link);
+                    if regular {
+                        let _ = std::fs::write(&link, "decoy");
+                    } else {
+                        let _ = std::os::unix::fs::symlink(&outside, &link);
+                    }
+                    regular = !regular;
+                }
+            })
+        };
+        for i in 0..200 {
+            let content = format!("payload-{i}");
+            let _ = write_confined(&link, content.as_bytes()); // 403 or success — both fine
+            assert_eq!(
+                std::fs::read_to_string(&outside).unwrap(),
+                "precious",
+                "iteration {i}: the write followed a raced symlink out of confinement"
+            );
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        swapper.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Atomicity (#8): a concurrent reader only ever observes the complete
+    /// old content or the complete new content, never a partial write.
+    #[test]
+    fn write_is_atomic_under_a_concurrent_reader() {
+        let dir = test_dir("atomic");
+        let file = dir.join("data.txt");
+        let old = "O".repeat(4096);
+        std::fs::write(&file, &old).unwrap();
+        let new = "N".repeat(4 * 1024 * 1024); // big enough to span many write() calls
+        let writer = {
+            let file = file.clone();
+            let new = new.clone();
+            std::thread::spawn(move || write_confined(&file, new.as_bytes()))
+        };
+        while !writer.is_finished() {
+            let seen = std::fs::read(&file).unwrap();
+            assert!(
+                seen == old.as_bytes() || seen == new.as_bytes(),
+                "observed a partial write ({} bytes)",
+                seen.len()
+            );
+        }
+        writer.join().unwrap().unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), new.as_bytes());
+        assert_no_temps(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
