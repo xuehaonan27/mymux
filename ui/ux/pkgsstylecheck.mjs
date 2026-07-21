@@ -1,10 +1,13 @@
 // Packages panel open-path discipline: first open fetches the catalog
 // (loading shown); reopening paints the CACHED list instantly (no loading
 // flash, no refetch flicker). Search stays per-query. Daemon: the sandboxed
-// default pair — its embedded index/index.json is local, no network needed.
+// pair — mymux-pkg's embedded index is local, no network needed.
 import { chromium } from 'playwright-core';
+import { startSandbox } from './sandbox.mjs';
 
-const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
+const sb = await startSandbox(8084, 'pkgsstyle');
+process.on('exit', () => sb.kill());
+const UI = process.env.UI ?? sb.ui;
 const fails = [];
 const check = (name, cond, detail = '') => {
   console.log(`${cond ? '✓' : '✗ FAIL'} ${name}${cond || !detail ? '' : ` — ${detail}`}`);
@@ -46,6 +49,7 @@ check('search returns the yaml server', st.includes('yaml-language-server'), st.
 
 await page.screenshot({ path: 'shots/pkgs.png' });
 await browser.close();
+sb.kill();
 if (fails.length) {
   console.error('FAILURES:', fails.join(' | '));
   process.exit(1);

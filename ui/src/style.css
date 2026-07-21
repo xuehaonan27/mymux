@@ -1796,6 +1796,9 @@ body.has-winalpha #hostbar {
   font-size: 10px;
 }
 .ws-banner-btn {
+  /* The banner itself is pointer-events:none (clicks fall through to the
+   * panes) — the escape-hatch button must opt back in to receive any click. */
+  pointer-events: auto;
   margin-left: 10px;
   padding: 2px 10px;
   border-radius: 4px;

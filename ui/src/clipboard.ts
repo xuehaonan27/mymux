@@ -13,6 +13,9 @@ export async function copyText(text: string): Promise<boolean> {
     // fall through to the legacy path (WKWebView non-secure contexts)
   }
   try {
+    // The fallback steals focus to its transient textarea; remember whoever
+    // had it (usually the terminal) so typing doesn't die until a click.
+    const prev = document.activeElement;
     const ta = document.createElement('textarea');
     ta.value = text;
     ta.style.position = 'fixed';
@@ -24,6 +27,7 @@ export async function copyText(text: string): Promise<boolean> {
     ta.setSelectionRange(0, text.length);
     const ok = document.execCommand('copy');
     ta.remove();
+    if (prev instanceof HTMLElement) prev.focus();
     return ok;
   } catch {
     return false;

@@ -477,7 +477,6 @@ let hostManager: HostManager | null = null;
 function ensureWorkspace(id: string, label: string, port: number): Workspace {
   const existing = workspaces.get(id);
   if (existing) return existing;
-  renderEmpty(); // a workspace arriving hides the empty state
   const w = new Workspace({
     id,
     label,
@@ -531,6 +530,10 @@ function ensureWorkspace(id: string, label: string, port: number): Workspace {
   w.setTermTheme(termThemeWithOpacity(presetById(getPrefs().theme).term, currentTermAlpha()));
   w.setTermFont(getPrefs().fontSize);
   workspaces.set(id, w);
+  // A workspace arriving hides the empty state — but only AFTER the set:
+  // renderEmpty keys on workspaces.size, which was still 0 a line earlier
+  // (the first connect left #empty.show on behind the terminal).
+  renderEmpty();
   w.connect();
   return w;
 }
@@ -919,26 +922,34 @@ const codeOpts: CodePanelOpts = {
 // CodeMirror is heavy, so the code panel loads on first use (vite splits the
 // chunk); the wrapper keeps the synchronous interface the shell expects.
 let codeReal: CodePanel | null = null;
-let codeLoading = false;
+let codeLoading: Promise<void> | null = null; // memoized in-flight chunk import
 async function ensureCode(): Promise<CodePanel> {
-  if (!codeReal && !codeLoading) {
-    codeLoading = true;
-    const m = await import('./code');
-    codeReal = m.initCodePanel(codeOpts);
-    codeLoading = false;
+  if (!codeReal) {
+    codeLoading ??= import('./code').then((m) => {
+      codeReal = m.initCodePanel(codeOpts);
+    });
+    try {
+      await codeLoading;
+    } catch (e) {
+      // A rejected chunk (stale hash after a redeploy) must not wedge the
+      // panel: reset so the next toggle RETRIES, and surface the failure.
+      codeLoading = null;
+      toast('the code panel failed to load — try again (see console)');
+      throw e;
+    }
   }
-  while (!codeReal) await new Promise((r) => setTimeout(r, 50));
-  return codeReal;
+  return codeReal!;
 }
 const codePanel = {
   isOpen: () => codeReal?.isOpen() ?? false,
   toggle: () => {
+    // Rejection already toasted inside ensureCode — swallow here, don't wedge.
     void ensureCode().then((c) => {
       c.toggle();
       // The panel materializes through the async chunk — noteModal only after
       // the real toggle, or isOpen() reads false and the entry is dropped.
       noteModal('code', c.isOpen());
-    });
+    }, () => {});
   },
   quickOpen: () => codeReal?.quickOpen(),
   escape: () => codeReal?.escape() ?? false,
@@ -948,14 +959,14 @@ const codePanel = {
     void ensureCode().then((c) => {
       c.openAt(root, path, line);
       noteModal('code', true);
-    });
+    }, () => {});
   },
   /** Terminal/editor dir jump: root the panel at an absolute directory. */
   openRoot: (root: string) => {
     void ensureCode().then((c) => {
       c.openRoot(root);
       noteModal('code', true);
-    });
+    }, () => {});
   },
   /** Host switch landed while open: swap to that host's session (async-chunk
    * lazy, so no-op until the panel has materialized once). */
@@ -972,7 +983,7 @@ const pkgsPanel = initPkgsPanel({
 // The git graph is a plugin-shaped module (ui/src/gitgraph.ts) behind a
 // lazy dynamic import, same contract shape as the code panel's wrapper.
 let gitReal: import('./gitgraph').GitGraphPanel | null = null;
-let gitLoading = false;
+let gitLoading: Promise<void> | null = null; // memoized in-flight chunk import
 // A jump-in that arrived while the chunk was still loading: show(hash),
 // showFileHistory(root, path), or showChanges(root?, path?) — applied once
 // init completes.
@@ -980,32 +991,39 @@ let pendingGit:
   | { hash?: string; hist?: { root: string; path: string }; changes?: { root?: string | null; path?: string } }
   | null = null;
 async function ensureGit(): Promise<import('./gitgraph').GitGraphPanel> {
-  if (!gitReal && !gitLoading) {
-    gitLoading = true;
-    const m = await import('./gitgraph');
-    gitReal = m.initGitGraph({
-      getActivePane: () => active()?.activePane ?? null,
-      getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
-      toast,
-      openInCode: (root, path) => {
-        // Both overlays share the z-band: close the graph, open the editor.
-        if (gitPanel.isOpen()) gitPanel.toggle();
-        codePanel.openAt(root, path);
-      },
-      langFor: (p) => codeReal?.langFor(p) ?? [],
+  if (!gitReal) {
+    gitLoading ??= import('./gitgraph').then((m) => {
+      gitReal = m.initGitGraph({
+        getActivePane: () => active()?.activePane ?? null,
+        getApiBase: () => active()?.apiBase ?? 'http://127.0.0.1:8088',
+        toast,
+        openInCode: (root, path) => {
+          // Both overlays share the z-band: close the graph, open the editor.
+          if (gitPanel.isOpen()) gitPanel.toggle();
+          codePanel.openAt(root, path);
+        },
+        langFor: (p) => codeReal?.langFor(p) ?? [],
+      });
     });
-    gitLoading = false;
+    try {
+      await gitLoading;
+    } catch (e) {
+      // Same anti-wedge contract as ensureCode: reset + surface, never spin.
+      gitLoading = null;
+      toast('the git panel failed to load — try again (see console)');
+      throw e;
+    }
   }
-  while (!gitReal) await new Promise((r) => setTimeout(r, 50));
-  return gitReal;
+  return gitReal!;
 }
 const gitPanel = {
   isOpen: () => gitReal?.isOpen() ?? false,
   toggle: () => {
+    // The rejection path (chunk failed) is toasted in ensureGit — swallow.
     void ensureGit().then((g) => {
       g.toggle();
       noteModal('gitgraph', g.isOpen());
-    });
+    }, () => {});
   },
   /** Blame click-through: open the graph ON this commit (the code panel is
    * above us in the z-band, so it must close first — the caller does that). */
@@ -1016,7 +1034,7 @@ const gitPanel = {
       pendingGit = null;
       if (p?.hash) g.show(p.hash);
       noteModal('gitgraph', g.isOpen());
-    });
+    }, () => {});
   },
   /** History click-through: the file's own history across renames. */
   showFileHistory: (root: string, path: string) => {
@@ -1026,7 +1044,7 @@ const gitPanel = {
       pendingGit = null;
       if (p?.hist) g.showFileHistory(p.hist.root, p.hist.path);
       noteModal('gitgraph', g.isOpen());
-    });
+    }, () => {});
   },
   /** Changes click-through (design B): the workbench page, optionally with a
    * file's stageable diff already open. */
@@ -1037,10 +1055,11 @@ const gitPanel = {
       pendingGit = null;
       if (p?.changes) g.showChanges(p.changes.root, p.changes.path);
       noteModal('gitgraph', g.isOpen());
-    });
+    }, () => {});
   },
 };
 function toggleGitGraph() {
+  closeOtherPanels('git');
   gitPanel.toggle();
   if (gitReal) noteModal('gitgraph', gitReal.isOpen());
   setLeader(false);
@@ -1051,20 +1070,26 @@ registerModal('gitgraph', { isOpen: () => gitPanel.isOpen(), close: () => toggle
 // pane's raw history log lives on ITS host's daemon — so apiBase is pinned
 // to the workspace the chip was clicked in, not the active one.
 let histReal: import('./termhist').TermHistPanel | null = null;
-let histLoading = false;
+let histLoading: Promise<void> | null = null; // memoized in-flight chunk import
 let histWs: Workspace | null = null;
 async function ensureHist(): Promise<import('./termhist').TermHistPanel> {
-  if (!histReal && !histLoading) {
-    histLoading = true;
-    const m = await import('./termhist');
-    histReal = m.initTermHist({
-      getApiBase: () => histWs?.apiBase ?? active()?.apiBase ?? 'http://127.0.0.1:8088',
-      toast,
+  if (!histReal) {
+    histLoading ??= import('./termhist').then((m) => {
+      histReal = m.initTermHist({
+        getApiBase: () => histWs?.apiBase ?? active()?.apiBase ?? 'http://127.0.0.1:8088',
+        toast,
+      });
     });
-    histLoading = false;
+    try {
+      await histLoading;
+    } catch (e) {
+      // Same anti-wedge contract as ensureCode: reset + surface, never spin.
+      histLoading = null;
+      toast('the history panel failed to load — try again (see console)');
+      throw e;
+    }
   }
-  while (!histReal) await new Promise((r) => setTimeout(r, 50));
-  return histReal;
+  return histReal!;
 }
 const histPanel = {
   open: (w: Workspace, pane: number) => {
@@ -1072,7 +1097,7 @@ const histPanel = {
     void ensureHist().then((h) => {
       h.open(pane);
       noteModal('termhist', true);
-    });
+    }, () => {});
   },
   isOpen: () => histReal?.isOpen() ?? false,
   close: () => {
@@ -1081,11 +1106,15 @@ const histPanel = {
   },
 };
 registerModal('termhist', { isOpen: () => histPanel.isOpen(), close: () => histPanel.close() });
-// The overlays are full-screen and share a z-band, so they're mutually exclusive.
-function closeOtherPanels(keep: 'code' | 'proc' | 'pkgs') {
+// The full-screen overlays (code/proc/pkgs/git) share a z-band, so they're
+// mutually exclusive — ONE arbiter, and every toggle goes through it. Settings,
+// the host manager, and the termhist pager are NOT in this set: they layer
+// above a full-screen panel by design (the modal stack owns Esc order there).
+function closeOtherPanels(keep: 'code' | 'proc' | 'pkgs' | 'git') {
   if (keep !== 'code' && codePanel.isOpen()) codePanel.toggle();
   if (keep !== 'proc' && procPanel.isOpen()) procPanel.toggle();
   if (keep !== 'pkgs' && pkgsPanel.isOpen()) pkgsPanel.toggle();
+  if (keep !== 'git' && gitPanel.isOpen()) gitPanel.toggle();
 }
 function toggleCode() {
   closeOtherPanels('code');

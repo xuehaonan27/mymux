@@ -2,9 +2,12 @@
 // page, sentinel-triggered second page, scroll position preserved.
 // Creates 230 filler commits (cleanup resets to origin/master after).
 import { chromium } from 'playwright-core';
+import { startSandbox } from './sandbox.mjs';
 import { execSync } from 'node:child_process';
 
-const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
+const sb = await startSandbox(8082, 'gitpage');
+process.on('exit', () => sb.kill());
+const UI = process.env.UI ?? sb.ui;
 const REPO = '/home/xuehaonan/ux-git-ops';
 const fails = [];
 const check = (name, cond, detail = '') => {
@@ -66,6 +69,7 @@ check('sentinel back', (await page.locator('.git-more').count()) === 1);
 
 await page.screenshot({ path: 'shots/git-paging.png' });
 await browser.close();
+sb.kill();
 git('reset -q --hard origin/master');
 git('clean -fdq');
 if (fails.length) {

@@ -2,8 +2,11 @@
 // uncommitted workbench, History page with pure swim-lane topology, commit
 // detail, and modal-stack Esc — against ~/ux-git-test.
 import { chromium } from 'playwright-core';
+import { startSandbox } from './sandbox.mjs';
 
-const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
+const sb = await startSandbox(8081, 'gitcheck');
+process.on('exit', () => sb.kill());
+const UI = process.env.UI ?? sb.ui;
 const fails = [];
 const check = (name, cond, detail = '') => {
   console.log(`${cond ? '✓' : '✗ FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
@@ -69,6 +72,7 @@ await page.waitForTimeout(300);
 check('Esc closes the surface', (await page.locator('.git-panel.show').count()) === 0);
 
 await browser.close();
+sb.kill();
 if (fails.length) {
   console.error('FAILURES:', fails.join(' | '));
   process.exit(1);

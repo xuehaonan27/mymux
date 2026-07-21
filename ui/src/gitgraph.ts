@@ -89,15 +89,88 @@ const LANE_W = 14;
 const PAD_X = 10;
 const LANE_COLORS = 8; // lane-0..7 classes in style.css
 
+/** Rebuild a REDUCED unified patch from a file's diff, keeping only the
+ * chosen +/- lines (unchosen '+' dropped, unchosen '-' rewritten as
+ * context — git add -p's edit-hunk semantics; counts recomputed). Both hunk
+ * STARTS are preserved from the source header — an earlier (unchosen) hunk's
+ * net line change makes them differ (`@@ -30,6 +33,6 @@`), and copying the
+ * old start to the new side applies the hunk at the wrong line. Module-level
+ * and exported so the ux hunk-header check can drive it directly. */
+export function buildPatch(lines: string[], chosen: Set<number>): string {
+  const firstHunk = lines.findIndex((l) => l.startsWith('@@'));
+  if (firstHunk < 0) return '';
+  const out = lines.slice(0, firstHunk);
+  let i = firstHunk;
+  while (i < lines.length) {
+    const head = lines[i];
+    if (!head.startsWith('@@')) {
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    const body: { idx: number; text: string }[] = [];
+    while (j < lines.length && !lines[j].startsWith('@@') && !lines[j].startsWith('diff --git')) {
+      if (lines[j] !== '') body.push({ idx: j, text: lines[j] });
+      j++;
+    }
+    let anyChosen = false;
+    const kept: string[] = [];
+    for (const l of body) {
+      const c = l.text[0];
+      if (c === '+') {
+        if (chosen.has(l.idx)) {
+          kept.push(l.text);
+          anyChosen = true;
+        }
+      } else if (c === '-') {
+        if (chosen.has(l.idx)) {
+          kept.push(l.text);
+          anyChosen = true;
+        } else {
+          kept.push(' ' + l.text.slice(1));
+        }
+      } else {
+        kept.push(l.text); // context + "\ No newline" tails
+      }
+    }
+    if (anyChosen) {
+      const m = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(head);
+      const oldStart = m ? m[1] : '0';
+      const newStart = m ? m[2] : '0';
+      const oldCount = kept.filter((l) => l[0] === ' ' || l[0] === '-').length;
+      const newCount = kept.filter((l) => l[0] === ' ' || l[0] === '+').length;
+      out.push(`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`);
+      out.push(...kept);
+    }
+    i = j;
+  }
+  return out.join('\n') + '\n';
+}
+
 export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
   const panel = document.createElement('div');
   panel.className = 'git-panel';
   document.body.appendChild(panel);
   let open = false;
-  let seq = 0; // stale-response guard
-  // Repo/session state, resolved on open.
-  let root: string | null = null;
-  let pane: number | null = null;
+  let seq = 0; // list generation: every full load bumps it (stale-load guard)
+  let detailSeq = 0; // detail-column generation, SPLIT from the list's:
+  // selecting a commit (or opening a workbench diff) cancels detail renders,
+  // but must NOT cancel an in-flight history page — only a full load may.
+  /**
+   * The immutable load scope: everything a render or an action may touch.
+   * INVARIANT — `cur` is written ONLY by a load() commit, i.e. after the
+   * whole scoped result (toplevel + log + status + stash + state, all fetched
+   * on `api`) passed its `seq` guard, and always with `seq` set to that
+   * guard's value. So `cur.api/pane/root` can never mix hosts or repos, and
+   * any async piece snapshotting `seq` can trust `cur` to match it.
+   */
+  interface Scope {
+    api: string;
+    pane: number | null;
+    root: string | null;
+    seq: number;
+  }
+  let cur: Scope = { api: '', pane: null, root: null, seq: 0 };
   /** The git surface's two pages: the working-tree workbench, or history.
    * The branch graph is the landing view — the "tree" users orient by; deep
    * links set the page explicitly, and reopening keeps the last-used one. */
@@ -133,18 +206,18 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     if (text != null) e.textContent = text;
     return e;
   };
-  const get = async <T>(path: string): Promise<T | null> => {
+  const get = async <T>(api: string, path: string): Promise<T | null> => {
     try {
-      const r = await fetch(`${opts.getApiBase()}${path}`);
+      const r = await fetch(`${api}${path}`);
       if (!r.ok) return null;
       return (await r.json()) as T;
     } catch {
       return null;
     }
   };
-  const getText = async (path: string): Promise<string | null> => {
+  const getText = async (api: string, path: string): Promise<string | null> => {
     try {
-      const r = await fetch(`${opts.getApiBase()}${path}`);
+      const r = await fetch(`${api}${path}`);
       if (!r.ok) return null;
       return await r.text();
     } catch {
@@ -161,11 +234,12 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
   async function op(path: string, body: Record<string, string | number | null>, okMsg: string) {
     if (opBusy) return;
     opBusy = true;
+    const s = cur; // act on the scope whose model is on screen, captured once
     try {
-      const r = await fetch(`${opts.getApiBase()}${path}`, {
+      const r = await fetch(`${s.api}${path}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ pane, root, ...body }),
+        body: JSON.stringify({ pane: s.pane, root: s.root, ...body }),
       });
       const res = (await r.json().catch(() => ({ ok: false, out: 'bad response' }))) as WriteResp;
       opts.toast(res.out.split('\n').slice(0, 3).join(' · ') || (res.ok ? okMsg : 'failed'));
@@ -610,13 +684,13 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
   }
 
   async function renderDetail() {
-    const my = ++seq;
+    const my = ++detailSeq;
     // Compare mode: A..B between two right-click-marked commits.
     if (compareView) {
       const { a, b } = compareView;
       detailEl.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
-      const d = await get<ShowResp>(`/git/compare?${qs({ root, rev: a, rev2: b })}`);
-      if (my !== seq) return;
+      const d = await get<ShowResp>(cur.api, `/git/compare?${qs({ root: cur.root, rev: a, rev2: b })}`);
+      if (my !== detailSeq) return;
       if (!d) {
         compareView = null;
         detailEl.replaceChildren(el('div', 'git-detail-hint', 'could not compare these commits'));
@@ -626,7 +700,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
         el('div', 'git-detail-title', `⇄ ${a.slice(0, 8)}..${b.slice(0, 8)}`),
         el('div', 'git-detail-meta', `${d.files?.length ?? 0} file(s) changed · click a row to leave compare`),
       );
-      appendFilesAndDiff(detailEl, d, (p) => get<ShowResp>(`/git/compare?${qs({ root, rev: a, rev2: b, path: p })}`));
+      appendFilesAndDiff(detailEl, d, (p) => get<ShowResp>(cur.api, `/git/compare?${qs({ root: cur.root, rev: a, rev2: b, path: p })}`));
       return;
     }
     if (!selected) {
@@ -638,8 +712,8 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       return;
     }
     detailEl.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
-    const d = await get<ShowResp>(`/git/show?${qs({ root, rev: selected, path: fileFilter ?? undefined })}`);
-    if (my !== seq) return;
+    const d = await get<ShowResp>(cur.api, `/git/show?${qs({ root: cur.root, rev: selected, path: fileFilter ?? undefined })}`);
+    if (my !== detailSeq) return;
     if (!d) {
       detailEl.replaceChildren(el('div', 'git-detail-hint', 'could not load this commit'));
       return;
@@ -652,7 +726,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       el('div', 'git-detail-meta', `${d.author} · ${fmtDate(d.date)}`),
     );
     if (d.body.trim()) detailEl.appendChild(el('div', 'git-detail-body', d.body.trim()));
-    appendFilesAndDiff(detailEl, d, (p) => get<ShowResp>(`/git/show?${qs({ root, rev: d.hash, path: p })}`));
+    appendFilesAndDiff(detailEl, d, (p) => get<ShowResp>(cur.api, `/git/show?${qs({ root: cur.root, rev: d.hash, path: p })}`));
   }
 
   /** Files (click → per-file diff) + whole-revision diff, shared by the
@@ -665,12 +739,12 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       const row = el('div', 'git-file');
       row.appendChild(el('span', `gbadge g${f.status === 'A' ? 'new' : f.status === 'D' ? 'del' : 'mod'}`, f.status));
       row.appendChild(el('span', 'git-file-path', f.path));
-      if (opts.openInCode && root) {
+      if (opts.openInCode && cur.root) {
         const obtn = el('button', 'git-open-btn', '✎');
         obtn.title = 'open in the editor';
         obtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          opts.openInCode!(root!, f.path);
+          opts.openInCode!(cur.root!, f.path);
         });
         row.appendChild(obtn);
       }
@@ -765,12 +839,12 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       row.appendChild(dbtn);
       // Jump back to the editor for this file (mirrors the diff header's
       // "open in editor" — the row itself opens the stageable diff).
-      if (opts.openInCode && root) {
+      if (opts.openInCode && cur.root) {
         const obtn = el('button', 'git-open-btn', '✎');
         obtn.title = 'open in the editor';
         obtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          opts.openInCode!(root!, f.path);
+          opts.openInCode!(cur.root!, f.path);
         });
         row.appendChild(obtn);
       }
@@ -785,8 +859,8 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       row.addEventListener('click', () => {
         // Conflicted file: resolving it beats staring at a marker-pocked
         // diff — jump into the code panel's editor (accept widgets there).
-        if (gitState.conflicts.includes(f.path) && opts.openInCode && root) {
-          opts.openInCode(root, f.path);
+        if (gitState.conflicts.includes(f.path) && opts.openInCode && cur.root) {
+          opts.openInCode(cur.root, f.path);
           return;
         }
         openWorkbench(f.path, { staged: staged && !unstaged });
@@ -871,10 +945,10 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
 
   /** Stash detail (actions + diff), in the workbench. */
   async function renderStashWorkbench(sel: string) {
-    const my = ++seq;
+    const my = ++detailSeq;
     workEl.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
-    const d = await get<ShowResp>(`/git/show?${qs({ root, rev: sel })}`);
-    if (my !== seq) return;
+    const d = await get<ShowResp>(cur.api, `/git/show?${qs({ root: cur.root, rev: sel })}`);
+    if (my !== detailSeq) return;
     const entry = stashes.find((s) => s.sel === sel);
     if (!d) {
       workEl.replaceChildren(el('div', 'git-detail-hint', 'could not load this stash'));
@@ -903,7 +977,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     });
     actions.append(ap, pp, dr);
     workEl.appendChild(actions);
-    appendFilesAndDiff(workEl, d, (p) => get<ShowResp>(`/git/show?${qs({ root, rev: sel, path: p })}`));
+    appendFilesAndDiff(workEl, d, (p) => get<ShowResp>(cur.api, `/git/show?${qs({ root: cur.root, rev: sel, path: p })}`));
   }
 
   // ---- workbench: stageable diff (ported from the code panel, design B) ----------
@@ -926,7 +1000,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
   async function renderWorkbenchDiff(path: string, o: { staged?: boolean; mode?: 'unified' | 'split' } = {}) {
     const staged = o.staged ?? false;
     const mode = o.mode ?? workState?.mode ?? 'unified';
-    const my = ++seq;
+    const my = ++detailSeq;
     workState = { path, staged, mode };
     mergeView?.destroy();
     mergeView = null;
@@ -944,8 +1018,8 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       mkBtn('unified', mode === 'unified', () => void renderWorkbenchDiff(path, { staged, mode: 'unified' })),
       mkBtn('split', mode === 'split', () => void renderWorkbenchDiff(path, { staged, mode: 'split' })),
     );
-    if (opts.openInCode && root) {
-      ctl.appendChild(mkBtn('open in editor', false, () => opts.openInCode!(root!, path)));
+    if (opts.openInCode && cur.root) {
+      ctl.appendChild(mkBtn('open in editor', false, () => opts.openInCode!(cur.root!, path)));
     }
     const histBtn = mkBtn('Hist', false, () => {
       fileFilter = path;
@@ -957,8 +1031,8 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
 
     const box = el('div', 'code-diff');
     box.appendChild(ctl);
-    const text = (await getText(`/git/diff?${qs({ pane, root, path, staged })}`)) || '(no textual diff)';
-    if (my !== seq) return;
+    const text = (await getText(cur.api, `/git/diff?${qs({ pane: cur.pane, root: cur.root, path, staged })}`)) || '(no textual diff)';
+    if (my !== detailSeq) return;
     workEl.replaceChildren(el('div', 'git-detail-title', `diff · ${path}`), box);
     if (text === '(no textual diff)') {
       box.appendChild(el('div', 'dl', '(no textual diff)'));
@@ -966,11 +1040,11 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     }
     if (mode === 'split') {
       // Left = HEAD; right = the index (staged) or the working tree (unstaged).
-      const aText = (await getText(`/git/blob?${qs({ pane, root, path, staged: false })}`)) ?? '';
+      const aText = (await getText(cur.api, `/git/blob?${qs({ pane: cur.pane, root: cur.root, path, staged: false })}`)) ?? '';
       const bText = staged
-        ? ((await getText(`/git/blob?${qs({ pane, root, path, staged: true })}`)) ?? '')
-        : ((await getText(`/fs/read?${qs({ pane, root, path })}`)) ?? '(unreadable)');
-      if (my !== seq) return;
+        ? ((await getText(cur.api, `/git/blob?${qs({ pane: cur.pane, root: cur.root, path, staged: true })}`)) ?? '')
+        : ((await getText(cur.api, `/fs/read?${qs({ pane: cur.pane, root: cur.root, path })}`)) ?? '(unreadable)');
+      if (my !== detailSeq) return;
       const ro = [
         lineNumbers(),
         EditorState.readOnly.of(true),
@@ -1054,11 +1128,12 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     async function applyLines(chosen: Set<number>) {
       if (!chosen.size) return;
       const patch = buildPatch(lines, chosen);
+      const s = cur; // the scope whose diff this is — never re-resolve post-await
       try {
-        const r = await fetch(`${opts.getApiBase()}/git/apply`, {
+        const r = await fetch(`${s.api}/git/apply`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ pane, root, patch, reverse: staged }),
+          body: JSON.stringify({ pane: s.pane, root: s.root, patch, reverse: staged }),
         });
         const res = (await r.json()) as { ok: boolean; out: string };
         if (!r.ok || !res.ok) {
@@ -1073,59 +1148,6 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       await load();
       if (page === 'changes' && workState) void renderWorkbenchDiff(workState.path, workState);
     }
-  }
-
-  /** Rebuild a REDUCED unified patch from a file's diff, keeping only the
-   * chosen +/- lines (unchosen '+' dropped, unchosen '-' rewritten as
-   * context — git add -p's edit-hunk semantics; counts recomputed). */
-  function buildPatch(lines: string[], chosen: Set<number>): string {
-    const firstHunk = lines.findIndex((l) => l.startsWith('@@'));
-    if (firstHunk < 0) return '';
-    const out = lines.slice(0, firstHunk);
-    let i = firstHunk;
-    while (i < lines.length) {
-      const head = lines[i];
-      if (!head.startsWith('@@')) {
-        i++;
-        continue;
-      }
-      let j = i + 1;
-      const body: { idx: number; text: string }[] = [];
-      while (j < lines.length && !lines[j].startsWith('@@') && !lines[j].startsWith('diff --git')) {
-        if (lines[j] !== '') body.push({ idx: j, text: lines[j] });
-        j++;
-      }
-      let anyChosen = false;
-      const kept: string[] = [];
-      for (const l of body) {
-        const c = l.text[0];
-        if (c === '+') {
-          if (chosen.has(l.idx)) {
-            kept.push(l.text);
-            anyChosen = true;
-          }
-        } else if (c === '-') {
-          if (chosen.has(l.idx)) {
-            kept.push(l.text);
-            anyChosen = true;
-          } else {
-            kept.push(' ' + l.text.slice(1));
-          }
-        } else {
-          kept.push(l.text); // context + "\ No newline" tails
-        }
-      }
-      if (anyChosen) {
-        const m = /@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/.exec(head);
-        const start = m ? m[1] : '0';
-        const oldCount = kept.filter((l) => l[0] === ' ' || l[0] === '-').length;
-        const newCount = kept.filter((l) => l[0] === ' ' || l[0] === '+').length;
-        out.push(`@@ -${start},${oldCount} +${start},${newCount} @@`);
-        out.push(...kept);
-      }
-      i = j;
-    }
-    return out.join('\n') + '\n';
   }
 
 
@@ -1149,7 +1171,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       tabs.appendChild(t);
     }
     bar.appendChild(tabs);
-    const repo = el('span', 'git-repo', root ?? '(no git repo)');
+    const repo = el('span', 'git-repo', cur.root ?? '(no git repo)');
     bar.appendChild(repo);
     if (page === 'history' && fileFilter) {
       // File-history mode badge; ✕ clears back to the full graph.
@@ -1261,9 +1283,17 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     ).observe(foot);
   }
 
+  /** Re-arm the CURRENT sentinel's observer after a failed page fetch: the
+   * observer disconnects before loadMore, so a network blip would otherwise
+   * end pagination until the next full reload. */
+  function reattachPager() {
+    const main = panel.querySelector('.git-main');
+    if (main instanceof HTMLElement) attachPager(main);
+  }
+
   /** The branch/filter params shared by load() and loadMore() — they must
-   * page through the SAME view. */
-  function logParams(skip: number): Record<string, string | number | boolean> {
+   * page through the SAME view. The root comes from the caller's scope. */
+  function logParams(root: string | null, skip: number): Record<string, string | number | boolean> {
     const p: Record<string, string | number | boolean> = { root: root ?? '', limit: PAGE, skip };
     if (fileFilter) p.path = fileFilter;
     if (branchFilter === '') p.all = true;
@@ -1277,12 +1307,19 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
   async function loadMore() {
     if (paging || loadedAll) return;
     paging = true;
-    const my = seq;
-    const more = await get<LogResp>(`/git/log?${qs(logParams(logData?.commits.length ?? 0))}`);
+    const my = seq; // list generation only — a DETAIL render must not cancel us
+    const more = await get<LogResp>(cur.api, `/git/log?${qs(logParams(cur.root, logData?.commits.length ?? 0))}`);
     paging = false;
-    if (my !== seq) return; // a full reload happened under us
-    const fresh = more?.commits ?? [];
-    if (!more || fresh.length < PAGE) loadedAll = true;
+    if (my !== seq) return; // a full reload happened under us — it owns the
+    // DOM now (its entry paint already attached a fresh pager), so don't touch
+    if (!more) {
+      // Fetch failed (daemon flap): stay pageable and re-arm the sentinel so
+      // the next scroll RETRIES instead of pagination dying silently.
+      reattachPager();
+      return;
+    }
+    const fresh = more.commits;
+    if (fresh.length < PAGE) loadedAll = true;
     if (fresh.length && logData) {
       const seen = new Set(logData.commits.map((c) => c.hash));
       logData.commits = [...logData.commits, ...fresh.filter((c) => !seen.has(c.hash))];
@@ -1327,16 +1364,39 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     void renderDetail();
   }
 
+  /** Paint toolbar + the active page from the CURRENT in-memory model — no
+   * fetches (the preserved detail/workbench column rides along re-appended).
+   * This is the first-paint path of every load (stale-while-revalidate):
+   * remote I/O only ever REFRESHES in the background, and the changes side
+   * keeps its scroll across them. */
+  function paintMain() {
+    const sideSt = (panel.querySelector('.git-changes-side') as HTMLElement | null)?.scrollTop ?? 0;
+    panel.replaceChildren(toolbar());
+    renderCurrentMain();
+    const side = panel.querySelector('.git-changes-side') as HTMLElement | null;
+    if (side) side.scrollTop = sideSt;
+  }
+
   async function load() {
     const my = ++seq;
     closeMenu();
-    panel.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
-    pane = opts.getActivePane();
+    const api = opts.getApiBase(); // the load scope — captured, never re-read
+    const scPane = opts.getActivePane();
+    // Panel I/O discipline: repaint the preserved model instantly (only the
+    // very first open shows a loading row); the network refresh lands later.
+    if (panel.childElementCount) paintMain();
+    else panel.replaceChildren(el('div', 'git-detail-hint', 'loading…'));
     const top = rootOverride
       ? { toplevel: rootOverride }
-      : await get<{ toplevel: string | null }>(`/git/toplevel?${qs({ pane })}`);
-    root = top?.toplevel ?? null;
-    if (!root) {
+      : await get<{ toplevel: string | null }>(api, `/git/toplevel?${qs({ pane: scPane })}`);
+    if (my !== seq) return; // a newer load owns the panel — commit NOTHING
+    const scRoot = top?.toplevel ?? null;
+    if (!scRoot) {
+      cur = { api, pane: scPane, root: null, seq: my };
+      logData = null;
+      uncommitted = [];
+      stashes = [];
+      gitState = { state: null, conflicts: [] };
       panel.replaceChildren(
         toolbar(),
         el('div', 'git-detail-hint', 'the focused pane is not inside a git repository'),
@@ -1344,12 +1404,14 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
       return;
     }
     const [log, status, stashList, st] = await Promise.all([
-      get<LogResp>(`/git/log?${qs(logParams(0))}`),
-      get<StatusFile[]>(`/git/status?${qs({ root })}`),
-      get<StashEntry[]>(`/git/stash/list?${qs({ root })}`),
-      get<GitStateResp>(`/git/state?${qs({ root })}`),
+      get<LogResp>(api, `/git/log?${qs(logParams(scRoot, 0))}`),
+      get<StatusFile[]>(api, `/git/status?${qs({ root: scRoot })}`),
+      get<StashEntry[]>(api, `/git/stash/list?${qs({ root: scRoot })}`),
+      get<GitStateResp>(api, `/git/state?${qs({ root: scRoot })}`),
     ]);
     if (my !== seq) return;
+    // The whole scoped result passed its guard — only NOW do panel globals move.
+    cur = { api, pane: scPane, root: scRoot, seq: my };
     logData = log;
     uncommitted = status ?? [];
     stashes = stashList ?? [];
@@ -1364,8 +1426,7 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     ) {
       selected = '';
     }
-    panel.replaceChildren(toolbar());
-    renderCurrentMain();
+    paintMain();
     await renderDetail();
   }
 
@@ -1388,6 +1449,11 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     show(hash: string) {
       page = 'history';
       selected = hash;
+      // A blame-gutter jump targets the ACTIVE pane's repo as a whole — clear
+      // any file-history/root override a previous jump-in left behind, or the
+      // detail fetch would wrongly filter this commit to that file.
+      rootOverride = null;
+      fileFilter = null;
       if (!open) {
         open = true;
         panel.classList.add('show');

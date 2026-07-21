@@ -69,8 +69,17 @@ export function getPrefs(): Prefs {
 }
 
 export function setPrefs(patch: Partial<Prefs>) {
-  current = { ...current, ...patch };
-  localStorage.setItem(KEY, JSON.stringify(current));
+  const next = { ...current, ...patch };
+  try {
+    localStorage.setItem(KEY, JSON.stringify(next));
+  } catch {
+    // QuotaExceededError (a too-large bgImage data URL): commit nothing. If
+    // `current` kept the giant value, EVERY later setPrefs would re-serialize
+    // it, throw again, and never reach the listeners — prefs would silently
+    // stop applying until reload.
+    return;
+  }
+  current = next;
   for (const fn of listeners) fn(current);
 }
 

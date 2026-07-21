@@ -1,10 +1,15 @@
 // File history end-to-end against ~/ux-git-ops: code panel's Hist button
 // opens the graph in file-history mode (rename followed), detail shows just
-// that file's diff, the chip clears back to the full graph.
+// that file's diff, the chip clears back to the full graph. The tail phase
+// pins #36: a blame-gutter show(hash) after a file-history session must NOT
+// keep the stale file filter.
 import { chromium } from 'playwright-core';
+import { startSandbox } from './sandbox.mjs';
 import { execSync } from 'node:child_process';
 
-const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
+const sb = await startSandbox(8083, 'githistory');
+process.on('exit', () => sb.kill());
+const UI = process.env.UI ?? sb.ui;
 const REPO = '/home/xuehaonan/ux-git-ops';
 const fails = [];
 const check = (name, cond, detail = '') => {
@@ -74,8 +79,40 @@ await page.waitForTimeout(1200);
 const after = (await page.locator('.git-row').count());
 check('chip cleared → full history', after >= parseInt(total, 10) || after >= 10, `rows=${after} total=${total}`);
 
+// #36: poison fileFilter with another file-history session, then jump in via
+// the blame gutter — show(hash) must reset the filter (no chip, and the
+// detail request must not carry the stale path=).
+await page.keyboard.press('Escape'); // close the graph; code keeps its buffers
+await page.waitForTimeout(300);
+await page.keyboard.press('Control+e');
+await page.locator('.code-panel.show').waitFor({ timeout: 10000 });
+await page.waitForTimeout(800);
+await page.locator('.trow', { hasText: 'hist2.txt' }).first().click();
+await page.waitForTimeout(600);
+await page.click('#code-history');
+await page.waitForTimeout(1200);
+check('file-history chip back', ((await page.locator('.git-filefilter').textContent()) ?? '').includes('hist2.txt'));
+await page.keyboard.press('Escape'); // graph closed; back to the editor
+await page.waitForTimeout(300);
+await page.keyboard.press('Control+e');
+await page.locator('.code-panel.show').waitFor({ timeout: 10000 });
+await page.waitForTimeout(600);
+const showReqs = [];
+page.on('request', (r) => {
+  if (r.url().includes('/git/show?')) showReqs.push(r.url());
+});
+await page.click('#code-blame');
+await page.waitForTimeout(1000);
+check('blame markers on hist2.txt', (await page.locator('.cm-blame.link').count()) >= 1);
+await page.locator('.cm-blame.link').first().click();
+await page.waitForTimeout(1500);
+check('blame jump reopens the graph', (await page.locator('.git-panel.show').count()) === 1);
+check('no file-history chip after show(hash)', (await page.locator('.git-filefilter').count()) === 0);
+check('detail request NOT filtered to the stale file', showReqs.length > 0 && showReqs.every((u) => !u.includes('path=')), showReqs.join(' | '));
+
 await page.screenshot({ path: 'shots/git-history.png' });
 await browser.close();
+sb.kill();
 git('reset -q --hard origin/master');
 git('clean -fdq');
 if (fails.length) {

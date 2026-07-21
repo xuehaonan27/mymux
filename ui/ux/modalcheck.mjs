@@ -5,8 +5,11 @@
 // picker → data-URL pref roundtrip.
 import { chromium } from 'playwright-core';
 import { fileURLToPath } from 'node:url';
+import { startSandbox } from './sandbox.mjs';
 
-const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
+const sb = await startSandbox(8072, 'modal');
+process.on('exit', () => sb.kill());
+const UI = process.env.UI ?? sb.ui;
 const WALL = fileURLToPath(new URL('./wall-test.png', import.meta.url));
 const fails = [];
 const check = (name, cond) => {
@@ -73,6 +76,21 @@ const browser = await chromium.launch();
   ));
   await page.keyboard.press('Escape');
   check('Esc then closes code', await page.evaluate(() => !document.querySelector('.code-panel.show')));
+  // #9: the reconnect banner is pointer-events:none (clicks fall through to
+  // panes) — its "Hosts" escape button must opt back in to receive clicks.
+  check('ws-banner-btn opts back into pointer events', await page.evaluate(() => {
+    const b = document.createElement('div');
+    b.className = 'ws-banner';
+    const btn = document.createElement('button');
+    btn.className = 'ws-banner-btn';
+    b.appendChild(btn);
+    document.body.appendChild(b);
+    const ok =
+      getComputedStyle(b).pointerEvents === 'none' &&
+      getComputedStyle(btn).pointerEvents === 'auto';
+    b.remove();
+    return ok;
+  }));
   await page.close();
 }
 
@@ -121,10 +139,70 @@ const browser = await chromium.launch();
     [...document.querySelectorAll('.settings-panel input[type=range]')].map((s) => s.min),
   );
   check('sliders start at 0', mins.every((m) => m === '0'));
+  // #12: a quota failure on write must roll back, not poison later writes.
+  const quota = await page.evaluate(async () => {
+    const m = await import('/src/prefs.ts');
+    const before = m.getPrefs().fontSize;
+    const orig = localStorage.setItem.bind(localStorage);
+    localStorage.setItem = () => {
+      throw new DOMException('quota', 'QuotaExceededError');
+    };
+    m.setPrefs({ fontSize: 22 });
+    localStorage.setItem = orig;
+    const kept = m.getPrefs().fontSize === before;
+    let notified = 0;
+    m.onPrefsChange((p) => {
+      notified = p.fontSize;
+    });
+    m.setPrefs({ fontSize: 21 });
+    const ok = kept && notified === 21 && m.getPrefs().fontSize === 21;
+    m.setPrefs({ fontSize: before }); // restore
+    return ok;
+  });
+  check('quota write rolls back, later writes still apply + notify', quota);
+  await page.close();
+}
+
+// ---- pairwise full-screen panel exclusion (P1-17): code/proc/pkgs/git ----
+// Opening any one of the z-band panels must close whichever is open; the
+// modal stack must never hold two of them (proc z-21 covered git z-20).
+{
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  page.on('pageerror', (e) => console.error('[pageerror]', e.message));
+  await page.goto(UI, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.xterm', { timeout: 20000 });
+  await page.waitForTimeout(1000);
+  const panels = [
+    ['code', '#btn-code', '.code-panel.show'],
+    ['proc', '#btn-proc', '.proc-panel.show'],
+    ['pkgs', '#btn-pkgs', '.pkgs-panel.show'],
+    ['git', '#btn-git', '.git-panel.show'],
+  ];
+  const shown = () =>
+    page.evaluate(() =>
+      ['.code-panel.show', '.proc-panel.show', '.pkgs-panel.show', '.git-panel.show'].filter(
+        (s) => document.querySelector(s),
+      ).length,
+    );
+  for (const [aName, aBtn, aSel] of panels) {
+    for (const [bName, bBtn, bSel] of panels) {
+      if (aName === bName) continue;
+      await page.click(aBtn);
+      await page.locator(aSel).waitFor({ timeout: 10000 });
+      await page.click(bBtn);
+      await page.locator(bSel).waitFor({ timeout: 10000 });
+      const aGone = (await page.locator(aSel).count()) === 0;
+      const oneShown = (await shown()) === 1;
+      check(`${aName}→${bName}: ${aName} closes, exactly one panel shown`, aGone && oneShown);
+      await page.click(bBtn); // close B for the next pair
+      await page.waitForTimeout(150);
+    }
+  }
   await page.close();
 }
 
 await browser.close();
+sb.kill();
 if (fails.length) {
   console.error('FAILURES:', fails.join(' | '));
   process.exit(1);

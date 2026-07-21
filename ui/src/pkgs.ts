@@ -39,16 +39,35 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
   let query = ''; // sticky across re-renders (a search stays visible after install)
   let seq = 0; // stale-response guard: only the latest load may render
 
-  // Busy-state is PER PACKAGE, not panel-global: one slow npm install must
-  // not dead-button every other card (the old global flag did exactly that,
-  // silently). Errors persist across re-renders until the next attempt.
-  const inflight = new Map<string, { op: 'install' | 'remove'; started: number }>();
-  const lastErr = new Map<string, string>();
+  // ALL state is keyed by api base (host): a response captured on host A must
+  // never be stored as host B's cache, decorate B's cards, or block B's
+  // requests. The catalog carries a generation so a successful install/remove
+  // can invalidate BOTH the cache and any pre-mutation request in flight.
+  interface HostState {
+    catalog: { items: CatalogItem[]; at: number } | null;
+    gen: number; // bumped by a successful mutation: discards in-flight responses
+    catalogReq: number | null; // generation the in-flight catalog fetch captured
+    // Busy-state is PER PACKAGE, not panel-global: one slow npm install must
+    // not dead-button every other card (the old global flag did exactly that,
+    // silently). Errors persist across re-renders until the next attempt.
+    busy: Map<string, { op: 'install' | 'remove'; started: number }>;
+    lastErr: Map<string, string>;
+  }
+  const hosts = new Map<string, HostState>();
+  function hostState(api: string): HostState {
+    let h = hosts.get(api);
+    if (!h) {
+      h = { catalog: null, gen: 0, catalogReq: null, busy: new Map(), lastErr: new Map() };
+      hosts.set(api, h);
+    }
+    return h;
+  }
   const busyBtns = new Map<string, HTMLButtonElement>(); // rebuilt each render
+  let busyApi = ''; // the api whose cards are on screen (the ticker's lookup)
   let ticker: ReturnType<typeof setInterval> | null = null;
 
-  function busyLabel(key: string): string {
-    const v = inflight.get(key);
+  function busyLabel(h: HostState, key: string): string {
+    const v = h.busy.get(key);
     if (!v) return '';
     const s = Math.round((Date.now() - v.started) / 1000);
     return `${v.op === 'install' ? 'Installing' : 'Removing'}… ${s}s`;
@@ -56,75 +75,80 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
 
   function ensureTicker() {
     ticker ??= setInterval(() => {
-      for (const key of inflight.keys()) {
-        const btn = busyBtns.get(key);
-        if (btn) btn.textContent = busyLabel(key);
+      const h = hosts.get(busyApi);
+      if (h) {
+        for (const key of h.busy.keys()) {
+          const btn = busyBtns.get(key);
+          if (btn) btn.textContent = busyLabel(h, key);
+        }
       }
-      if (!inflight.size && ticker != null) {
+      if (![...hosts.values()].some((x) => x.busy.size) && ticker != null) {
         clearInterval(ticker);
         ticker = null;
       }
     }, 1000);
   }
 
-  interface CatalogCache {
-    api: string;
-    items: CatalogItem[];
-    at: number;
-  }
-  let catalogCache: CatalogCache | null = null;
-  let catalogInflight = false;
   const CATALOG_TTL = 300_000;
 
-  // Catalog is nearly static per daemon: cache per api-base (host) and paint
-  // it instantly; only a missing or stale (5 min) entry refetches, always in
-  // the background of an already-painted list. Searches stay per-query.
+  // Catalog is nearly static per daemon: cache per host and paint it
+  // instantly; only a missing or stale (5 min) entry refetches, always in the
+  // background of an already-painted list. Searches stay per-query (a query is
+  // a fresh question, not a cacheable surface — fetch per open by design).
   async function load() {
     const my = ++seq;
+    const api = opts.getApiBase(); // captured ONCE — never re-read after an await
+    const h = hostState(api);
     if (!query) {
-      const fresh = catalogCache && catalogCache.api === opts.getApiBase() ? catalogCache : null;
-      if (fresh) {
-        render([...fresh.items.map(catalogCard), note('the mymux catalog — curated, pinned upstream releases')]);
+      const fresh = h.catalog != null && Date.now() - h.catalog.at <= CATALOG_TTL;
+      if (h.catalog) {
+        render(api, [
+          ...h.catalog.items.map((c) => catalogCard(api, c)),
+          note('the mymux catalog — curated, pinned upstream releases'),
+        ]);
       } else {
-        render([note('loading…')]);
+        render(api, [note('loading…')]);
       }
-      if (fresh && Date.now() - fresh.at <= CATALOG_TTL) return;
-      if (catalogInflight) return;
-      catalogInflight = true;
+      if (fresh) return;
+      if (h.catalogReq === h.gen) return; // a current-generation request is in flight
+      const gen = h.gen;
+      h.catalogReq = gen;
       try {
-        const r = await fetch(`${opts.getApiBase()}/pkgs/catalog`);
+        const r = await fetch(`${api}/pkgs/catalog`);
         const items = (await r.json()) as CatalogItem[];
-        catalogCache = { api: opts.getApiBase(), items, at: Date.now() };
-        if (!open || my !== seq) return;
-        const rows = items.length ? items.map(catalogCard) : [note('no packages in the catalog')];
+        if (gen !== h.gen) return; // a mutation superseded this pre-mutation response
+        h.catalog = { items, at: Date.now() };
+        if (!open || my !== seq || api !== opts.getApiBase()) return;
+        const rows = items.length ? items.map((c) => catalogCard(api, c)) : [note('no packages in the catalog')];
         rows.push(note('the mymux catalog — curated, pinned upstream releases'));
-        render(rows);
+        render(api, rows);
       } catch {
-        if (!fresh && open && my === seq) render([note('could not reach the daemon')]);
+        if (!h.catalog && open && my === seq && api !== opts.getApiBase()) {
+          render(api, [note('could not reach the daemon')]);
+        }
       } finally {
-        catalogInflight = false;
+        if (h.catalogReq === gen) h.catalogReq = null;
       }
       return;
     }
-    render([note(`searching “${query}”…`)]);
+    render(api, [note(`searching “${query}”…`)]);
     let rows: HTMLElement[];
     try {
-      const r = await fetch(
-        `${opts.getApiBase()}/pkgs/search?q=${encodeURIComponent(query)}`,
-      );
+      const r = await fetch(`${api}/pkgs/search?q=${encodeURIComponent(query)}`);
       const res = (await r.json()) as { hits: SearchHit[] };
       rows = res.hits.length
-        ? res.hits.map((h) => hitCard(h))
+        ? res.hits.map((hit) => hitCard(api, hit))
         : [note(`nothing found for “${query}”`)];
     } catch {
       rows = [note('could not reach the daemon')];
     }
-    if (!open || my !== seq) return;
+    if (!open || my !== seq || api !== opts.getApiBase()) return;
     rows.push(note('the mymux catalog — curated, pinned upstream releases'));
-    render(rows);
+    render(api, rows);
   }
 
-  function render(rows: HTMLElement[]) {
+  function render(api: string, rows: HTMLElement[]) {
+    busyApi = api;
     busyBtns.clear();
     panel.replaceChildren(title(), searchRow(), ...rows);
   }
@@ -199,30 +223,32 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
   }
 
   // One Install/Remove button; `key` is what the daemon gets — a curated name
-  // or a dynamic spec (npm:…). Rendered FROM the inflight map so a
+  // or a dynamic spec (npm:…). Rendered FROM the host's busy map so a
   // mid-operation re-render (searching, refreshing) keeps the busy state.
-  function actionBtn(installed: boolean, key: string): HTMLElement {
+  function actionBtn(api: string, installed: boolean, key: string): HTMLElement {
+    const h = hostState(api);
     const btn = document.createElement('button');
     btn.className = 'pkgs-btn' + (installed ? '' : ' primary');
     busyBtns.set(key, btn);
-    if (inflight.has(key)) {
+    if (h.busy.has(key)) {
       btn.disabled = true;
-      btn.textContent = busyLabel(key);
+      btn.textContent = busyLabel(h, key);
       return btn;
     }
     btn.textContent = installed ? 'Remove' : 'Install';
     btn.addEventListener('click', () => {
-      if (inflight.has(key)) return; // double-click; daemon also guards
+      if (h.busy.has(key)) return; // double-click; daemon also guards
       const op = installed ? 'remove' : 'install';
-      inflight.set(key, { op, started: Date.now() });
-      lastErr.delete(key);
+      h.busy.set(key, { op, started: Date.now() });
+      h.lastErr.delete(key);
       btn.disabled = true;
-      btn.textContent = busyLabel(key);
+      btn.textContent = busyLabel(h, key);
       ensureTicker();
       // Backstop only — the daemon enforces the real deadline (600s).
       const ctl = new AbortController();
       const kill = setTimeout(() => ctl.abort(), 630_000);
-      void fetch(`${opts.getApiBase()}/pkgs/${op}`, {
+      let ok = false;
+      void fetch(`${api}/pkgs/${op}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ name: key }),
@@ -230,29 +256,37 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
       })
         .then((r) => r.json())
         .then((res: { ok: boolean; err?: string }) => {
-          if (!res.ok) lastErr.set(key, res.err ?? 'failed');
+          ok = res.ok;
+          if (!res.ok) h.lastErr.set(key, res.err ?? 'failed');
         })
         .catch(() => {
-          lastErr.set(key, 'request failed (daemon unreachable or timed out)');
+          h.lastErr.set(key, 'request failed (daemon unreachable or timed out)');
         })
         .finally(() => {
           clearTimeout(kill);
-          inflight.delete(key);
+          h.busy.delete(key);
+          if (ok) {
+            // The catalog is wrong now — invalidate THIS host's cache (and any
+            // pre-mutation request still in flight, via the generation bump) so
+            // the re-render can't restore a stale Install/Remove button.
+            h.gen++;
+            h.catalog = null;
+          }
           if (open) void load(); // re-render from fresh state either way
         });
     });
     return btn;
   }
 
-  function errNote(key: string): HTMLElement[] {
-    const e = lastErr.get(key);
+  function errNote(api: string, key: string): HTMLElement[] {
+    const e = hostState(api).lastErr.get(key);
     if (!e) return [];
     const n = note(`✗ ${e}`);
     n.classList.add('pkgs-err');
     return [n];
   }
 
-  function catalogCard(it: CatalogItem): HTMLElement {
+  function catalogCard(api: string, it: CatalogItem): HTMLElement {
     const c = document.createElement('div');
     c.className = 'pkgs-card';
     const desc = document.createElement('div');
@@ -266,13 +300,13 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
         it.name,
       ),
       desc,
-      ...errNote(it.name),
-      actionBtn(it.installed, it.name),
+      ...errNote(api, it.name),
+      actionBtn(api, it.installed, it.name),
     );
     return c;
   }
 
-  function hitCard(h: SearchHit): HTMLElement {
+  function hitCard(api: string, h: SearchHit): HTMLElement {
     const c = document.createElement('div');
     c.className = 'pkgs-card';
     const desc = document.createElement('div');
@@ -281,9 +315,9 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
     c.append(
       head(h.title || h.name, h.installed ? 'installed' : h.version, h.source, h.name),
       desc,
-      ...errNote(h.spec),
+      ...errNote(api, h.spec),
       // Removal by spec works because the daemon maps a spec to its dir name.
-      actionBtn(h.installed, h.spec),
+      actionBtn(api, h.installed, h.spec),
     );
     return c;
   }

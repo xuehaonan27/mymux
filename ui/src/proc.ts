@@ -2,9 +2,6 @@
 // /proc/tree, with a scoped per-row kill (POST /proc/kill). Follows the same
 // overlay pattern as code.ts.
 
-// Resolved per call so the panel follows the active workspace's daemon.
-let apiBase = () => 'http://127.0.0.1:8088';
-
 interface ProcNode {
   pid: number;
   ppid: number;
@@ -45,7 +42,6 @@ const fmtMem = (kb: number) =>
 
 /** The process-tree overlay (a lightweight, scoped top/htop). */
 export function initProcPanel(opts: { getApiBase: () => string }): ProcPanel {
-  apiBase = opts.getApiBase;
   const panel = document.createElement('div');
   panel.id = 'proc';
   panel.className = 'proc-panel';
@@ -57,13 +53,20 @@ export function initProcPanel(opts: { getApiBase: () => string }): ProcPanel {
 
   let open = false;
   let timer: number | undefined;
+  // Open/close generation: a poll captured before a close (or a host switch,
+  // which closes the panel) must never render — its rows would carry the OLD
+  // host's PIDs, and their kill buttons would signal the wrong daemon.
+  let gen = 0;
+  let inFlight = false; // one poll at a time: a slow daemon must not stack polls
   // pid → last cpu_jiffies, for the %CPU delta between polls.
   let prev = new Map<number, number>();
   let prevAt = 0;
 
-  async function kill(pid: number, hard: boolean) {
+  // The api is CAPTURED by the poll that rendered the row — never re-resolved
+  // at click time, or a stale row could signal whatever host is now active.
+  async function kill(api: string, pid: number, hard: boolean) {
     try {
-      await fetch(`${apiBase()}/proc/kill`, {
+      await fetch(`${api}/proc/kill`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ pid, signal: hard ? 'KILL' : 'TERM' }),
@@ -74,7 +77,7 @@ export function initProcPanel(opts: { getApiBase: () => string }): ProcPanel {
     void poll();
   }
 
-  function procRow(p: ProcNode, clkTck: number, dt: number): HTMLElement {
+  function procRow(api: string, p: ProcNode, clkTck: number, dt: number): HTMLElement {
     const row = document.createElement('div');
     row.className = 'prow';
 
@@ -105,7 +108,7 @@ export function initProcPanel(opts: { getApiBase: () => string }): ProcPanel {
     killEl.title = `kill ${p.pid}  (⇧ = SIGKILL)`;
     killEl.addEventListener('click', (e) => {
       e.stopPropagation();
-      void kill(p.pid, e.shiftKey);
+      void kill(api, p.pid, e.shiftKey);
     });
 
     row.append(cpuEl, memEl, stEl, cmdEl, killEl);
@@ -113,19 +116,28 @@ export function initProcPanel(opts: { getApiBase: () => string }): ProcPanel {
   }
 
   async function poll() {
-    let tree: ProcTree;
+    if (inFlight) return; // a slow daemon's backlog must not stack polls
+    inFlight = true;
+    const my = gen;
+    const api = opts.getApiBase(); // captured BEFORE the await, never re-read
+    let tree: ProcTree | null = null;
     try {
-      const r = await fetch(`${apiBase()}/proc/tree`);
-      if (!r.ok) return;
-      tree = await r.json();
+      const r = await fetch(`${api}/proc/tree`);
+      if (r.ok) tree = (await r.json()) as ProcTree;
     } catch {
-      return;
+      /* daemon unreachable; the next tick retries */
+    } finally {
+      inFlight = false;
     }
-    if (!open) return; // closed while the request was in flight
+    if (!tree) return;
+    if (!open || my !== gen) return; // closed or host-switched mid-flight
 
     const now = Date.now();
     const dt = prevAt ? (now - prevAt) / 1000 : 0;
 
+    // Rebuild, but keep the scroll position: a 1.5 s refresh must not yank
+    // the list back to the top while you're reading a deep subtree.
+    const scroll = body.scrollTop;
     body.replaceChildren();
     for (const w of tree.windows) {
       // High-bit ids are daemon-native tabs; the kind flag tells ⌁ from ∞
@@ -146,10 +158,11 @@ export function initProcPanel(opts: { getApiBase: () => string }): ProcPanel {
           ph.textContent = native ? `pane ${pane.pane % 0x40000000}` : `pane %${pane.pane}`;
           body.appendChild(ph);
         }
-        for (const p of pane.procs) body.appendChild(procRow(p, tree.clk_tck, dt));
+        for (const p of pane.procs) body.appendChild(procRow(api, p, tree.clk_tck, dt));
       }
     }
     if (!tree.windows.length) body.textContent = 'no panes';
+    body.scrollTop = scroll;
 
     // Remember this sample for the next %CPU delta.
     const next = new Map<number, number>();
@@ -164,6 +177,7 @@ export function initProcPanel(opts: { getApiBase: () => string }): ProcPanel {
     toggle() {
       open = !open;
       panel.classList.toggle('show', open);
+      gen++; // any poll captured on the other side of this line is discarded
       if (open) {
         prev = new Map(); // fresh %CPU baseline
         prevAt = 0;
