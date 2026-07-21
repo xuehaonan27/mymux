@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
-use mymux_ptyd::grid::PaneGrid;
+use mymux_ptyd::grid::{PaneGrid, MAX_COLS, MAX_ROWS};
 use mymux_ptyd::proto::{
     read_frame, write_frame, Event, PaneInfo, Reply, Req, KIND_INPUT, KIND_JSON, KIND_OUTPUT,
     KIND_SNAPSHOT,
@@ -27,7 +27,12 @@ enum Ev {
 }
 
 struct Pane {
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Input queue for the pane's dedicated blocking writer thread (the
+    /// tmux approach, #5): connection loops only ever `send()`, so a pane
+    /// whose foreground program stops reading (^S, busy TUI, full pty input
+    /// queue) can no longer jam input for every other pane on the
+    /// connection — including the Kill that would unstick it.
+    input: std::sync::mpsc::Sender<Vec<u8>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     pid: u32,
@@ -62,13 +67,32 @@ struct Store {
 #[tokio::main]
 async fn main() {
     let path = mymux_ptyd::proto::socket_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    if let Err(e) = mymux_ptyd::proto::ensure_socket_dir(&path) {
+        eprintln!(
+            "mymux-ptyd: cannot secure socket dir for {}: {e}",
+            path.display()
+        );
+        std::process::exit(1);
     }
-    // Single instance: a live socket means another ptyd is serving.
-    if UnixStream::connect(&path).await.is_ok() {
-        eprintln!("mymux-ptyd: already running on {}", path.display());
-        return;
+    // Single instance: a live socket means another ptyd is serving — but
+    // only trust a peer running as OUR uid: the /tmp fallback location can
+    // be pre-bound by another local user (P1-19). Fail closed; never remove
+    // or shadow a foreign socket.
+    if let Ok(stream) = UnixStream::connect(&path).await {
+        match peer_uid(&stream) {
+            Ok(uid) if uid == unsafe { libc::getuid() } => {
+                eprintln!("mymux-ptyd: already running on {}", path.display());
+                return;
+            }
+            other => {
+                eprintln!(
+                    "mymux-ptyd: {} answers but peer credentials don't match uid {} ({other:?}) — refusing to trust it",
+                    path.display(),
+                    unsafe { libc::getuid() }
+                );
+                std::process::exit(1);
+            }
+        }
     }
     let _ = std::fs::remove_file(&path); // stale socket file
     let listener = match UnixListener::bind(&path) {
@@ -105,6 +129,28 @@ async fn main() {
     }
 }
 
+/// Peer uid of a unix-socket connection (SO_PEERCRED) — the cheap
+/// same-user check for the /tmp fallback socket location (P1-19).
+fn peer_uid(stream: &UnixStream) -> std::io::Result<libc::uid_t> {
+    use std::os::unix::io::AsRawFd;
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc == 0 {
+        Ok(cred.uid)
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 async fn handle_conn(stream: UnixStream, store: Arc<Store>) {
     let conn = store
         .next_conn
@@ -129,16 +175,16 @@ async fn handle_conn(stream: UnixStream, store: Arc<Store>) {
         match frame {
             (KIND_INPUT, body) if body.len() >= 4 => {
                 let id = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
-                let writer = store
+                let input = store
                     .panes
                     .lock()
                     .unwrap()
                     .get(&id)
-                    .map(|p| p.writer.clone());
-                if let Some(w) = writer {
-                    let mut w = w.lock().unwrap();
-                    let _ = w.write_all(&body[4..]);
-                    let _ = w.flush();
+                    .map(|p| p.input.clone());
+                if let Some(tx) = input {
+                    // Unbounded send never blocks; the pane's writer thread
+                    // does the (possibly blocking) pty-master write.
+                    let _ = tx.send(body[4..].to_vec());
                 }
             }
             (KIND_JSON, body) => {
@@ -153,20 +199,25 @@ async fn handle_conn(stream: UnixStream, store: Arc<Store>) {
 
     // The spawning connection is gone: its ephemeral panes go with it (map
     // removal closes the pty; the reader thread emits the single Exit).
-    let orphans: Vec<u32> = {
-        let panes = store.panes.lock().unwrap();
-        panes
-            .iter()
-            .filter(|(_, p)| {
-                p.ephemeral.load(std::sync::atomic::Ordering::Relaxed)
-                    && p.owner.load(std::sync::atomic::Ordering::Relaxed) == conn
-            })
-            .map(|(&id, _)| id)
-            .collect()
+    // `retain` re-checks flag+owner under the lock at delete time (#20): a
+    // pane promoted or re-homed since the collect step must NOT die with its
+    // ex-owner. The removed Arcs are dropped AFTER the guard so Pane::drop
+    // (SIGHUP + grace + SIGKILL + blocking wait) doesn't run under the
+    // lock (#6).
+    let removed: Vec<Arc<Pane>> = {
+        let mut panes = store.panes.lock().unwrap();
+        let mut doomed = Vec::new();
+        panes.retain(|_, p| {
+            let orphan = p.ephemeral.load(std::sync::atomic::Ordering::Relaxed)
+                && p.owner.load(std::sync::atomic::Ordering::Relaxed) == conn;
+            if orphan {
+                doomed.push(p.clone());
+            }
+            !orphan
+        });
+        doomed
     };
-    for id in orphans {
-        let _ = store.panes.lock().unwrap().remove(&id);
-    }
+    drop(removed);
 }
 
 fn reply(out: &mpsc::UnboundedSender<(u8, Vec<u8>)>, rep: Reply) {
@@ -246,6 +297,11 @@ fn handle_req(req: Req, store: &Arc<Store>, out: &mpsc::UnboundedSender<(u8, Vec
             reply(out, rep);
         }
         Req::Resize { id, cols, rows } => {
+            // Clamp at the request entry (#4): a ballooned resize reaching
+            // avt OOM-aborts ptyd and kills every shell. The grid clamps
+            // again inside (defense in depth).
+            let cols = cols.min(MAX_COLS);
+            let rows = rows.min(MAX_ROWS);
             if let Some(p) = store.panes.lock().unwrap().get(&id) {
                 let _ = p.master.lock().unwrap().resize(PtySize {
                     rows,
@@ -274,9 +330,12 @@ fn handle_req(req: Req, store: &Arc<Store>, out: &mpsc::UnboundedSender<(u8, Vec
             }
         }
         Req::Kill { id } => {
-            // Dropping the pane closes the pty; the reader thread sees EOF and
-            // emits the Exit event (single exit path).
-            let _ = store.panes.lock().unwrap().remove(&id);
+            // Bind the removed Arc so Pane::drop (SIGHUP + grace + SIGKILL +
+            // blocking wait) runs AFTER the panes lock is released (#6).
+            // Dropping the pane closes the pty; the reader thread sees EOF
+            // and emits the Exit event (single exit path).
+            let removed = store.panes.lock().unwrap().remove(&id);
+            drop(removed);
         }
         Req::Snapshot { req, id } => {
             let snap = store
@@ -350,9 +409,10 @@ fn spawn_pane(
     ephemeral: bool,
     owner: u64,
 ) -> Result<u32, String> {
-    if store.panes.lock().unwrap().contains_key(&id) {
-        return Err(format!("pane id {id} already in use"));
-    }
+    // Clamp at the request entry (#4): a ballooned size reaching avt
+    // OOM-aborts ptyd and kills every shell. The grid clamps again inside.
+    let cols = cols.min(MAX_COLS);
+    let rows = rows.min(MAX_ROWS);
     let pair = native_pty_system()
         .openpty(PtySize {
             rows,
@@ -383,9 +443,23 @@ fn spawn_pane(
     let master = pair.master;
     drop(pair.slave); // so the master reader EOFs when the shell exits
 
+    // Dedicated blocking writer thread (the tmux approach, #5): connection
+    // loops feed the channel and never block on the pty master. The thread
+    // exits when the pane drops (sender gone), closing the write side.
+    let (in_tx, in_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut writer = writer;
+        while let Ok(bytes) = in_rx.recv() {
+            if writer.write_all(&bytes).is_err() {
+                break;
+            }
+            let _ = writer.flush();
+        }
+    });
+
     let grid = Arc::new(Mutex::new(PaneGrid::new(cols, rows)));
     let pane = Arc::new(Pane {
-        writer: Arc::new(Mutex::new(writer)),
+        input: in_tx,
         master: Mutex::new(master),
         child: Mutex::new(child),
         pid,
@@ -395,7 +469,19 @@ fn spawn_pane(
         ephemeral: std::sync::atomic::AtomicBool::new(ephemeral),
         owner: std::sync::atomic::AtomicU64::new(owner),
     });
-    store.panes.lock().unwrap().insert(id, pane);
+    let pane_weak = Arc::downgrade(&pane);
+    // entry API (#22): a contains_key-then-insert pair would let a racing
+    // same-id spawn overwrite (and kill) the incumbent. On a lost race the
+    // entry guard drops before `pane` does (reverse drop order), so our own
+    // just-spawned child is killed OUTSIDE the lock.
+    match store.panes.lock().unwrap().entry(id) {
+        std::collections::btree_map::Entry::Vacant(v) => {
+            v.insert(pane);
+        }
+        std::collections::btree_map::Entry::Occupied(_) => {
+            return Err(format!("pane id {id} already in use"));
+        }
+    }
 
     // Reader thread: pty → grid (+ alt flips) → broadcast + raw history log;
     // on EOF drop the pane and announce.
@@ -429,8 +515,25 @@ fn spawn_pane(
                 }
             }
         }
-        let _ = store2.panes.lock().unwrap().remove(&id);
-        let _ = store2.events.send(Ev::Exit { id });
+        // Identity-checked removal (#3): a lingering reader (a backgrounded
+        // grandchild held the slave fd open) must not kill a NEW pane that
+        // reused this id — remove only if the map still holds THIS pane, and
+        // announce only when the id isn't a different live pane (Kill/sweep
+        // already removed ours: still the single Exit path). The removed Arc
+        // drops outside the lock (#6).
+        let (removed, announce) = {
+            let mut panes = store2.panes.lock().unwrap();
+            let ours = pane_weak
+                .upgrade()
+                .is_some_and(|me| panes.get(&id).is_some_and(|p| Arc::ptr_eq(p, &me)));
+            let removed = if ours { panes.remove(&id) } else { None };
+            let announce = ours || !panes.contains_key(&id);
+            (removed, announce)
+        };
+        drop(removed);
+        if announce {
+            let _ = store2.events.send(Ev::Exit { id });
+        }
     });
 
     Ok(pid)

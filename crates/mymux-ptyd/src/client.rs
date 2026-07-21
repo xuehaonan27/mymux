@@ -100,6 +100,31 @@ impl Client {
         (req, rrx, want_snapshot.then_some(srx))
     }
 
+    /// Await a reply within TIMEOUT. A timed-out request is also evicted
+    /// from the pending map — it used to leak there until the connection
+    /// died (#19); a late reply then simply finds no waiter.
+    async fn recv_reply(&self, req: u64, rx: oneshot::Receiver<Reply>) -> Result<Reply, String> {
+        match tokio::time::timeout(TIMEOUT, rx).await {
+            Ok(Ok(rep)) => Ok(rep),
+            Ok(Err(_)) => Err("ptyd connection lost".to_string()),
+            Err(_) => {
+                self.pending.lock().unwrap().remove(&req);
+                Err("ptyd timeout".to_string())
+            }
+        }
+    }
+
+    async fn recv_snapshot(&self, req: u64, rx: oneshot::Receiver<Vec<u8>>) -> Result<Vec<u8>, String> {
+        match tokio::time::timeout(TIMEOUT, rx).await {
+            Ok(Ok(bytes)) => Ok(bytes),
+            Ok(Err(_)) => Err("ptyd connection lost".to_string()),
+            Err(_) => {
+                self.pending.lock().unwrap().remove(&req);
+                Err("ptyd timeout".to_string())
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn spawn(
         &self,
@@ -111,7 +136,7 @@ impl Client {
         env: Vec<(String, String)>,
         ephemeral: bool,
     ) -> Result<u32, String> {
-        let (_r, rx, _) = self.request(
+        let (r, rx, _) = self.request(
             |req| Req::Spawn {
                 req,
                 id,
@@ -124,10 +149,7 @@ impl Client {
             },
             false,
         );
-        let rep = tokio::time::timeout(TIMEOUT, rx)
-            .await
-            .map_err(|_| "ptyd timeout".to_string())?
-            .map_err(|_| "ptyd connection lost".to_string())?;
+        let rep = self.recv_reply(r, rx).await?;
         if rep.ok {
             Ok(rep.pid.unwrap_or(0))
         } else {
@@ -136,20 +158,14 @@ impl Client {
     }
 
     pub async fn list(&self) -> Result<Vec<PaneInfo>, String> {
-        let (_r, rx, _) = self.request(|req| Req::List { req }, false);
-        let rep = tokio::time::timeout(TIMEOUT, rx)
-            .await
-            .map_err(|_| "ptyd timeout".to_string())?
-            .map_err(|_| "ptyd connection lost".to_string())?;
+        let (r, rx, _) = self.request(|req| Req::List { req }, false);
+        let rep = self.recv_reply(r, rx).await?;
         Ok(rep.panes.unwrap_or_default())
     }
 
     pub async fn snapshot(&self, id: u32) -> Result<Vec<u8>, String> {
-        let (_r, _rx, srx) = self.request(|req| Req::Snapshot { req, id }, true);
-        tokio::time::timeout(TIMEOUT, srx.expect("snapshot receiver"))
-            .await
-            .map_err(|_| "ptyd timeout".to_string())?
-            .map_err(|_| "ptyd connection lost".to_string())
+        let (r, _rx, srx) = self.request(|req| Req::Snapshot { req, id }, true);
+        self.recv_snapshot(r, srx.expect("snapshot receiver")).await
     }
 
     pub fn input(&self, id: u32, bytes: &[u8]) {
@@ -176,11 +192,8 @@ impl Client {
     }
 
     pub async fn get_meta(&self) -> Result<String, String> {
-        let (_r, rx, _) = self.request(|req| Req::GetMeta { req }, false);
-        let rep = tokio::time::timeout(TIMEOUT, rx)
-            .await
-            .map_err(|_| "ptyd timeout".to_string())?
-            .map_err(|_| "ptyd connection lost".to_string())?;
+        let (r, rx, _) = self.request(|req| Req::GetMeta { req }, false);
+        let rep = self.recv_reply(r, rx).await?;
         Ok(rep.meta.unwrap_or_default())
     }
 

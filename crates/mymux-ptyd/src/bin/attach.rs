@@ -301,8 +301,14 @@ async fn main() {
                 Ok(0) | Err(_) => break, // terminal/pipe gone → detach
                 Ok(n) => {
                     let chunk = &buf[..n];
-                    if chunk.contains(&0x1c) {
-                        break; // Ctrl-\ : detach
+                    if let Some(at) = chunk.iter().position(|&b| b == 0x1c) {
+                        // Ctrl-\ : forward whatever came before it in this
+                        // chunk, THEN detach (#21) — fast-typed input or a
+                        // paste containing 0x1c must not lose its prefix.
+                        if at > 0 {
+                            stdin_client.input(id, &chunk[..at]);
+                        }
+                        break;
                     }
                     stdin_client.input(id, chunk);
                 }
@@ -314,6 +320,13 @@ async fn main() {
     // SIGWINCH → propagate the new size.
     let mut winch =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change()).ok();
+
+    // One PERSISTENT detach poll (#7): the loop used to create a fresh
+    // `sleep(120ms)` every iteration, which never completed while output
+    // events kept winning the select — under a continuous output flood the
+    // DONE flag (Ctrl-\) was never observed and detach was impossible.
+    let detach_poll = tokio::time::sleep(std::time::Duration::from_millis(120));
+    tokio::pin!(detach_poll);
 
     loop {
         tokio::select! {
@@ -338,11 +351,14 @@ async fn main() {
                     client.resize(id, cols, rows);
                 }
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(120)) => {
+            _ = &mut detach_poll => {
                 if DONE.load(Ordering::SeqCst) {
                     eprintln!("\r\nmymux-attach: detached (pane keeps running).");
                     break;
                 }
+                detach_poll
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + std::time::Duration::from_millis(120));
             }
         }
     }

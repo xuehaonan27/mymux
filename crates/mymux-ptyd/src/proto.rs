@@ -7,7 +7,7 @@
 //! - kind 2: output, server→client (after `Subscribe`) — `[u32 LE pane id][bytes]`.
 //! - kind 3: snapshot reply, server→client — `[u64 LE req][bytes]`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -168,7 +168,7 @@ pub async fn read_frame<R: AsyncReadExt + Unpin>(
 }
 
 /// Where the ptyd socket lives: `$MYMUX_PTYD_SOCK`, else
-/// `$XDG_RUNTIME_DIR/mymux/ptyd.sock`, else a /tmp fallback.
+/// `$XDG_RUNTIME_DIR/mymux/ptyd.sock`, else a per-UID private dir under /tmp.
 pub fn socket_path() -> PathBuf {
     if let Some(p) = std::env::var_os("MYMUX_PTYD_SOCK") {
         return PathBuf::from(p);
@@ -176,8 +176,36 @@ pub fn socket_path() -> PathBuf {
     if let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR") {
         return PathBuf::from(rt).join("mymux/ptyd.sock");
     }
-    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
-    PathBuf::from(format!("/tmp/mymux-ptyd-{user}.sock"))
+    fallback_socket_path()
+}
+
+/// The last-resort socket location (neither env var set): a per-UID dir, so
+/// no other local user can pre-bind or replace the socket (P1-19 — the old
+/// bare `/tmp/mymux-ptyd-$USER.sock` trusted any successful connect).
+fn fallback_socket_path() -> PathBuf {
+    let uid = unsafe { libc::getuid() };
+    PathBuf::from(format!("/tmp/mymux-ptyd-{uid}/ptyd.sock"))
+}
+
+/// Create the socket's parent dir. The /tmp fallback dir is enforced 0700
+/// and the caller must fail closed on error (an existing dir keeps its old
+/// mode — the chmod also fails when it belongs to someone else). Env-chosen
+/// parents are only created, never chmodded: they may be shared on purpose.
+pub fn ensure_socket_dir(path: &Path) -> std::io::Result<()> {
+    let Some(dir) = path.parent() else {
+        return Ok(());
+    };
+    if path == fallback_socket_path() {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    } else {
+        std::fs::create_dir_all(dir)?;
+    }
+    Ok(())
 }
 
 /// Where per-pane raw output logs live (the "unlimited scrollback"):

@@ -15,14 +15,23 @@ use avt::{Color, Line, Pen, Vt};
 /// tier via the terminal-history pager either way.
 const SCROLLBACK: usize = 4096;
 
+/// Hard caps on pane dimensions (#4): an unclamped 65535×65535 request
+/// reallocates ~137 GB of avt cells and OOM-aborts ptyd, killing every shell
+/// it holds. ptyd also clamps at the request entry (main.rs) — this is the
+/// defense-in-depth half.
+pub const MAX_COLS: u16 = 1000;
+pub const MAX_ROWS: u16 = 500;
+
 pub struct PaneGrid {
     vt: Vt,
     /// Undecoded tail of the previous chunk (an incomplete UTF-8 sequence,
     /// at most 3 bytes).
     carry: Vec<u8>,
-    /// Authoritative alt-screen state, tracked over complete `CSI ?1047/1048/
-    /// 1049 h|l` sequences (chunk-split safe via alt_tail). The agent
-    /// heuristics read this instead of hoping their byte-scan catches them.
+    /// Authoritative alt-screen state, tracked over complete `CSI ?1047/1049
+    /// h|l` sequences (chunk-split safe via alt_tail). DEC 1048 is NOT an
+    /// alt-screen switch — it only saves/restores the cursor (C-30). The
+    /// agent heuristics read this instead of hoping their byte-scan catches
+    /// them.
     alt: bool,
     alt_tail: Vec<u8>,
     /// Current dims (kept so the deferred primary reflow knows the target).
@@ -35,12 +44,12 @@ pub struct PaneGrid {
     resized_while_alt: bool,
 }
 
-/// The six complete alt-screen sequences we track (all exactly 8 bytes).
-const ALT_SEQS: [(&[u8], bool); 6] = [
+/// The four complete alt-screen sequences we track (all exactly 8 bytes).
+/// Only 1047/1049 switch buffers; DEC 1048 (save/restore cursor) must not
+/// flip this state (C-30).
+const ALT_SEQS: [(&[u8], bool); 4] = [
     (b"\x1b[?1047h", true),
     (b"\x1b[?1047l", false),
-    (b"\x1b[?1048h", true),
-    (b"\x1b[?1048l", false),
     (b"\x1b[?1049h", true),
     (b"\x1b[?1049l", false),
 ];
@@ -49,9 +58,11 @@ const ALT_CARRY: usize = 7;
 
 impl PaneGrid {
     pub fn new(cols: u16, rows: u16) -> Self {
+        let cols = cols.clamp(1, MAX_COLS);
+        let rows = rows.clamp(1, MAX_ROWS);
         Self {
             vt: Vt::builder()
-                .size(cols.max(1) as usize, rows.max(1) as usize)
+                .size(cols as usize, rows as usize)
                 .scrollback_limit(SCROLLBACK)
                 .build(),
             carry: Vec::new(),
@@ -140,10 +151,12 @@ impl PaneGrid {
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
+        let cols = cols.clamp(1, MAX_COLS);
+        let rows = rows.clamp(1, MAX_ROWS);
         self.cols = cols;
         self.rows = rows;
         self.resized_while_alt |= self.alt;
-        self.vt.resize(cols.max(1) as usize, rows.max(1) as usize);
+        self.vt.resize(cols as usize, rows as usize);
     }
 
     /// Escape bytes that reproduce the pane's terminal state on a fresh (or
@@ -152,7 +165,9 @@ impl PaneGrid {
     /// colors, cursor, alternate screen, modes). The prefix backs out of any
     /// stale client state, so this is also safe mid-stream (lossless resync).
     pub fn snapshot(&self) -> Vec<u8> {
-        let dump = self.vt.dump();
+        // avt's dump emits truecolor SGR in colon sub-param form, which
+        // xterm.js misparses (RGB shifts to G,B,0) — normalize first (#38).
+        let dump = normalize_dump_truecolor(&self.vt.dump());
         let mut out = Vec::new();
         // Back out of either alt-screen flavor (avt's dump uses 1047+DECSC),
         // and of any stale client modes: origin mode (DECOM) and a custom
@@ -201,9 +216,17 @@ impl PaneGrid {
                     out.extend_from_slice(s.as_bytes());
                     out.extend_from_slice(b"\r\n");
                 }
-                // The history scrolled the screen; hand dump a clean one (2J
-                // clears the grid but not the client's scrollback).
-                out.extend_from_slice(b"\x1b[0m\x1b[2J\x1b[H");
+                // Push the replayed lines still sitting in the client's
+                // VISIBLE region into its scrollback before painting the
+                // dump — the `\x1b[2J` here used to erase them instead, so
+                // every reseed ate the ≈rows newest history lines (#39).
+                // After replaying n lines from home, min(n, rows-1) remain
+                // visible (the cursor's own row is blank).
+                let leftover = acc.len().min(rows.saturating_sub(1));
+                if leftover > 0 {
+                    out.extend_from_slice(format!("\x1b[{leftover}S").as_bytes());
+                }
+                out.extend_from_slice(b"\x1b[0m\x1b[H");
             }
         }
 
@@ -224,6 +247,70 @@ fn ends_in_alt(dump: &str) -> bool {
             .unwrap_or(-1)
     };
     last(["\x1b[?1047h", "\x1b[?1049h"]) > last(["\x1b[?1047l", "\x1b[?1049l"])
+}
+
+/// avt's dump emits truecolor SGR in ITU colon sub-parameter form
+/// (`38:2:R:G:B`, no colorspace slot); xterm.js reserves the 3rd colon field
+/// for a colorspace id and so parses it as RGB=(G,B,0) — the green→orange
+/// shift on every reseed (#38). Rewrite those runs to the universally
+/// unambiguous semicolon form (`38;2;R;G;B`). Only SGR sequences are
+/// touched: any other colon bytes pass through verbatim.
+fn normalize_dump_truecolor(dump: &str) -> String {
+    if !dump.contains(':') {
+        return dump.to_owned();
+    }
+    let mut out = String::with_capacity(dump.len());
+    let mut rest = dump;
+    while let Some(i) = rest.find("\x1b[") {
+        out.push_str(&rest[..i]);
+        let csi = &rest[i + 2..];
+        // A CSI ends at its final byte (0x40..=0x7E); param bytes (incl.
+        // ':' and '?') come before it.
+        let Some(fin) = csi.find(|c: char| ('\u{40}'..='\u{7e}').contains(&c)) else {
+            out.push_str(&rest[i..]); // unterminated tail: verbatim
+            return out;
+        };
+        if csi.as_bytes()[fin] == b'm' {
+            out.push_str("\x1b[");
+            out.push_str(&normalize_sgr_params(&csi[..fin]));
+            out.push('m');
+        } else {
+            out.push_str(&rest[i..i + 2 + fin + 1]);
+        }
+        rest = &csi[fin + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One SGR parameter list with `38:2:R:G:B` / `48:2:...` / `58:2:...` runs
+/// (with or without the empty colorspace slot, `38:2::R:G:B`) rewritten to
+/// semicolon form. Indexed `38:5:N` is unambiguous in xterm.js and stays;
+/// non-color colon params (e.g. `4:3` curly underline) stay too.
+fn normalize_sgr_params(params: &str) -> String {
+    let mut out = String::with_capacity(params.len());
+    for (i, p) in params.split(';').enumerate() {
+        if i > 0 {
+            out.push(';');
+        }
+        let sub: Vec<&str> = p.split(':').collect();
+        let (head, rgb) = match sub.as_slice() {
+            [h, "2", r, g, b] | [h, "2", "", r, g, b] => (*h, [*r, *g, *b]),
+            _ => ("", ["", "", ""]),
+        };
+        let truecolor = matches!(head, "38" | "48" | "58")
+            && rgb
+                .iter()
+                .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
+        if truecolor {
+            out.push_str(head);
+            out.push_str(";2;");
+            out.push_str(&rgb.join(";"));
+        } else {
+            out.push_str(p);
+        }
+    }
+    out
 }
 
 /// One history line as escape-styled text (runs grouped by pen), with trailing
@@ -417,10 +504,13 @@ mod tests {
     }
 
     #[test]
-    fn alt_screen_1048_variant_tracked() {
+    fn dec_1048_is_cursor_save_not_alt_screen() {
+        // C-30: DEC 1048 only saves/restores the cursor; it does NOT switch
+        // buffers (that's 1047/1049). Tracking it as alt fed false state to
+        // the UI alt indicator and the agent heuristics.
         let mut g = PaneGrid::new(40, 10);
         g.feed(b"\x1b[?1048h");
-        assert!(g.alt_screen());
+        assert!(!g.alt_screen());
         g.feed(b"\x1b[?1048l");
         assert!(!g.alt_screen());
     }
@@ -454,6 +544,86 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_replayed_history_stays_contiguous_into_live() {
+        // #39: the reseed used to `\x1b[2J`-erase the ≈rows newest replayed
+        // history lines still sitting in the client's visible region instead
+        // of scrolling them into its scrollback — a 30×4 grid with L00..L11
+        // lost L06..L08 (the band just above the live page) on every switch.
+        let mut g = PaneGrid::new(30, 4);
+        for i in 0..12 {
+            g.feed(format!("L{i:02}\r\n").as_bytes());
+        }
+        let vt2 = replay(&g, 30, 4);
+        let all: Vec<String> = vt2
+            .lines()
+            .map(|l| l.text().trim_end().to_string())
+            .collect();
+        let start = all
+            .iter()
+            .position(|l| l == "L00")
+            .unwrap_or_else(|| panic!("L00 missing: {all:?}"));
+        for i in 0..12 {
+            assert_eq!(
+                all.get(start + i).map(String::as_str),
+                Some(format!("L{i:02}").as_str()),
+                "history/live sequence broke at L{i:02}: {all:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_normalizes_truecolor_to_semicolon_form() {
+        // #38: avt's dump emits truecolor SGR as colon sub-params
+        // (`38:2:R:G:B`); xterm.js reads the 3rd colon field as a colorspace
+        // id and shifts RGB→(G,B,0). The snapshot must carry the semicolon
+        // form and no colon-truecolor runs.
+        let mut g = PaneGrid::new(40, 10);
+        g.feed(b"\x1b[38;2;10;200;30mgreen\x1b[0m \x1b[48;2;1;2;3mbg\x1b[0m");
+        let snap = String::from_utf8(g.snapshot()).unwrap();
+        assert!(snap.contains("38;2;10;200;30"), "{snap:?}");
+        assert!(snap.contains("48;2;1;2;3"), "{snap:?}");
+        assert!(!snap.contains("38:2:"), "{snap:?}");
+        assert!(!snap.contains("48:2:"), "{snap:?}");
+        assert!(!snap.contains("58:2:"), "{snap:?}");
+        // The colors must survive a round trip through avt unchanged.
+        let vt2 = replay(&g, 40, 10);
+        assert_eq!(vt2.dump(), g.vt.dump());
+    }
+
+    #[test]
+    fn truecolor_normalizer_rewrites_only_sgr_color_runs() {
+        let n = normalize_dump_truecolor;
+        assert_eq!(n("\x1b[0;38:2:10:200:30m"), "\x1b[0;38;2;10;200;30m");
+        // With the empty colorspace slot the RGB triple is kept as-is.
+        assert_eq!(n("\x1b[38:2::1:2:3m"), "\x1b[38;2;1;2;3m");
+        assert_eq!(n("\x1b[58:2:1:2:3m"), "\x1b[58;2;1;2;3m");
+        // Indexed colon form is unambiguous for xterm.js — untouched.
+        assert_eq!(n("\x1b[38:5:196m"), "\x1b[38:5:196m");
+        // Non-color colon params (curly underline) stay.
+        assert_eq!(n("\x1b[48:2:1:2:3;4:3m"), "\x1b[48;2;1;2;3;4:3m");
+        // Non-SGR sequences and plain text pass through.
+        assert_eq!(
+            n("\x1b[?1049h\x1b[38:2:9:9:9mX"),
+            "\x1b[?1049h\x1b[38;2;9;9;9mX"
+        );
+        assert_eq!(n("plain 38:2:1:2:3 text"), "plain 38:2:1:2:3 text");
+        // Unterminated CSI tail: verbatim, no panic.
+        assert_eq!(n("tail \x1b[38:2:1:2"), "tail \x1b[38:2:1:2");
+    }
+
+    #[test]
+    fn pane_size_is_clamped() {
+        // #4: an unclamped 65535² would allocate ~137 GB in avt and
+        // OOM-abort ptyd, killing every shell it holds.
+        let mut g = PaneGrid::new(65535, 65535);
+        assert_eq!(g.vt.size(), (MAX_COLS as usize, MAX_ROWS as usize));
+        g.resize(0, 65535);
+        assert_eq!(g.vt.size(), (1, MAX_ROWS as usize));
+        g.feed(b"still alive");
+        assert!(g.vt.text().join("\n").contains("still alive"));
+    }
+
+    #[test]
     fn wide_chars_replay_without_tail_spaces() {
         // Wide-char tail cells must not leak into the replay as literal
         // spaces: history "你好一" used to come back "你 好 一 " (shifted by
@@ -481,7 +651,7 @@ mod tests {
         g.feed(b"\x1b[?1049h\x1b[2J\x1b[HALTMARK");
         g.resize(20, 5);
         g.feed(b"\x1b[?1049l");
-        assert!(g.resized_while_alt == false, "flip consumed the flag");
+        assert!(!g.resized_while_alt, "flip consumed the flag");
         let vt2 = replay(&g, 20, 5);
         let view = |vt: &Vt| vt.view().map(|l| l.text()).collect::<Vec<_>>();
         assert_eq!(view(&vt2), view(&g.vt));
