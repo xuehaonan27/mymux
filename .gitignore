@@ -15,3 +15,6 @@ ui/ux/shots/
 
 # CI release artifacts (matrix outputs, not sources)
 release/
+
+# root-level strays from checks run with repo-root CWD
+/shots/

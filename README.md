@@ -118,11 +118,23 @@ npm --prefix ui install     # first time
 npm --prefix ui run build   # typecheck + bundle the UI
 ```
 
-The **e2e harness** lives in `ui/ux`: a daemon (`MYMUX_ADDR=127.0.0.1:8099
-./target/debug/mymuxd`) plus `npm --prefix ui run dev`, then checks like
-`node ui/ux/gitcheck.mjs` drive the real UI headless (Playwright-core) against
-fixture repos (`~/ux-git-test`, `~/ux-git-ops`, `~/ux-git-sub` — created by the
-checks). Every git-interaction batch ships with its own `git*check.mjs`; run
+The **e2e harness** lives in `ui/ux`: an isolated ptyd+daemon pair with all
+three isolation knobs set, plus `npm --prefix ui run dev`:
+
+```sh
+export MYMUX_PTYD_SOCK=/tmp/mymux-ux.sock MYMUX_SOCKET=mymux-ux MYMUX_ADDR=127.0.0.1:8099
+./target/debug/mymux-ptyd & ./target/debug/mymuxd &
+```
+
+then checks like `node ui/ux/gitcheck.mjs` drive the real UI headless
+(Playwright-core) against fixture repos. The shared fixtures
+(`~/ux-git-test`, `~/ux-git-ops` + its bare remote, `~/ux-code-tree`) are
+built idempotently by `node ui/ux/fixtures.mjs` — never clobbered when
+present — and the checks that need one call its `ensure*` themselves; a few
+checks still create their own (e.g. `~/ux-git-sub`). Daemon-touching checks
+should not hand-roll that pair: `ui/ux/sandbox.mjs`'s
+`startSandbox(port, name)` wires all three knobs and the cleanup for you.
+Every git-interaction batch ships with its own `git*check.mjs`; run
 the whole sweep before committing UI changes. Cross-cutting static guards:
 `npm --prefix ui run check:args` (every `invoke()` key in `ui/src` must match
 a snake_case Rust param on its command — kills the hostId/host_id class for
@@ -158,7 +170,11 @@ it, open, add a host, type the passphrase — the app pushes and installs the
 daemon bundle itself, zero-touch. **Or just wait for CI**: every `v*` tag
 builds it on GitHub's free `macos-latest` runner and attaches
 `mymux_<version>_aarch64.dmg` to that tag's GitHub Release (job gated on the
-daemon matrix, ad-hoc signed by `cargo tauri build`, same artifact shape).
+daemon matrix — it downloads the matrix's `bundles.json` + tarballs as a
+workflow artifact, verifies the manifest's version against the tag and each
+tarball's sha256 against the manifest, pins THAT manifest into the app
+before building, and asserts the built binary embeds it; ad-hoc signed by
+`cargo tauri build`, same artifact shape).
 First launch of an ad-hoc-signed app: **macOS may claim the app "is damaged"**
 (verified on Tahoe 26.x, 2026-07-17) — it isn't; ad-hoc signing plus the
 quarantine flag is why. Either right-click → Open once, or from the terminal:

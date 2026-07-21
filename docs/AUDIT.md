@@ -52,6 +52,34 @@ wrongness · P2 leaks/papercuts · P3 maintainability.
 | Zoom/unzoom discards sibling panes' xterm instances (client scrollback lost) | P2 | Hide instead of dispose while zoomed; dispose on true close (`workspace.ts:applyLayout`). |
 | `termhist` pagination vs. concurrent rotation; `/tmp/mymux-agenthook.sh` predictable path; notify targets map growth; histWs stale workspace ref; sessions map unbounded growth | P3 | Awareness-level papercuts. |
 
+## 2026-07-21 follow-up (Codex + Claude re-audits → fix batch)
+
+Two independent re-audits (`docs/audit-codex.md`, `docs/audit-claude.md`,
+baseline `88f142e`) found two stop-ships — `save()` could migrate one file's
+editor state into another's buffer (P0-01/#24), and `/fs/write` followed a
+final symlink out of its root (P0-02/#28) — plus ~50 further findings. All
+were fixed in the 2026-07-21 batch (per-finding status in the two reports).
+Status changes for THIS ledger's deferred rows:
+
+| Ledger row | New status |
+|---|---|
+| ws client `pending` map holds timed-out RPCs | **Fixed** (ptyd `client.rs` evicts on timeout) |
+| Forwarder bind failure retries the cached port (TOCTOU) | **Fixed** properly: the listener is pre-bound in `connect()` and owned by the tunnel task — the port is immutable |
+| Version audit is raw string equality | **Fixed**: hand-rolled SemVer (pre-release/build); unparseable ⇒ no verdict |
+| Release dmg embeds committed `bundles.json`, no drift guard | **Fixed**: verified artifact handoff in `release.yml` (version+sha256 must match the tag or the dmg job fails); tracked manifest updated |
+| Zoom/unzoom discards sibling xterms | **Fixed** by the broader preserve design: native panes are hidden (still fed) across window/zoom switches — only authoritative Exit disposes; tmux panes re-seed faithfully (`capture-pane -S`) |
+| Quick-open / `jumpToToken` / `openAt` mid-flight host switch | **Fixed** (per-session open generation + captured scope, `code.ts`) |
+| ptyd connection `Closed` → engine degrades silently | **Still open** (background `ensure()` retry) |
+| Old ptyd silently drops unknown ops | **Still open** (versioned handshake) |
+| `bootstrap_ptyd` stale-socket unlink race | **Partially** addressed (peer-uid SO_PEERCRED check + per-UID 0700 socket dir + only-ours unlink); the two-process ordering race itself is open |
+
+New still-open items from the 2026-07-21 reports: #26 save-vs-disk mtime
+precondition (deferred by decision), #18 alt tracking from parsed state
+(blocked on avt's public API), C-33 full streaming byte-tail ring (partial:
+bounded runner + kill-on-drop landed), C-40 AST-level arg-shape guard,
+`.gitea/workflows/release.yml` needs the P1-18 handoff mirrored, `/fs/write`
+parent-dir TOCTOU (needs anchored dir handles / new dep).
+
 ## Verified solid (do not re-audit without cause)
 
 - Per-connection ordering end-to-end (client ms → hub → tmux pipe / ptyd FIFO);

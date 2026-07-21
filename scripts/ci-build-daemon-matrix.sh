@@ -18,7 +18,9 @@
 #   TAGBASE   — if set, bundles.json's baseUrl (e.g.
 #               https://gitea.aka.cy/XueHaonan/mymux/releases/download/v0.1.0-abc1234)
 #   OUT       — alternate output dir
-#   SKIP_AARCH64=1 — only build x86_64 (fast local iteration)
+#   SKIP_AARCH64=1 — only build x86_64 (fast local iteration); SHA256SUMS and
+#               bundles.json then cover ONLY the built targets (stale tars
+#               left in OUT by an earlier fuller build are never picked up)
 set -euo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,6 +28,11 @@ OUT="${OUT:-$ROOT/release/artifacts}"
 CACHE="${MYMUX_CI_CACHE:-$HOME/.cache/mymux-ci}"
 TARGETS=(x86_64-unknown-linux-musl)
 [ "${SKIP_AARCH64:-0}" = "1" ] || TARGETS+=(aarch64-unknown-linux-musl)
+# The manifest/sums allow-list: ONLY this run's targets. A reused OUT may hold
+# stale tars from an earlier fuller build (SKIP_AARCH64=1 after a full build)
+# — never glob the dir, or the manifest pins daemons this run did not build.
+KEYS=()
+for t in "${TARGETS[@]}"; do KEYS+=("linux-${t%%-unknown-linux-musl}"); done
 BINS=(mymuxd mymux-ptyd mymux-pkg mymux-attach)
 
 note() { printf 'mymux-ci: %s\n' "$*"; }
@@ -118,7 +125,11 @@ build_one() {
     mkdir -p "$OUT"
     local key="${target%%-unknown-linux-musl}" # x86_64 | aarch64
     key="linux-$key"
-    tar -czf "$OUT/$key.tar.gz" -C "$stage" .
+    # Deterministic archive (sorted members, pinned owner/mtime): a same-commit
+    # rebuild is byte-identical, so the publish step can VERIFY a kept
+    # duplicate asset instead of blind-trusting it.
+    tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='@0' \
+        -czf "$OUT/$key.tar.gz" -C "$stage" .
     cp "$stage/VERSION" "$OUT/$key.version"
     rm -rf "$stage"
     note "$key.tar.gz → $OUT ($(du -h "$OUT/$key.tar.gz" | cut -f1))"
@@ -131,18 +142,20 @@ done
 # ---- sums + manifest -------------------------------------------------------------
 VERSION="$(cat "$OUT/linux-x86_64.version")"
 mkdir -p "$OUT"
-( cd "$OUT" && sha256sum linux-*.tar.gz linux-*.version > SHA256SUMS )
+SUMFILES=()
+for k in "${KEYS[@]}"; do SUMFILES+=("$k.tar.gz" "$k.version"); done
+( cd "$OUT" && sha256sum "${SUMFILES[@]}" > SHA256SUMS )
 
 if [ -n "${TAGBASE:-}" ]; then
     BASE_URL="$TAGBASE"
 else
     BASE_URL=""
 fi
-VERSION="$VERSION" BASE_URL="$BASE_URL" OUT="$OUT" python3 - <<'PY'
+VERSION="$VERSION" BASE_URL="$BASE_URL" OUT="$OUT" KEYS="${KEYS[*]}" python3 - <<'PY'
 import hashlib, json, os
 out = os.environ["OUT"]
 assets = {}
-for key in ("linux-x86_64", "linux-aarch64"):
+for key in os.environ["KEYS"].split():
     p = os.path.join(out, f"{key}.tar.gz")
     if not os.path.exists(p):
         continue

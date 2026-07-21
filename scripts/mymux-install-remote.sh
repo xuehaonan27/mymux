@@ -22,10 +22,11 @@ BINS="$HOME/.local/bin"
 mkdir -p "$STATE" "$BINS" "$HOME/.config/systemd/user"
 note() { printf 'mymux: %s\n' "$*"; }
 
-# Any LIVE process named $1? Prints its pid. pgrep also matches <defunct>
-# zombies (an un-reaped setsid orphan would suppress the fallback launch).
+# Any LIVE process named $1 OWNED BY THIS UID? Prints its pid. pgrep also
+# matches <defunct> zombies (an un-reaped setsid orphan would suppress the
+# fallback launch) and, without -u, OTHER USERS' daemons (P1-04).
 alive() {
-  for pid in $(pgrep -x "$1" 2>/dev/null); do
+  for pid in $(pgrep -u "$(id -u)" -x "$1" 2>/dev/null); do
     if ! grep -q ') Z' "/proc/$pid/stat" 2>/dev/null; then
       echo "$pid"
       return 0
@@ -157,7 +158,8 @@ if systemctl --user show-environment >/dev/null 2>&1; then
     note "mymuxd already current — left running"
   fi
 else
-  alive mymuxd || { setsid mymuxd >/tmp/mymuxd.log 2>&1 </dev/null & }
+  mkdir -p "$HOME/.local/state/mymux"
+  alive mymuxd || { setsid mymuxd >"$HOME/.local/state/mymux/mymuxd.log" 2>&1 </dev/null & }
   note "no systemd --user — mymuxd runs detached (dies at logout)"
 fi
 echo "$NEWSHA" > "$STATE/.state-sha"
@@ -178,12 +180,12 @@ for b in mymuxd mymux-ptyd mymux-pkg mymux-attach; do
   fi
 done
 if [ -n "$restored" ]; then
-  systemctl --user restart mymuxd.service 2>/dev/null || alive mymuxd || { setsid mymuxd >/tmp/mymuxd.log 2>&1 </dev/null & }
+  systemctl --user restart mymuxd.service 2>/dev/null || alive mymuxd || { setsid mymuxd >"$HOME/.local/state/mymux/mymuxd.log" 2>&1 </dev/null & }
   for _ in $(seq 20); do alive mymuxd >/dev/null && break; sleep 0.2; done
   if alive mymuxd >/dev/null; then
     echo "mymux: new daemon failed to start — rolled back to the previous daemon (pid $(alive mymuxd))" >&2
     exit 0
   fi
 fi
-echo "mymux: mymuxd is NOT running — see /tmp/mymuxd.log or journalctl --user -u mymuxd" >&2
+echo "mymux: mymuxd is NOT running — see $HOME/.local/state/mymux/mymuxd.log or journalctl --user -u mymuxd" >&2
 exit 1

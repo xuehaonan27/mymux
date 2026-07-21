@@ -4,6 +4,44 @@ Deferred refinements — captured so we don't lose them. Not blocking. Structura
 work is tracked in `docs/AUDIT.md` (deferred ledger); panel I/O + testing
 discipline rules live in `AGENTS.md`.
 
+## Shipped 2026-07-21 (audit-fix batch — Codex + Claude re-audits, ~55 findings)
+
+The color/history saga ends here: reseed truecolor no longer shifts RGB (avt
+colon-form → semicolon normalization, ptyd `grid.rs`), reseeds push their
+history into scrollback instead of erasing it (`\x1b[<n>S` before the clear),
+and native panes are PRESERVED across window/zoom switches (hidden, still fed
+by the daemon's continuous stream — seed/live frame tagging keeps routine
+reseeds off live terminals; authoritative Exit events dispose; reconnect/lag
+distrusts everything) — 5,500-line scrollback, scroll position, selection and
+DOM identity all survive A→B→A, alt-screen included; tmux panes re-seed with
+`capture-pane -S` scrollback. Editor: save() captures pre-await + per-buffer
+write serialization (a mid-flight save can no longer smuggle one file's state
+into another), open generations end slow-read commits over your latest click,
+LSP carries the manual root end-to-end + per-language clients + reconnect
+heals dead sessions, viewers honor the root switcher, plain-text-first mount
+with async LSP attach. Panels: per-host captured scopes kill the pkgs/proc/git
+cross-host contaminations (a stale response can no longer render host A on
+host B or signal B's pid), git load paints from the preserved model first,
+partial staging writes both hunk starts correctly, one panel arbiter for all
+full-screen surfaces. Connect: the tunnel listener is pre-bound and immutable
+(the realloc-never-propagates class is gone by construction), transient notes
+no longer read as terminal errors (zero-touch install actually opens the
+workspace), non-systemd launch uses the absolute installed path + UID-scoped
+pgrep + user-owned log dir, hand-rolled SemVer ends false "outdated"
+verdicts. Security: `/fs/write` rejects symlink leaves and writes atomically
+(temp+rename), ptyd sockets are per-UID 0700 with SO_PEERCRED peer checks,
+git mutations die with their process group on timeout (no more post-"failure"
+repo mutation), porcelain/name-status parsing is `-z` byte-safe (Chinese /
+newline / tab / quote / rename filenames). Release: the dmg job now RECEIVES
+the verified manifest+tarballs (version/sha256 must match the tag — this is
+why shipped dmgs pinned an old daemon manifest and could "downgrade" a newer
+daemon), deterministic tarballs, DRY_RUN truly writes nothing. Tests: CI gate
+on push/PR (cargo test + clippy -D warnings + typecheck + arg-shape), the
+sandbox helper owns every daemon-touching check, new race/integrity checks
+(saverace, openrace, viewerroot, proccheck, pkgsmutcheck, githunkheadcheck,
+hoststatuscheck, lazyloadcheck, and the 21-assertion winswitch net). Ledger
+continues below for everything NOT shipped.
+
 ## Shipped 2026-07-17 (reliability + parity line — ledger for the date)
 
 Terminal/input: Sogou-class IME commit rescue (`ui/src/imefix.ts`), Unicode 11

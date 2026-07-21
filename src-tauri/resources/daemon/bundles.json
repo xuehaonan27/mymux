@@ -1,17 +1,17 @@
 {
-  "channel": "gitea",
-  "version": "mymuxd 0.1.0 (c3ac761)",
-  "baseUrl": "https://github.com/xuehaonan27/mymux/releases/download/v0.1.0-c3ac761",
+  "channel": "github",
+  "version": "mymuxd 0.1.0 (88f142e)",
+  "baseUrl": "https://github.com/xuehaonan27/mymux/releases/download/v0.1.0-88f142e",
   "assets": {
     "linux-x86_64": {
       "name": "linux-x86_64.tar.gz",
-      "sha256": "622f362063d605561984e25d229f7b0a66ebf0f159ea7b61a844750cec3d4583",
-      "size": 3086260
+      "sha256": "3e36c20d30cae4e7d4dc089c9f3549d3eebdd89ac6322034a45ff0652686b124",
+      "size": 3133788
     },
     "linux-aarch64": {
       "name": "linux-aarch64.tar.gz",
-      "sha256": "dfc422572df57cbb413ef44deb8881e3a6247404e798c75ea9917cd7bc3d4f0a",
-      "size": 2843389
+      "sha256": "6d98c12ae95c370ee05c2380210705701fa293e9a9ef83c60eff9a584866ee26",
+      "size": 2882834
     }
   }
 }

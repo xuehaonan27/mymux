@@ -1,38 +1,27 @@
 // Agent-ask triage end-to-end (defer / consume): SANDBOXED ptyd+mymuxd pair
-// (own socket — the production ptyd holding real shells is never touched).
+// via startSandbox (own MYMUX_PTYD_SOCK + MYMUX_SOCKET + port — the
+// production ptyd and the developer's live `tmux -L mymux` are never
+// touched).
 // Two windows get hook-reported "waiting" asks; DEFER re-stamps the asker's
 // needy-since so it sinks to the back of the attention ordering while the
 // badge stays on; CONSUME drops the badge outright; and a FRESH hook report
 // re-raises it (the consume suppression lifts on the next exchange).
 import { chromium } from 'playwright-core';
-import { spawn } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync } from 'node:fs';
+import { startSandbox } from './sandbox.mjs';
 
-const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8096';
-const PORT = 8096;
-const SOCK = '/tmp/mymux-flow-test.sock';
+const PORT = 8042;
+const sb = await startSandbox(PORT, 'flow');
+const UI = process.env.UI ?? sb.ui;
 const fails = [];
 const check = (name, cond, detail = '') => {
   console.log(`${cond ? '✓' : '✗ FAIL'} ${name}${cond || !detail ? '' : ` — ${detail}`}`);
   if (!cond) fails.push(name);
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const env = { ...process.env, MYMUX_PTYD_SOCK: SOCK };
-rmSync(SOCK, { force: true });
-
-// Boot the sandbox drawer: ptyd on its own socket, mymuxd on 8096 on top.
-const BIN = '/home/xuehaonan/mymux/target/debug';
-const ptyd = spawn(`${BIN}/mymux-ptyd`, [], { env, stdio: 'ignore' });
-for (let i = 0; i < 50 && !existsSync(SOCK); i++) await sleep(100);
-check('sandbox ptyd socket up', existsSync(SOCK));
-const daemon = spawn(`${BIN}/mymuxd`, [], { env: { ...env, MYMUX_ADDR: `127.0.0.1:${PORT}` }, stdio: 'ignore' });
-for (let i = 0; i < 50; i++) {
-  try {
-    const r = await fetch(`http://127.0.0.1:${PORT}/proc/tree`);
-    if (r.ok) break;
-  } catch { /* boot */ }
-  await sleep(100);
-}
+// A Playwright failure mid-run must not leave the sandbox behind.
+process.on('exit', () => sb.kill());
+check('sandbox ptyd socket up', existsSync(sb.sock));
 
 const post = (op, pane) =>
   fetch(`http://127.0.0.1:${PORT}/agent/${op}`, {
@@ -129,9 +118,7 @@ check('next hook report re-badges A', dot === 1);
 
 await page.screenshot({ path: 'shots/agentflow.png' });
 await browser.close();
-daemon.kill();
-ptyd.kill();
-rmSync(SOCK, { force: true });
+sb.kill();
 if (fails.length) {
   console.error('FAILURES:', fails.join(' | '));
   process.exit(1);

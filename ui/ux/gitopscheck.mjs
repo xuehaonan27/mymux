@@ -1,16 +1,33 @@
 // Git graph write-ops end-to-end against ~/ux-git-ops (throwaway clone with
-// a local bare remote): stage -> commit -> push -> fetch/pull/rebase.
+// a local bare remote, built by ui/ux/fixtures.mjs): stage -> commit -> push
+// -> fetch/pull/rebase. SANDBOXED daemon pair via startSandbox — never the
+// shared 8099 daemon or the developer's live `tmux -L mymux`.
 import { chromium } from 'playwright-core';
 import { execSync } from 'node:child_process';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { startSandbox } from './sandbox.mjs';
+import { ensureGitOps } from './fixtures.mjs';
 
-const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
-const REPO = '/home/xuehaonan/ux-git-ops';
+ensureGitOps();
+const PORT = 8043;
+const sb = await startSandbox(PORT, 'gitops');
+const UI = process.env.UI ?? sb.ui;
+const REPO = join(homedir(), 'ux-git-ops');
+const BARE = join(homedir(), 'ux-git-ops-bare.git');
+const SCRATCH = execSync('mktemp -d', { encoding: 'utf8' }).trim();
 const fails = [];
 const check = (name, cond) => {
   console.log(`${cond ? '✓' : '✗ FAIL'} ${name}`);
   if (!cond) fails.push(name);
 };
 const git = (args) => execSync(`git -C ${REPO} ${args}`, { encoding: 'utf8' });
+// A Playwright failure mid-run must not leave the sandbox or the scratch
+// clone behind.
+process.on('exit', () => {
+  sb.kill();
+  execSync(`rm -rf ${SCRATCH}`);
+});
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
@@ -19,7 +36,7 @@ await page.goto(UI, { waitUntil: 'domcontentloaded' });
 await page.waitForSelector('.xterm', { timeout: 20000 });
 await page.waitForTimeout(1200);
 await page.click('.xterm');
-await page.keyboard.type('cd ~/ux-git-ops');
+await page.keyboard.type(`cd ${REPO}`);
 await page.keyboard.press('Enter');
 await page.waitForTimeout(600);
 await page.click('#btn-git');
@@ -52,12 +69,20 @@ await page.click('.git-toolbar .pkgs-btn:text-is("Push")');
 await page.waitForTimeout(1500);
 check('push synced the remote', git('rev-parse origin/master') === git('rev-parse HEAD'));
 
-// Fetch / Pull / Rebase all succeed on the local remote.
+// Fetch / Pull / Rebase FOR REAL: land a commit on the bare remote from a
+// scratch clone (behind the UI's back), then the UI's Fetch + Pull must
+// fast-forward HEAD onto it. (Empty commit: the dirty a/b working tree
+// can't block the fast-forward.)
+execSync(`git clone -q ${BARE} ${SCRATCH}`);
+execSync(`git -C ${SCRATCH} -c user.name=ux -c user.email=ux@mymux.invalid commit -q --allow-empty -m 'remote: scratch commit'`);
+execSync(`git -C ${SCRATCH} push -q origin master`);
+const want = execSync(`git -C ${SCRATCH} rev-parse HEAD`, { encoding: 'utf8' }).trim();
+check('scratch commit is not local yet', git('rev-parse HEAD').trim() !== want);
 await page.click('.git-toolbar .pkgs-btn:text-is("Fetch")');
 await page.waitForTimeout(1200);
 await page.click('.git-toolbar .pkgs-btn:text-is("Pull")');
 await page.waitForTimeout(1500);
-check('pull is clean', !git('status --porcelain').includes('\n') || true); // pull output asserted by no-error toast below
+check('pull fast-forwarded HEAD to the remote commit', git('rev-parse HEAD').trim() === want);
 await page.click('.git-toolbar .pkgs-btn:text-is("Rebase")');
 await page.waitForTimeout(1500);
 const toast = (await page.locator('.toast.show').last().textContent().catch(() => '')) ?? '';
@@ -65,6 +90,8 @@ check('ops produce a toast', toast.length > 0);
 await page.screenshot({ path: 'shots/git-ops.png' });
 
 await browser.close();
+sb.kill();
+execSync(`rm -rf ${SCRATCH}`);
 if (fails.length) {
   console.error('FAILURES:', fails.join(' | '));
   process.exit(1);

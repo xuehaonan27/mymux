@@ -68,6 +68,21 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           bash scripts/ci-publish-release.sh
 
+      # P1-18 handoff: the DMG job builds from a FRESH checkout, whose tracked
+      # src-tauri/resources/daemon/bundles.json can pin an older daemon — and
+      # mymux-connect's build.rs would compile that stale manifest into the
+      # app. Hand the manifest + tarballs from THIS job over; the DMG job
+      # verifies them against the tag before building.
+      - name: hand the manifest + tarballs to the DMG job
+        uses: actions/upload-artifact@v4
+        with:
+          name: daemon-release
+          path: |
+            release/artifacts/bundles.json
+            release/artifacts/linux-*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
   # macOS client package: the .dmg mac users actually install. Public repo →
   # macos-latest is free too. Serialised behind the daemon job so the release
   # it uploads into already exists (the daemon step creates it).
@@ -77,6 +92,61 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+
+      # P1-18: pin the VERIFIED manifest from the daemon job (never the tracked
+      # one, which may pin an older build — the equal-version sha lane would
+      # then "update" hosts to that stale daemon). Fail on ANY mismatch.
+      - name: fetch the daemon job's manifest + tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: daemon-release
+          path: /tmp/daemon-release
+      - name: verify + pin the daemon manifest for ${{ github.ref_name }}
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, sys
+
+          def fail(msg):
+              sys.exit(f"manifest verification FAILED: {msg}")
+
+          tag = os.environ["TAG"]
+          base = os.environ["GITEA_BASE"].rstrip("/")
+          repo = os.environ["GITEA_REPO"]
+          man = json.load(open("/tmp/daemon-release/bundles.json"))
+
+          if not tag.startswith("v") or "-" not in tag[1:]:
+              fail(f"ref {tag!r} is not a v<version>-<sha> tag")
+          ver, sha = tag[1:].rsplit("-", 1)
+          want_version = f"mymuxd {ver} ({sha})"
+          if man.get("version") != want_version:
+              fail(f"version {man.get('version')!r} != tag-derived {want_version!r}")
+          want_base = f"{base}/{repo}/releases/download/{tag}"
+          if man.get("baseUrl") != want_base:
+              fail(f"baseUrl {man.get('baseUrl')!r} != {want_base!r}")
+          assets = man.get("assets") or {}
+          if not assets:
+              fail("no assets in the manifest")
+          for key, a in assets.items():
+              p = f"/tmp/daemon-release/{a['name']}"
+              if not os.path.exists(p):
+                  fail(f"{key}: tarball {a['name']} missing from the artifact")
+              h = hashlib.sha256()
+              with open(p, "rb") as f:
+                  for chunk in iter(lambda: f.read(1 << 20), b""):
+                      h.update(chunk)
+              if h.hexdigest() != a["sha256"]:
+                  fail(f"{key}: sha256 {h.hexdigest()} != manifest {a['sha256']}")
+              if os.path.getsize(p) != a["size"]:
+                  fail(f"{key}: size {os.path.getsize(p)} != manifest {a['size']}")
+          dst = "src-tauri/resources/daemon/bundles.json"
+          with open(dst, "w") as f:
+              json.dump(man, f, indent=2)
+              f.write("\n")
+          print(f"manifest verified against {tag} and pinned into {dst}")
+          PY
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -115,6 +185,17 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: build mymux.dmg (ad-hoc signed by cargo tauri build)
         run: cargo tauri build
+      # Post-build proof for P1-18: the manifest is include_str!'d into the
+      # binary, so its asset sha must be grep-able in the built app.
+      - name: assert the built app embeds the verified manifest
+        run: |
+          set -euo pipefail
+          SHA="$(python3 -c 'import json; m=json.load(open("src-tauri/resources/daemon/bundles.json")); print(next(iter(m["assets"].values()))["sha256"])')"
+          BIN="src-tauri/target/release/mymux"
+          [ -f "$BIN" ] || { echo "app binary missing at $BIN"; exit 1; }
+          grep -q "$SHA" "$BIN" \
+            && echo "OK: $BIN embeds the verified manifest" \
+            || { echo "FAIL: $BIN does not embed the verified manifest"; exit 1; }
       - name: upload .dmg to the release (gh on runners reads GH_TOKEN)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

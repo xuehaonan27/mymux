@@ -28,7 +28,8 @@ HISTORY="$HOME/.local/state/mymux"
 SRC="$HOME/.local/src/mymux"
 CONF="$HOME/.config/mymux"
 RTSOCK="${XDG_RUNTIME_DIR:-}/mymux"
-USOCK="/tmp/mymux-ptyd-${USER_NAME}.sock"
+USOCK="/tmp/mymux-ptyd-${USER_NAME}.sock"          # legacy pre-2026-07 path
+USOCK_DIR="/tmp/mymux-ptyd-$(id -u 2>/dev/null || echo "$USER_NAME")" # per-UID 0700 dir
 
 have_systemd() { systemctl --user show-environment >/dev/null 2>&1; }
 
@@ -91,6 +92,7 @@ probe() {
   done
   [ -f /tmp/mymuxd.log ] && row "file	/tmp/mymuxd.log"
   [ -S "$USOCK" ] && row "file	$USOCK"
+  [ -d "$USOCK_DIR" ] && row "dir	$USOCK_DIR"
   [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$RTSOCK" ] && row "dir	$RTSOCK"
   [ -f "$CONF/env" ] && row "keep	$CONF/env (your env/proxy settings)"
   return 0
@@ -116,6 +118,7 @@ uninstall() {
   rm -f "$BINS/mymuxd" "$BINS/mymux-ptyd" "$BINS/mymux-pkg" "$BINS/mymux-attach"
   rm -rf "$STATE" "$HISTORY" "$SRC"
   rm -f /tmp/mymuxd.log "$USOCK"
+  rm -rf "$USOCK_DIR"
   [ -n "${XDG_RUNTIME_DIR:-}" ] && rm -rf "$RTSOCK"
   note "binaries, units, state, packages and history removed"
   [ -f "$CONF/env" ] && note "left in place: $CONF/env (delete it yourself if unwanted)"

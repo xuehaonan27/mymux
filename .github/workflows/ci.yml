@@ -1,0 +1,53 @@
+# Push/PR gate (GitHub Actions): the checks every batch must keep green.
+# Release publishing stays in release.yml; this file is the day-to-day gate
+# (tests, lints, UI typecheck, the Tauri arg-shape guard).
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
+
+      - name: "toolchain: rust (+ clippy)"
+        run: |
+          set -x
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustup component add clippy
+
+      - name: cargo test
+        run: cargo test --workspace --all-targets
+
+      - name: cargo clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: ui typecheck
+        run: |
+          npm --prefix ui ci
+          npm --prefix ui run typecheck
+
+      - name: tauri arg-shape guard
+        run: node ui/ux/argshapecheck.mjs
