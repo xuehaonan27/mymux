@@ -24,9 +24,9 @@ pub mod agenthook;
 pub mod bundle;
 pub mod russh_tunnel;
 pub use russh_tunnel::{
-    exec_bytes, exec_script, master_exec_bytes, master_exec_script, parse_probe, probe_daemon_meta,
-    push_daemon_update, run_russh_tunnel, DaemonMeta, HostConfig, Master, Status, WorkReport,
-    UNINSTALL_SCRIPT,
+    exec_bytes, exec_script, fold_status, master_exec_bytes, master_exec_script, parse_probe,
+    probe_daemon_meta, push_daemon_update, run_russh_tunnel, DaemonMeta, HostConfig, Master,
+    Status, WorkReport, REMOTE_DAEMON_CMD, UNINSTALL_SCRIPT,
 };
 pub mod hosts;
 pub use hosts::{config_dir, Host, HostStore};
@@ -59,10 +59,9 @@ impl TunnelConfig {
             ensure_daemon: false,
             // Prefer the systemd --user service (persistent, restart-safe); fall
             // back to a detached setsid launch if it isn't installed. Only checks
-            // + starts; never kills anything by name.
-            remote_daemon_cmd:
-                "systemctl --user start mymuxd.service 2>/dev/null || pgrep -x mymuxd >/dev/null 2>&1 || setsid mymuxd >/tmp/mymuxd.log 2>&1 </dev/null &"
-                    .to_string(),
+            // + starts; never kills anything by name. The launch command itself
+            // is shared with the russh path (see REMOTE_DAEMON_CMD).
+            remote_daemon_cmd: REMOTE_DAEMON_CMD.to_string(),
             forward_command: None,
         }
     }

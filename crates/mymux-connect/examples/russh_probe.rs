@@ -31,7 +31,10 @@ async fn main() {
     let passphrase = env("PASSPHRASE");
     let (tx, mut rx) = mpsc::channel(32);
     let master = Master::new(cfg.clone(), passphrase);
-    tokio::spawn(async move { run_russh_tunnel(cfg, &master, tx, || None).await });
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", cfg.local_port))
+        .await
+        .expect("bind local forward port");
+    tokio::spawn(async move { run_russh_tunnel(cfg, &master, tx, listener).await });
     while let Some(s) = rx.recv().await {
         println!("STATUS {s:?}");
     }

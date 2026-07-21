@@ -26,6 +26,9 @@ pub struct HostConfig {
     pub identity_path: PathBuf,
     /// `known_hosts` file to verify against (default `~/.ssh/known_hosts`).
     pub known_hosts_path: PathBuf,
+    /// The local forward port. The tunnel does NOT bind it: the caller binds
+    /// the listener first (the bind is the reservation) and hands it to
+    /// [`run_russh_tunnel`], so this value can never drift from the real one.
     pub local_port: u16,
     pub remote_port: u16,
     pub remote_daemon_cmd: String,
@@ -55,17 +58,20 @@ pub enum Status {
     /// The zero-touch installer is running on the host (daemon was missing);
     /// the connect retries once it finishes.
     Installing,
-    /// Local forward port is held at bind time (a crashed instance of ours,
-    /// or another app). Made FATAL: retrying forever with the same cached
-    /// port — re-sending Connecting over the transient bind error — is how
-    /// host cards used to hang on "connecting" indefinitely.
-    BindFailed(u16),
+    /// A TERMINAL failure with a human reason — the supervisor only sends
+    /// this right before it gives up (installer exhausted, …). Transient
+    /// per-cycle failures are retried and ride out as [`Status::Note`]
+    /// instead, so the UI can treat every Error as attempt-ending.
     Error(String),
+    /// A transient diagnostic ("one health probe missed", "daemon not
+    /// answering — installing next"). NEVER a connection state: the app
+    /// layer folds it into the current phase's `why` (see [`fold_status`]),
+    /// so it can neither settle a UI attempt nor paint over a healthy
+    /// `Connected`.
+    Note(String),
 }
 
 /// Terminal states that shouldn't be retried in a tight loop (need user action).
-/// BindFailed is deliberately NOT here: a held port is transient contention —
-/// the supervisor evicts it and retries on a freshly allocated one instead.
 fn is_fatal(s: &Status) -> bool {
     matches!(
         s,
@@ -74,6 +80,37 @@ fn is_fatal(s: &Status) -> bool {
             | Status::HostKeyMismatch
             | Status::DaemonUnreachable
     )
+}
+
+/// Fold one supervisor status into the per-host (phase, reason) pair the app
+/// publishes, returning the phase to store + emit. A [`Status::Note`] is a
+/// diagnostic riding the CURRENT phase: it sets `reason` (the `why` channel)
+/// but never replaces a stored phase — a one-off health miss must not paint
+/// 'error' over a healthy `Connected`, and a pre-install note must not settle
+/// the UI's connect attempt. `Connected` clears the reason; a terminal
+/// [`Status::Error`] becomes both phase and reason.
+pub fn fold_status(stored: &mut Option<Status>, reason: &mut Option<String>, s: Status) -> Status {
+    match s {
+        Status::Note(why) => {
+            *reason = Some(why);
+            stored.clone().unwrap_or(Status::Connecting)
+        }
+        Status::Connected => {
+            *reason = None;
+            *stored = Some(Status::Connected);
+            Status::Connected
+        }
+        Status::Error(why) => {
+            *reason = Some(why.clone());
+            let s = Status::Error(why);
+            *stored = Some(s.clone());
+            s
+        }
+        other => {
+            *stored = Some(other.clone());
+            other
+        }
+    }
 }
 
 /// russh client handler — its whole job is verifying the server key.
@@ -337,12 +374,15 @@ pub async fn exec_bytes(
 }
 /// One connect → auth → forward cycle, leasing channels off the host's
 /// persistent Master (a reconnect after a transient drop re-auths nothing).
-/// Returns `Err(Status)` describing why it ended (the supervisor decides
-/// whether to retry).
+/// The local listener is owned by the supervisor (bound before the task
+/// starts), so every cycle of a reconnect serves the SAME port. Returns
+/// `Err(Status)` describing why it ended (the supervisor decides whether to
+/// retry).
 async fn connect_and_serve(
     cfg: &HostConfig,
     master: &Master,
     status: &mpsc::Sender<Status>,
+    listener: &TcpListener,
 ) -> Result<(), Status> {
     let handle = master.lease().await?;
 
@@ -375,8 +415,10 @@ async fn connect_and_serve(
         }
     }
     if !daemon_ok {
+        // A progress note, not a failure state: the supervisor's next step is
+        // the installer, after which the connect retries on its own.
         let _ = status
-            .send(Status::Error(format!(
+            .send(Status::Note(format!(
                 "mymuxd not answering on remote port {} after 14 probes — running the installer next",
                 cfg.remote_port
             )))
@@ -384,18 +426,6 @@ async fn connect_and_serve(
         return Err(Status::DaemonUnreachable);
     }
 
-    let listener = match TcpListener::bind(("127.0.0.1", cfg.local_port)).await {
-        Ok(l) => l,
-        Err(e) => {
-            let _ = status
-                .send(Status::Error(format!(
-                    "bind 127.0.0.1:{} failed ({e}) — port is held by an earlier mymux instance or another app",
-                    cfg.local_port
-                )))
-                .await;
-            return Err(Status::BindFailed(cfg.local_port));
-        }
-    };
     let _ = status.send(Status::Connected).await;
 
     // Serve the local forward until the ssh session dies. Two concurrent tasks:
@@ -420,7 +450,7 @@ async fn connect_and_serve(
                 Err(_) => {
                     master.invalidate().await; // session gone
                     let _ = status
-                        .send(Status::Error(
+                        .send(Status::Note(
                             "the SSH server dropped our forward channel — reconnecting".to_string(),
                         ))
                         .await;
@@ -448,7 +478,7 @@ async fn connect_and_serve(
                     misses += 1;
                     if misses < 2 {
                         let _ = status
-                            .send(Status::Error(
+                            .send(Status::Note(
                                 "health probe missed once — double-checking before declaring the link dead"
                                     .to_string(),
                             ))
@@ -458,7 +488,7 @@ async fn connect_and_serve(
                     }
                     master.invalidate().await;
                     let _ = status
-                        .send(Status::Error(
+                        .send(Status::Note(
                             "two consecutive health probes timed out — the link is down; reconnecting"
                                 .to_string(),
                         ))
@@ -634,33 +664,113 @@ pub struct DaemonMeta {
 
 const UNAME_PROBE: &str = "uname -sm 2>/dev/null || true";
 const VERSION_PROBE: &str = "(timeout 2 ~/.local/bin/mymuxd --version 2>/dev/null || timeout 2 mymuxd --version 2>/dev/null || true) | head -1";
+/// Idempotent remote-daemon launch, shared by the russh path (the Tauri app)
+/// and the ssh-binary fallback: the systemd --user unit first; then any
+/// already-running daemon OF THIS USER (the pgrep must be UID-scoped — another
+/// user's mymuxd must not satisfy it); else a detached setsid launch.
+/// Non-interactive SSH PATH commonly omits ~/.local/bin, so the installed
+/// binary is called by absolute path (PATH fallback only if it's absent), and
+/// the log lives under a user-owned state dir — a shared /tmp/mymuxd.log was
+/// a collision/symlink hazard.
+pub const REMOTE_DAEMON_CMD: &str = r#"systemctl --user start mymuxd.service 2>/dev/null || pgrep -u "$(id -u)" -x mymuxd >/dev/null 2>&1 || { mkdir -p "$HOME/.local/state/mymux" && if [ -x "$HOME/.local/bin/mymuxd" ]; then setsid "$HOME/.local/bin/mymuxd"; else setsid mymuxd; fi >"$HOME/.local/state/mymux/mymuxd.log" 2>&1 </dev/null; } &"#;
 /// Upload atomically (.new → rename) so a half-written push can't poison a
 /// later install.
 const PUT_BUNDLE: &str = "mkdir -p ~/.local/share/mymux/dist && cat > ~/.local/share/mymux/dist/daemon.tgz.new && mv -f ~/.local/share/mymux/dist/daemon.tgz.new ~/.local/share/mymux/dist/daemon.tgz";
 
 /// Version strings look like "mymuxd 0.1.0 (<sha>[-dirty])".
-fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
+///
+/// A parsed semantic version. Build metadata (`+…`) is kept OUT of precedence
+/// per SemVer §10; the pre-release identifiers decide §11.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemVer {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    /// Dot-separated pre-release identifiers; EMPTY = a release, which sorts
+    /// AFTER every pre-release of the same core.
+    pre: Vec<String>,
+}
+
+/// Strict-ish parse: "mymuxd 1.2.3[-rc.1][+build] (<sha>)" → SemVer. Anything
+/// unparseable (dev builds, empty, foreign output) is None — the caller must
+/// then refuse a verdict rather than guess from string inequality.
+fn parse_semver(v: &str) -> Option<SemVer> {
     let m = v.strip_prefix("mymuxd ")?.split_whitespace().next()?;
-    let mut it = m.split('.');
-    Some((
+    let m = m.split('+').next()?; // build metadata never affects precedence
+    let (core, pre) = match m.split_once('-') {
+        Some((c, p)) => (c, p),
+        None => (m, ""),
+    };
+    let mut it = core.split('.');
+    let (major, minor, patch) = (
         it.next()?.parse().ok()?,
         it.next()?.parse().ok()?,
         it.next()?.parse().ok()?,
-    ))
+    );
+    if it.next().is_some() {
+        return None; // exactly three numeric components
+    }
+    let pre = if pre.is_empty() {
+        Vec::new()
+    } else {
+        pre.split('.').map(str::to_string).collect()
+    };
+    Some(SemVer {
+        major,
+        minor,
+        patch,
+        pre,
+    })
+}
+
+/// SemVer §11 precedence: numeric core first; then a release outranks every
+/// pre-release of its core; pre-release identifiers compare numerically when
+/// both numeric (numeric < alphanumeric), ASCII-lexically otherwise, and a
+/// shorter identifier list loses a prefix tie.
+fn semver_cmp(a: &SemVer, b: &SemVer) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    (a.major, a.minor, a.patch)
+        .cmp(&(b.major, b.minor, b.patch))
+        .then_with(|| match (a.pre.is_empty(), b.pre.is_empty()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => {
+                for (x, y) in a.pre.iter().zip(b.pre.iter()) {
+                    let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
+                        (Ok(n), Ok(m)) => n.cmp(&m),
+                        (Ok(_), Err(_)) => Ordering::Less,
+                        (Err(_), Ok(_)) => Ordering::Greater,
+                        (Err(_), Err(_)) => x.cmp(y),
+                    };
+                    if ord != Ordering::Equal {
+                        return ord;
+                    }
+                }
+                a.pre.len().cmp(&b.pre.len())
+            }
+        })
 }
 
 /// Outdated = STRICTLY OLDER by semantic version; on equal versions the sha
 /// pins the update lane as before (releases share the crate version, so only
 /// string-inequality distinguishes them there). A host running a NEWER
 /// daemon (e.g. pushed by a newer app pin) is NOT outdated — string
-/// inequality used to flag it and one click on Update DOWNGRADED it.
+/// inequality used to flag it and one click on Update DOWNGRADED it. An
+/// unparseable version on EITHER side gives NO verdict: unknown must never
+/// authorize a downgrade/update.
 fn daemon_outdated(current: &str, expected: &str) -> bool {
+    use std::cmp::Ordering;
     if current.is_empty() || expected.is_empty() {
         return false;
     }
     match (parse_semver(current), parse_semver(expected)) {
-        (Some(c), Some(e)) if c != e => c < e,
-        _ => current != expected,
+        (Some(c), Some(e)) => match semver_cmp(&c, &e) {
+            Ordering::Less => true,
+            Ordering::Greater => false,
+            Ordering::Equal => current != expected, // the equal-version sha lane
+        },
+        _ => false,
     }
 }
 
@@ -729,14 +839,16 @@ async fn maybe_install(
 /// Supervise the russh tunnel: connect, serve, and reconnect with capped backoff.
 /// The caller owns the host's Master (shared with uninstall/exec paths so a
 /// transient drop reconnects WITHOUT a fresh auth; only a dead master
-/// re-authenticates). Fatal states (bad auth / unknown or changed host key)
-/// stop the loop and are reported so the UI can prompt; transient drops
-/// reconnect silently.
-pub async fn run_russh_tunnel<R: Fn() -> Option<u16> + Send>(
-    mut cfg: HostConfig,
+/// re-authenticates) and the already-bound local LISTENER: the tunnel holds it
+/// for its whole life, so the port the caller returned can never be lost to a
+/// reconnect cycle or a bind race — it stays the one authoritative port.
+/// Fatal states (bad auth / unknown or changed host key) stop the loop and are
+/// reported so the UI can prompt; transient drops reconnect silently.
+pub async fn run_russh_tunnel(
+    cfg: HostConfig,
     master: &Master,
     status: mpsc::Sender<Status>,
-    realloc: R,
+    listener: TcpListener,
 ) {
     let min = Duration::from_millis(500);
     let max = Duration::from_secs(30);
@@ -749,36 +861,12 @@ pub async fn run_russh_tunnel<R: Fn() -> Option<u16> + Send>(
     loop {
         let _ = status.send(Status::Connecting).await;
         let started = Instant::now();
-        let end = connect_and_serve(&cfg, master, &status)
+        let end = connect_and_serve(&cfg, master, &status, &listener)
             .await
             .err()
             .unwrap_or(Status::Reconnecting);
         if !matches!(end, Status::DaemonUnreachable) {
             daemon_tries = 0; // any other outcome resets the install-breaker
-        }
-
-        // A held port is transient contention (previous instance of ourselves,
-        // a teardown still closing, another app): evict and retry on a FRESH
-        // port — never fatal, so a reconnect race can't kill the host for good.
-        if let Status::BindFailed(held) = end {
-            match realloc() {
-                Some(p) => {
-                    let _ = status
-                        .send(Status::Error(format!(
-                            "forward port {held} is held — retrying on fresh port {p}"
-                        )))
-                        .await;
-                    cfg.local_port = p;
-                    backoff = min;
-                    continue;
-                }
-                None => {
-                    let _ = status
-                        .send(Status::Error("no free local port in 8088-8187".to_string()))
-                        .await;
-                    return;
-                }
-            }
         }
 
         if is_fatal(&end) {
@@ -811,7 +899,19 @@ pub async fn run_russh_tunnel<R: Fn() -> Option<u16> + Send>(
             let _ = status.send(end).await;
             return; // wait for the UI to re-drive (new passphrase / trust host key)
         }
-        let _ = status.send(end).await;
+
+        // A non-fatal end is retried below — report it as a diagnostic NOTE
+        // riding the current phase, never as an Error state: the UI settles
+        // (and the app stores) Error as terminal, so a transient drop would
+        // otherwise kill a connect attempt that is about to succeed.
+        match end {
+            Status::Error(why) => {
+                let _ = status.send(Status::Note(why)).await;
+            }
+            other => {
+                let _ = status.send(other).await;
+            }
+        }
 
         if started.elapsed() >= Duration::from_secs(10) {
             backoff = min; // it was up a while — a transient drop
@@ -823,7 +923,7 @@ pub async fn run_russh_tunnel<R: Fn() -> Option<u16> + Send>(
 
 #[cfg(test)]
 mod tests {
-    use super::daemon_outdated;
+    use super::{daemon_outdated, fold_status, Status};
 
     #[test]
     fn outdated_semantics() {
@@ -849,9 +949,129 @@ mod tests {
         // Unknown anywhere → no verdict.
         assert!(!daemon_outdated("", "mymuxd 0.1.0 (aaa1111)"));
         assert!(!daemon_outdated("mymuxd 0.1.0 (aaa1111)", ""));
-        // Unparseable falls back to inequality (never flags equal).
+        // Unparseable anywhere → NO verdict either: a dev build must never be
+        // "updated" (downgraded) on raw string inequality.
         assert!(!daemon_outdated("dev-build", "dev-build"));
-        assert!(daemon_outdated("dev-build", "mymuxd 0.1.0 (aaa1111)"));
+        assert!(!daemon_outdated("dev-build", "mymuxd 0.1.0 (aaa1111)"));
+        assert!(!daemon_outdated("mymuxd 0.1.0 (aaa1111)", "dev-build"));
+    }
+
+    /// Pre-release + build metadata follow SemVer precedence, not string order.
+    #[test]
+    fn outdated_prerelease_build() {
+        // The audit's case: a pre-release of a NEWER core is newer than an
+        // older release — not "outdated".
+        assert!(!daemon_outdated(
+            "mymuxd 1.0.0-alpha (x)",
+            "mymuxd 0.9.0 (y)"
+        ));
+        // …but a pre-release is strictly older than its own release.
+        assert!(daemon_outdated(
+            "mymuxd 1.0.0-alpha (x)",
+            "mymuxd 1.0.0 (y)"
+        ));
+        // SemVer §11 identifier order: alpha < alpha.1 < alpha.beta < beta <
+        // beta.2 < beta.11 < rc.1 (numeric < alphanumeric, numeric by value,
+        // shorter prefix list first).
+        assert!(daemon_outdated(
+            "mymuxd 1.0.0-alpha (x)",
+            "mymuxd 1.0.0-alpha.1 (y)"
+        ));
+        assert!(daemon_outdated(
+            "mymuxd 1.0.0-alpha.1 (x)",
+            "mymuxd 1.0.0-alpha.beta (y)"
+        ));
+        assert!(daemon_outdated(
+            "mymuxd 1.0.0-beta.2 (x)",
+            "mymuxd 1.0.0-beta.11 (y)"
+        ));
+        assert!(daemon_outdated(
+            "mymuxd 1.0.0-beta.11 (x)",
+            "mymuxd 1.0.0-rc.1 (y)"
+        ));
+        assert!(!daemon_outdated(
+            "mymuxd 1.0.0-rc.1 (x)",
+            "mymuxd 1.0.0-beta.11 (y)"
+        ));
+        // Build metadata is precedence-invisible: equal versions land in the
+        // sha/string lane, identical strings are not outdated.
+        assert!(daemon_outdated(
+            "mymuxd 1.0.0+build1 (aaa)",
+            "mymuxd 1.0.0+build2 (bbb)"
+        ));
+        assert!(!daemon_outdated(
+            "mymuxd 1.0.0+build1 (aaa)",
+            "mymuxd 1.0.0+build1 (aaa)"
+        ));
+        // Garbage that merely LOOKS close is still unparseable → no verdict.
+        assert!(!daemon_outdated("mymuxd 1.0 (x)", "mymuxd 1.0.0 (y)"));
+        assert!(!daemon_outdated("mymuxd 1.0.0.1 (x)", "mymuxd 1.0.0 (y)"));
+    }
+
+    /// The app folds supervisor statuses into (phase, why): a transient Note
+    /// must never replace the connection phase, a terminal Error must.
+    #[test]
+    fn fold_status_split() {
+        let mut stored = None;
+        let mut why = None;
+        // Zero-touch install replay: notes + states, no terminal Error — the
+        // phase is never clobbered by a diagnostic.
+        assert_eq!(
+            fold_status(&mut stored, &mut why, Status::Connecting),
+            Status::Connecting
+        );
+        assert_eq!(
+            fold_status(
+                &mut stored,
+                &mut why,
+                Status::Note("mymuxd not answering — running the installer next".into())
+            ),
+            Status::Connecting,
+            "a note rides the current phase"
+        );
+        assert!(why.is_some());
+        assert_eq!(
+            fold_status(&mut stored, &mut why, Status::Installing),
+            Status::Installing
+        );
+        assert_eq!(
+            fold_status(&mut stored, &mut why, Status::Connected),
+            Status::Connected
+        );
+        assert_eq!(why, None, "Connected clears the reason");
+
+        // Connected → one health miss → healthy: the phase stays Connected.
+        assert_eq!(
+            fold_status(
+                &mut stored,
+                &mut why,
+                Status::Note("health probe missed once".into())
+            ),
+            Status::Connected,
+            "a one-off miss must not paint over a healthy Connected"
+        );
+        assert_eq!(why.as_deref(), Some("health probe missed once"));
+        assert_eq!(
+            fold_status(&mut stored, &mut why, Status::Connected),
+            Status::Connected
+        );
+        assert_eq!(why, None);
+
+        // A note with NO phase yet (defensive) falls back to Connecting.
+        let mut fresh = None;
+        assert_eq!(
+            fold_status(&mut fresh, &mut why, Status::Note("x".into())),
+            Status::Connecting
+        );
+        assert_eq!(fresh, None, "a note still does not store a phase");
+
+        // A terminal Error becomes BOTH phase and reason.
+        assert_eq!(
+            fold_status(&mut stored, &mut why, Status::Error("boom".into())),
+            Status::Error("boom".into())
+        );
+        assert_eq!(stored, Some(Status::Error("boom".into())));
+        assert_eq!(why.as_deref(), Some("boom"));
     }
 
     /// expected_version lane choice: a manifest embedded at build time owns

@@ -2,54 +2,34 @@
 // from one host's window must show THAT host's filesystem (pane-scope and
 // api-base must follow the ACTIVE workspace — the reported bug: the second
 // host's editor kept showing the first host's content). Two stubbed hosts
-// → two REAL sandbox daemon pairs (h-a@8097, h-b@8096), each driven to a
+// → two REAL sandbox daemon pairs (h-a@8077, h-b@8078), each driven to a
 // distinct fixture dir; the tree must switch with the host chip.
 import { chromium } from 'playwright-core';
-import { execSync, spawn } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
+import { execSync } from 'node:child_process';
+import { startSandbox } from './sandbox.mjs';
 
 const UI = process.env.UI ?? 'http://127.0.0.1:5173/';
-const BIN = '/home/xuehaonan/mymux/target/debug';
 const fails = [];
 const check = (name, cond, detail = '') => {
   console.log(`${cond ? '✓' : '✗ FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
   if (!cond) fails.push(name);
 };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Distinct fixtures per host.
 execSync('mkdir -p ~/ux-host-a && echo aaa > ~/ux-host-a/markerAAA.txt');
 execSync('mkdir -p ~/ux-host-b && echo bbb > ~/ux-host-b/markerBBB.txt');
 
-// Two sandbox daemon pairs.
-const pairs = [
-  { sock: '/tmp/mymux-ha.sock', port: 8097 },
-  { sock: '/tmp/mymux-hb.sock', port: 8096 },
-];
-const procs = [];
-const cleanup = () => {
-  for (const p of procs) p.kill();
-  for (const { sock } of pairs) rmSync(sock, { force: true });
-};
-process.on('exit', cleanup);
-for (const { sock, port } of pairs) {
-  rmSync(sock, { force: true });
-  const env = { ...process.env, MYMUX_PTYD_SOCK: sock, MYMUX_SOCKET: `mymux-ux${port}`, MYMUX_ADDR: `127.0.0.1:${port}` };
-  procs.push(spawn(`${BIN}/mymux-ptyd`, [], { env, stdio: process.env.DEBUG ? 'inherit' : 'ignore' }));
-  for (let i = 0; i < 50 && !existsSync(sock); i++) await sleep(100);
-  procs.push(spawn(`${BIN}/mymuxd`, [], { env, stdio: process.env.DEBUG ? 'inherit' : 'ignore' }));
-  for (let i = 0; i < 50; i++) {
-    try {
-      const r = await fetch(`http://127.0.0.1:${port}/git/toplevel?root=/home/xuehaonan`);
-      if (r.ok) break;
-    } catch { /* boot */ }
-    await sleep(100);
-  }
-}
+// Two sandbox daemon pairs (own ptyd socket + tmux socket + port each).
+const sbA = await startSandbox(8077, 'hr-a');
+const sbB = await startSandbox(8078, 'hr-b');
+process.on('exit', () => {
+  sbA.kill();
+  sbB.kill();
+});
 
 const HOSTS = [
-  { id: 'h-a', label: 'hostA', hostname: 'a.example', user: 'u', port: 22, identity_path: '/tmp/k', _port: 8097 },
-  { id: 'h-b', label: 'hostB', hostname: 'b.example', user: 'u', port: 22, identity_path: '/tmp/k', _port: 8096 },
+  { id: 'h-a', label: 'hostA', hostname: 'a.example', user: 'u', port: 22, identity_path: '/tmp/k', _port: 8077 },
+  { id: 'h-b', label: 'hostB', hostname: 'b.example', user: 'u', port: 22, identity_path: '/tmp/k', _port: 8078 },
 ];
 
 const browser = await chromium.launch();
@@ -86,6 +66,7 @@ await page.addInitScript((hosts) => {
           hooks: { claude: true, codex: true, kimi: true, opencode: true },
         });
       }
+      if (cmd === 'host_meta_refresh') return Promise.resolve(null);
       if (cmd === 'plugin:event|listen') return Promise.resolve(0);
       return Promise.reject(new Error(`stub: ${cmd}`));
     },
@@ -188,8 +169,8 @@ check('panel open: tree swaps back to hostA', await treeHas('markerAAA.txt') && 
 
 await page.screenshot({ path: 'shots/hostroute.png' });
 await browser.close();
-for (const p of procs) p.kill();
-for (const { sock } of pairs) rmSync(sock, { force: true });
+sbA.kill();
+sbB.kill();
 if (fails.length) {
   console.error('FAILURES:', fails.join(' | '));
   process.exit(1);

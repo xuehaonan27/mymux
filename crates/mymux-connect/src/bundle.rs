@@ -68,7 +68,7 @@ pub fn asset_url(man: &BundleManifest, asset: &BundleAsset) -> String {
         .map(|m| m.trim_end_matches('/').to_string())
         .and_then(|m| {
             // keep the original path: base_url = <scheme>://<host><path>
-            let after = man.base_url.splitn(2, "://").nth(1)?;
+            let after = man.base_url.split_once("://")?.1;
             let slash = after.find('/')?;
             Some(format!("{}{}", m, &after[slash..]))
         })
@@ -189,7 +189,7 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
-        let mut child = std::process::Command::new(py)
+        let child = std::process::Command::new(py)
             .args(["-m", "http.server", &port.to_string(), "--bind", "127.0.0.1"])
             .current_dir(&dir)
             .stdout(std::process::Stdio::null())

@@ -34,6 +34,7 @@ await page.addInitScript(() => {
       if (cmd === 'conns_list') return Promise.resolve([{ host_id: HOST.id, port: 8088, status: 'connected' }]);
       if (cmd === 'conn_status') return Promise.resolve(['connected', 8088]);
       if (cmd === 'host_meta') return Promise.resolve(meta);
+      if (cmd === 'host_meta_refresh') return Promise.resolve(meta);
       if (cmd === 'daemon_update') {
         window.__CALLS__.push(['daemon_update', args.host_id, Object.keys(args ?? {})]);
         return Promise.resolve('installed');

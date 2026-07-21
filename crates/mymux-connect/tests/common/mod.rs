@@ -33,6 +33,8 @@ pub struct TestSshd {
     pub cfg: HostConfig,
     pub dir: PathBuf,
     /// sshd's -E log (auth lines are only present when spawned verbose).
+    // Not every test binary reads it — silence dead-code in those binaries.
+    #[allow(dead_code)]
     pub log: PathBuf,
     child: Option<std::process::Child>,
 }

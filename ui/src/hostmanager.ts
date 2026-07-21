@@ -22,6 +22,9 @@ interface HostStore {
 }
 
 // Mirrors the Rust `Status` (serde: unit variants → string; data variants → object).
+// The supervisor's transient progress/diagnostic `Note`s never arrive as a
+// status: the app folds them into `why` on the current phase, so `{ error }`
+// here is always TERMINAL (settle-worthy) and `why` is how progress rides along.
 type Status =
   | 'connecting'
   | 'connected'
@@ -134,7 +137,14 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   }
 
   // ---- views ----
+  // View generation (C-23): every view switch claims the next generation, and
+  // a showList() whose I/O resolves LATE (a slow hosts_list/conns_list) must
+  // not erase a view the user opened meanwhile (Add/Edit/Connect/Uninstall).
+  let viewGen = 0;
+  const claimView = () => ++viewGen;
+
   async function showList() {
+    const gen = claimView();
     statusEl = null;
     attempt = null;
     // Reopening must look free: every card repaints from in-memory state and
@@ -142,6 +152,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     // it to the top.
     const scrollTop = (panel.querySelector('.host-inner') as HTMLElement | null)?.scrollTop ?? 0;
     const [store, conns] = await Promise.all([loadHosts(), loadConns()]);
+    if (gen !== viewGen) return; // a newer view took over while I/O was in flight
     const root = el('div', 'host-inner');
     root.appendChild(el('div', 'host-title', 'Connect to a host'));
     if (!store.hosts.length) {
@@ -339,6 +350,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   }
 
   function showUninstall(h: Host) {
+    claimView();
     statusEl = null;
     let probed = false;
     let busy = false;
@@ -450,6 +462,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   }
 
   function showConnect(h: Host) {
+    claimView();
     const root = el('div', 'host-inner');
     const back = el('button', 'host-back', '← hosts');
     back.onclick = () => {
@@ -492,7 +505,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   }
 
   function showForm(h?: Host) {
-    statusEl = null;
+    claimView();
     const root = el('div', 'host-inner');
     const back = el('button', 'host-back', '← hosts');
     back.onclick = () => showList();
@@ -523,13 +536,16 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
         identity_path: ident.value.trim() || '~/.ssh/id_ed25519',
       };
       if (!host.hostname || !host.user) {
-        alert('Hostname and user are required.');
+        // No window.alert (inert in the Tauri webview) — the panel's own
+        // inline status line carries validation feedback.
+        setStatus('error', 'Hostname and user are required.');
         return;
       }
       await invoke('host_save', { host, make_default: false });
       void showList();
     };
-    root.appendChild(save);
+    statusEl = el('div', 'host-status');
+    root.append(save, statusEl);
     root.appendChild(closeX());
     panel.replaceChildren(root);
   }
@@ -611,7 +627,7 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
     } else if (s === 'daemon_unreachable') {
       setStatus(
         'error',
-        'mymuxd is installed on that host but won’t start. Logs: journalctl --user -u mymuxd, or /tmp/mymuxd.log',
+        'mymuxd is installed on that host but won’t start. Logs: journalctl --user -u mymuxd, or ~/.local/state/mymux/mymuxd.log',
       );
       settleAttempt();
     } else if (s === 'host_key_mismatch') {
@@ -641,7 +657,8 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   // ---- post-connect meta (daemon version audit + hook review) --------------
   // Refreshed by the daemon on every Connected transition and after each
   // daemon_update; cards paint from this cache INSTANTLY, and a missing or
-  // stale (2 min) entry refreshes in the background without ever blocking a
+  // stale (2 min) entry triggers a REAL remote probe (`host_meta_refresh`,
+  // deduplicated backend-side) in the background without ever blocking a
   // card — opening the manager is not an SSH probe marathon.
   interface DaemonMeta {
     current: string;
@@ -663,7 +680,9 @@ export function initHostManager(hooks: HostManagerHooks): HostManager {
   function refreshHostMeta(hostId: string) {
     if (hostMetaInflight.has(hostId)) return;
     hostMetaInflight.add(hostId);
-    void invoke<HostMeta | null>('host_meta', { host_id: hostId })
+    // A real refresh command, not the `host_meta` cache getter: the TTL used
+    // to re-stamp the cached value as "fresh" without any probe behind it.
+    void invoke<HostMeta | null>('host_meta_refresh', { host_id: hostId })
       .then((m) => {
         if (m) {
           hostMetaCache.set(hostId, { meta: m, at: Date.now() });

@@ -6,15 +6,17 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use mymux_connect::{config_dir, exec_bytes, master_exec_bytes, parse_probe, run_russh_tunnel, DaemonMeta, Host, HostStore, Status, WorkReport, UNINSTALL_SCRIPT};
+use mymux_connect::{config_dir, exec_bytes, fold_status, master_exec_bytes, parse_probe, run_russh_tunnel, DaemonMeta, Host, HostStore, Status, WorkReport, REMOTE_DAEMON_CMD, UNINSTALL_SCRIPT};
 use serde::Serialize;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, State};
 
 /// Idempotent remote-daemon launch: the systemd --user service, else a detached
-/// `setsid`.
+/// `setsid`. The command string lives in mymux-connect so the russh path and
+/// the ssh-binary fallback launch the daemon identically (UID-scoped process
+/// check, absolute binary path, user-owned log dir).
 fn remote_daemon_cmd() -> String {
-    "systemctl --user start mymuxd.service 2>/dev/null || pgrep -x mymuxd >/dev/null 2>&1 || setsid mymuxd >/tmp/mymuxd.log 2>&1 </dev/null &".to_string()
+    REMOTE_DAEMON_CMD.to_string()
 }
 
 struct Active {
@@ -41,6 +43,9 @@ struct ConnState {
     ports: Arc<Mutex<HashMap<String, u16>>>,
     /// Latest post-connect meta probe per host (daemon version + hook map).
     metas: Arc<Mutex<HashMap<String, HostMeta>>>,
+    /// Host ids with a meta refresh probe currently in flight — the dedup
+    /// guard for the UI's TTL-driven `host_meta_refresh`.
+    meta_inflight: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 /// A host's post-connect audit, refreshed on every Connected transition and
@@ -79,31 +84,30 @@ struct ConnInfo {
     why: Option<String>,
 }
 
-/// A free local port for a host's tunnel, from explicit maps (also usable
-/// from spawned closures that only hold Arc clones): its remembered port
-/// when available, else probe upward from 8088, skipping ports held by other
-/// live tunnels. None when the whole 8088-8187 range is taken.
-fn alloc_port_maps(
+/// The tunnel's local listener, bound NOW: the bind IS the reservation, so the
+/// port a host gets can't be sniped between probing and serving (the old
+/// alloc→bind TOCTOU), and the tunnel task then holds the listener for its
+/// whole life — every reconnect cycle serves the SAME port again, so the port
+/// `connect` returns stays authoritative for `ports`, `Active.port`,
+/// `conns_list`, and the UI's workspace URL. Prefers the host's remembered
+/// port, else probes upward from 8088, skipping ports held by other live
+/// tunnels. None when the whole 8088-8187 range is taken.
+async fn bind_listener_maps(
     conns: &Mutex<HashMap<String, Active>>,
     ports: &Mutex<HashMap<String, u16>>,
     host_id: &str,
-) -> Option<u16> {
+) -> Option<tokio::net::TcpListener> {
     let in_use: Vec<u16> = conns.lock().unwrap().values().map(|a| a.port).collect();
-    let free = |p: u16| {
-        !in_use.contains(&p) && std::net::TcpListener::bind(("127.0.0.1", p)).is_ok()
-    };
-    if let Some(&p) = ports.lock().unwrap().get(host_id) {
-        if free(p) {
-            return Some(p);
+    let remembered = ports.lock().unwrap().get(host_id).copied();
+    for p in remembered.into_iter().chain(8088u16..8188) {
+        if in_use.contains(&p) {
+            continue;
+        }
+        if let Ok(l) = tokio::net::TcpListener::bind(("127.0.0.1", p)).await {
+            return Some(l);
         }
     }
-    (8088u16..8188).find(|&p| free(p))
-}
-
-/// A free local port for a host's tunnel, as a Result for command paths.
-fn alloc_port(state: &ConnState, host_id: &str) -> Result<u16, String> {
-    alloc_port_maps(&state.conns, &state.ports, host_id)
-        .ok_or_else(|| "no free local port in 8088-8187".to_string())
+    None
 }
 
 /// Tear down one host's tunnel (if any) and wait for its listener to drop, so a
@@ -280,10 +284,14 @@ fn host_meta(state: State<'_, ConnState>, host_id: String) -> Option<HostMeta> {
     state.metas.lock().unwrap().get(&host_id).cloned()
 }
 
-/// Run one meta probe over a live master and publish it (cache + event). Both
-/// call sites — the Connected-transition watcher and daemon_update — conflate
-/// here so "what the UI shows" always comes from the same store.
+/// Run one meta probe over a live master and publish it (cache + event) — but
+/// only when the probing master is still the LIVE connection's master: one
+/// master Arc exists per connect drive, so an old master's slow probe must
+/// not overwrite a newer connection's cache/event. Both call sites — the
+/// Connected-transition watcher and daemon_update — conflate here so "what
+/// the UI shows" always comes from the same store.
 async fn refresh_host_meta(
+    conns: &Arc<Mutex<HashMap<String, Active>>>,
     metas: &Arc<Mutex<HashMap<String, HostMeta>>>,
     app: &AppHandle,
     host_id: &str,
@@ -297,6 +305,10 @@ async fn refresh_host_meta(
         }
     }
     let meta = HostMeta { daemon, hooks };
+    let current = conns.lock().unwrap().get(host_id).map(|a| a.master.clone());
+    if !matches!(current, Some(m) if std::sync::Arc::ptr_eq(&m, master)) {
+        return; // a newer connection owns this host now — discard the stale probe
+    }
     metas.lock().unwrap().insert(host_id.to_string(), meta.clone());
     let _ = app.emit(
         "mymux:hostmeta",
@@ -305,6 +317,40 @@ async fn refresh_host_meta(
             meta,
         },
     );
+}
+
+/// A REAL remote meta refresh for the UI's TTL lane — the plain `host_meta`
+/// getter only reads the cache, and stamping that as fresh was a lie. One
+/// probe per host at a time: a re-entrant call returns the current cache and
+/// the in-flight probe's `mymux:hostmeta` event delivers the fresh value.
+/// None when the host isn't connected (nothing probed, cache untouched).
+#[tauri::command(rename_all = "snake_case")]
+async fn host_meta_refresh(
+    app: AppHandle,
+    state: State<'_, ConnState>,
+    host_id: String,
+) -> Result<Option<HostMeta>, String> {
+    if !state.meta_inflight.lock().unwrap().insert(host_id.clone()) {
+        return Ok(state.metas.lock().unwrap().get(&host_id).cloned());
+    }
+    let master = state
+        .conns
+        .lock()
+        .unwrap()
+        .get(&host_id)
+        .map(|a| a.master.clone());
+    let probed = if let Some(master) = master {
+        refresh_host_meta(&state.conns, &state.metas, &app, &host_id, &master).await;
+        true
+    } else {
+        false
+    };
+    state.meta_inflight.lock().unwrap().remove(&host_id);
+    if probed {
+        Ok(state.metas.lock().unwrap().get(&host_id).cloned())
+    } else {
+        Ok(None)
+    }
 }
 
 /// Push this app's daemon bundle to a connected host and run the installer —
@@ -322,7 +368,7 @@ async fn daemon_update(
 ) -> Result<String, String> {
     let master = hook_master(&state, &host_id)?;
     let out = mymux_connect::push_daemon_update(&master).await?;
-    refresh_host_meta(&state.metas, &app, &host_id, &master).await;
+    refresh_host_meta(&state.conns, &state.metas, &app, &host_id, &master).await;
     Ok(out)
 }
 
@@ -355,7 +401,16 @@ async fn connect(
         .ok_or_else(|| format!("no such host: {host_id}"))?;
 
     teardown(&state, &host_id).await; // re-drive this host only
-    let port = alloc_port(&state, &host_id)?;
+    // Bind the local listener BEFORE spawning anything: the bind is the
+    // reservation (no alloc→serve race), the tunnel task then holds it for
+    // its whole life, and the port returned below is therefore the port the
+    // tunnel actually serves on — `ports`, `Active.port`, `conns_list`, and
+    // the UI's workspace URL can never drift from it (a reallocated port used
+    // to stay invisible to every one of them).
+    let listener = bind_listener_maps(&state.conns, &state.ports, &host_id)
+        .await
+        .ok_or_else(|| "no free local port in 8088-8187".to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     state.ports.lock().unwrap().insert(host_id.clone(), port);
 
     let cfg = host.to_tunnel_config(port, 8088, remote_daemon_cmd(), trust_host_key.unwrap_or(false));
@@ -364,58 +419,64 @@ async fn connect(
     let master = std::sync::Arc::new(mymux_connect::Master::new(cfg.clone(), passphrase));
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Status>(32);
 
-    // Forward tunnel status to the webview, tagged with the host id. Every
-    // transition INTO Connected fires one background meta probe (daemon
+    // Forward tunnel status to the webview, tagged with the host id. The raw
+    // stream is folded through `fold_status`: transient Notes update only the
+    // `why` channel — they can neither replace the last real phase (a one-off
+    // health miss must not paint 'error' over a healthy tunnel) nor settle
+    // the UI's connect attempt (a pre-install note is progress, not failure).
+    // Every transition INTO Connected fires one background meta probe (daemon
     // version audit + agent-hook review) on the same master — this is the
     // check that also catches a still-running OLD daemon, which the
     // zero-touch installer never sees (it only acts on DaemonUnreachable).
     let statuses = state.statuses.clone();
     let reasons = state.reasons.clone();
+    let conns2 = state.conns.clone();
     let metas = state.metas.clone();
     let hid = host_id.clone();
     let app2 = app.clone();
     let master3 = master.clone();
     let forwarder = tauri::async_runtime::spawn(async move {
         let mut was_connected = false;
+        let mut stored: Option<Status> = None;
+        let mut reason: Option<String> = None;
         while let Some(s) = rx.recv().await {
-            // Error notes carry the WHY; everything else carries the state.
-            if let Status::Error(why) = &s {
-                reasons.lock().unwrap().insert(hid.clone(), why.clone());
+            let phase = fold_status(&mut stored, &mut reason, s);
+            statuses.lock().unwrap().insert(hid.clone(), phase.clone());
+            match &reason {
+                Some(r) => {
+                    reasons.lock().unwrap().insert(hid.clone(), r.clone());
+                }
+                None => {
+                    reasons.lock().unwrap().remove(&hid);
+                }
             }
-            if s == Status::Connected {
-                reasons.lock().unwrap().remove(&hid);
-            }
-            statuses.lock().unwrap().insert(hid.clone(), s.clone());
-            let why = reasons.lock().unwrap().get(&hid).cloned();
             let _ = app2.emit(
                 "mymux:status",
                 StatusEvent {
                     host_id: hid.clone(),
-                    status: s.clone(),
-                    why,
+                    status: phase.clone(),
+                    why: reason.clone(),
                 },
             );
-            let now_connected = s == Status::Connected;
+            let now_connected = phase == Status::Connected;
             if now_connected && !was_connected {
-                let (m, h, a, ms) = (master3.clone(), hid.clone(), app2.clone(), metas.clone());
+                let (m, h, a, ms, cs) = (
+                    master3.clone(),
+                    hid.clone(),
+                    app2.clone(),
+                    metas.clone(),
+                    conns2.clone(),
+                );
                 tauri::async_runtime::spawn(async move {
-                    refresh_host_meta(&ms, &a, &h, &m).await;
+                    refresh_host_meta(&cs, &ms, &a, &h, &m).await;
                 });
             }
             was_connected = now_connected;
         }
     });
     let master2 = master.clone();
-    let task = tauri::async_runtime::spawn({
-        let conns_c = state.conns.clone();
-        let ports_c = state.ports.clone();
-        let hid_c = host_id.clone();
-        async move {
-            // A held port is transient: the supervisor re-asks for a fresh
-            // port and retries instead of dying on the first failed bind.
-            let realloc = move || alloc_port_maps(&conns_c, &ports_c, &hid_c);
-            run_russh_tunnel(cfg, &master2, tx, realloc).await;
-        }
+    let task = tauri::async_runtime::spawn(async move {
+        run_russh_tunnel(cfg, &master2, tx, listener).await;
     });
 
     state
@@ -443,6 +504,7 @@ pub fn run() {
             agent_hook_status,
             agent_hook,
             host_meta,
+            host_meta_refresh,
             daemon_update
         ])
         .run(tauri::generate_context!())
