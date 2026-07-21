@@ -186,13 +186,15 @@ jobs:
       - name: build mymux.dmg (ad-hoc signed by cargo tauri build)
         run: cargo tauri build
       # Post-build proof for P1-18: the manifest is include_str!'d into the
-      # binary, so its asset sha must be grep-able in the built app.
+      # binary, so its asset sha must be grep-able in the SHIPPED app bundle
+      # (the raw binary is `mymux-app` per Cargo.toml, not `mymux` — probe
+      # the bundle, which also covers the bundling step itself).
       - name: assert the built app embeds the verified manifest
         run: |
           set -euo pipefail
           SHA="$(python3 -c 'import json; m=json.load(open("src-tauri/resources/daemon/bundles.json")); print(next(iter(m["assets"].values()))["sha256"])')"
-          BIN="src-tauri/target/release/mymux"
-          [ -f "$BIN" ] || { echo "app binary missing at $BIN"; exit 1; }
+          BIN="$(ls src-tauri/target/release/bundle/macos/mymux.app/Contents/MacOS/* | head -1)"
+          [ -n "$BIN" ] && [ -f "$BIN" ] || { echo "app binary missing inside mymux.app"; exit 1; }
           grep -q "$SHA" "$BIN" \
             && echo "OK: $BIN embeds the verified manifest" \
             || { echo "FAIL: $BIN does not embed the verified manifest"; exit 1; }
