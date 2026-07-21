@@ -23,8 +23,47 @@ interface LspInfo {
   fs_root?: string;
 }
 
-// One client (= one WS = one language server) per (daemon, workspace root).
-const conns = new Map<string, LSPClient>();
+// One client (= one WS = one language server) per (daemon, language,
+// workspace root) — the language dimension matters: two languages resolving
+// to the same root must NOT cross-wire to the first server (P1-08). A dropped
+// socket reconnects IN PLACE with backoff — the same LSPClient object
+// re-initializes, so buffers already holding its plugin heal instead of
+// stranding on a dead transport (P1-09).
+interface Conn {
+  client: LSPClient;
+  attempts: number;
+  timer?: number;
+}
+const conns = new Map<string, Conn>();
+
+/** (Re)connect the client over a fresh socket; on drop, schedule the next
+ * attempt with exponential backoff (capped). `disconnect()` resets
+ * `initializing`, and the library's `workspace.connected()` re-opens every
+ * file with its full current doc on the new server — no state is lost. */
+function connectConn(conn: Conn, wsUrl: string) {
+  conn.client.connect(
+    wsTransport(wsUrl, () => {
+      conn.client.disconnect();
+      conn.attempts += 1;
+      window.clearTimeout(conn.timer);
+      conn.timer = window.setTimeout(
+        () => connectConn(conn, wsUrl),
+        Math.min(15000, 1000 * 2 ** conn.attempts),
+      );
+    }),
+  );
+  void conn.client.initializing.then(
+    () => {
+      conn.attempts = 0; // healthy again — the next drop starts short
+    },
+    () => {},
+  );
+}
+
+// LSP URIs are real URLs: escape EVERY path segment. A bare encodeURI leaks
+// '#'/'?' in file names — the server then parses a fragment/query into the
+// path and never finds the document.
+const fileUri = (abs: string) => `file://${abs.split('/').map(encodeURIComponent).join('/')}`;
 
 // ---- cross-file goto (C2) ---------------------------------------------------
 // The library asks Workspace.displayFile(uri) when a jump targets another
@@ -96,7 +135,15 @@ class MymuxWorkspace extends Workspace {
     const open = this.getFile(uri)?.getView();
     if (open) return open;
     if (!uri.startsWith('file://') || !fileOpener) return null;
-    return fileOpener(decodeURI(uri.slice('file://'.length)));
+    // Inverse of fileUri: per-segment decode (a global decodeURI would mangle
+    // %23-encoded '#' names and choke on a stray '%').
+    return fileOpener(
+      uri
+        .slice('file://'.length)
+        .split('/')
+        .map(decodeURIComponent)
+        .join('/'),
+    );
   }
 }
 
@@ -312,6 +359,14 @@ function wsTransport(url: string, onDown: () => void): Transport {
   const handlers = new Set<(value: string) => void>();
   const queue: string[] = [];
   const ws = new WebSocket(url);
+  // A drop fires onerror AND onclose — report it once.
+  let down = false;
+  const fire = () => {
+    if (!down) {
+      down = true;
+      onDown();
+    }
+  };
   ws.onopen = () => {
     for (const m of queue) ws.send(m);
     queue.length = 0;
@@ -319,8 +374,8 @@ function wsTransport(url: string, onDown: () => void): Transport {
   ws.onmessage = (ev) => {
     if (typeof ev.data === 'string') for (const h of handlers) h(ev.data);
   };
-  ws.onclose = onDown;
-  ws.onerror = onDown;
+  ws.onclose = fire;
+  ws.onerror = fire;
   return {
     send(message: string) {
       if (ws.readyState === WebSocket.OPEN) ws.send(message);
@@ -461,41 +516,47 @@ export function notifySaved(view: EditorView) {
 /**
  * The LSP editor extension for a file (diagnostics, hover, completion, …), or
  * null when the language is unsupported or the server is unavailable — the
- * editor then simply opens without language smarts.
+ * editor then simply opens without language smarts. `root` is the panel's
+ * root-switcher override: the daemon validates it like /fs and resolves the
+ * server cwd, the workspace root, and this file's URI from it (P1-06).
  */
 export async function lspExtensionFor(
   apiBase: string,
   pane: number | null,
   relPath: string,
+  root: string | null = null,
 ): Promise<Extension | null> {
   const lang = langOf(relPath);
   if (!lang) return null;
   try {
     const paneQ = pane != null ? `pane=${pane}&` : '';
-    const r = await fetch(`${apiBase}/lsp/info?${paneQ}lang=${lang}`);
+    const rootQ = root ? `root=${encodeURIComponent(root)}&` : '';
+    const r = await fetch(`${apiBase}/lsp/info?${paneQ}${rootQ}lang=${lang}`);
     if (!r.ok) return null;
     const info: LspInfo = await r.json();
     if (!info.available || !info.root || !info.fs_root) return null;
 
-    const key = `${apiBase}|${info.root}`;
-    let client = conns.get(key);
-    if (!client) {
-      client = new LSPClient({
-        rootUri: `file://${info.root}`,
+    const key = `${apiBase}|${lang}|${info.root}`;
+    let conn = conns.get(key);
+    if (!conn) {
+      const client = new LSPClient({
+        rootUri: fileUri(info.root),
         workspace: (c) => new MymuxWorkspace(c),
         extensions: [...languageServerExtensions(), codeActionCaps],
         // rust-analyzer can block requests while indexing a big workspace; the
         // 3s default would spuriously fail the first pulls.
         timeout: 30000,
       });
-      const wsUrl = `${apiBase.replace(/^http/, 'ws')}/lsp?${paneQ}lang=${lang}`;
-      client.connect(wsTransport(wsUrl, () => conns.delete(key)));
-      conns.set(key, client);
+      conn = { client, attempts: 0 };
+      conns.set(key, conn);
+      const wsUrl = `${apiBase.replace(/^http/, 'ws')}/lsp?${paneQ}${rootQ}lang=${lang}`;
+      connectConn(conn, wsUrl);
     }
-    // Relative paths resolve against the pane's cwd (fs_root), which may sit
-    // below the language server's workspace root.
-    const uri = encodeURI(`file://${info.fs_root}/${relPath}`);
-    return [client.plugin(uri, lang), pullDiagnostics()];
+    // Relative paths resolve against the effective root (fs_root: the pane
+    // cwd, or the validated override), which may sit below the language
+    // server's workspace root.
+    const uri = fileUri(`${info.fs_root}/${relPath}`);
+    return [conn.client.plugin(uri, lang), pullDiagnostics()];
   } catch {
     return null;
   }

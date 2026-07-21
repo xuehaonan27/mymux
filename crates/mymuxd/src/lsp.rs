@@ -12,6 +12,7 @@ use std::process::Stdio;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::Query;
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::Json;
 use futures_util::{SinkExt, StreamExt};
@@ -19,13 +20,18 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdout, Command};
 
-use crate::fs::root_for;
+use crate::fs::root_for_req;
 
 #[derive(Deserialize)]
 pub struct LspQuery {
     pane: Option<u32>,
     #[serde(default = "default_lang")]
     lang: String,
+    /// Optional absolute root override (the code panel's root switcher) —
+    /// validated exactly like /fs (a real dir inside $HOME; a present-but-
+    /// invalid one FAILS the request), so diagnostics/edits never point at a
+    /// same-named file under a different root than the text the editor read.
+    root: Option<String>,
 }
 fn default_lang() -> String {
     "rust".to_string()
@@ -90,12 +96,46 @@ fn managed_server(lang: &str) -> Option<(PathBuf, Vec<String>)> {
     None
 }
 
+/// PATH probes are cached process-wide and hard-bounded: a hung shim (the
+/// classic rustup-without-the-component trap) must never stall the editor's
+/// open path. Managed installs skip the probe entirely, so a `/lsp/install`
+/// lands even when an earlier PATH probe cached a miss.
+static PROBE_CACHE: std::sync::OnceLock<
+    tokio::sync::Mutex<std::collections::HashMap<PathBuf, bool>>,
+> = std::sync::OnceLock::new();
+
+/// One hung shim costs at most this, once (the cache remembers the verdict).
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn probe_server(bin: &Path) -> bool {
+    let cache = PROBE_CACHE
+        .get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    // Held across the probe: concurrent opens share one probe (and one cache
+    // write) instead of stampeding the same shim.
+    let mut cache = cache.lock().await;
+    if let Some(&ok) = cache.get(bin) {
+        return ok;
+    }
+    let probe = Command::new(bin)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true) // a timed-out probe dies with its future
+        .status();
+    let runs = tokio::time::timeout(PROBE_TIMEOUT, probe)
+        .await
+        .map(|r| r.map(|s| s.success()).unwrap_or(false))
+        .unwrap_or(false);
+    cache.insert(bin.to_path_buf(), runs);
+    runs
+}
+
 /// Resolve the server launch (binary + args) for a language: a managed
 /// package first — including languages the built-in table doesn't know, when
 /// the user bound one via `mymux-pkg lang` (its manifest carries the launch
-/// args) — then the PATH heuristic for the built-in table (with a
-/// `--version` probe: a rustup shim can exist without the component; managed
-/// installs were verified at install time and skip the probe).
+/// args) — then the PATH heuristic for the built-in table (with a bounded,
+/// cached `--version` probe: a rustup shim can exist without the component;
+/// managed installs were verified at install time and skip the probe).
 async fn resolve_server(lang: &str) -> Option<(PathBuf, Vec<String>)> {
     if let Some((bin, mut args)) = managed_server(lang) {
         // Manifests written before `args` existed have none; for built-in
@@ -109,15 +149,9 @@ async fn resolve_server(lang: &str) -> Option<(PathBuf, Vec<String>)> {
     }
     let (cmd, args) = server_cmd(lang)?;
     let bin = find_server(cmd)?;
-    let runs = Command::new(&bin)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+    probe_server(&bin)
         .await
-        .map(|s| s.success())
-        .unwrap_or(false);
-    runs.then(|| (bin, args.iter().map(|s| s.to_string()).collect()))
+        .then(|| (bin, args.iter().map(|s| s.to_string()).collect()))
 }
 
 /// Locate a server binary. Under systemd --user the daemon's PATH is minimal
@@ -175,10 +209,11 @@ fn nearest(cwd: &Path, markers: &[&str]) -> Option<PathBuf> {
     None
 }
 
-/// The workspace root for a language, walking up from the pane's cwd. For rust
-/// that's the OUTERMOST ancestor with a Cargo.toml (the cargo workspace root).
-async fn lsp_root(pane: Option<u32>, lang: &str) -> Option<PathBuf> {
-    let cwd = root_for(pane).await;
+/// The workspace root for a language, walking up from the request's
+/// (validated) effective root. For rust that's the OUTERMOST ancestor with a
+/// Cargo.toml (the cargo workspace root).
+async fn lsp_root(pane: Option<u32>, lang: &str, root: &Option<String>) -> Option<PathBuf> {
+    let cwd = root_for_req(pane, root).await.ok()?;
     match lang {
         "rust" => {
             let mut found = None;
@@ -212,7 +247,8 @@ pub struct LspInfo {
     /// Language-server workspace root (rootUri = `file://{root}`).
     #[serde(skip_serializing_if = "Option::is_none")]
     root: Option<String>,
-    /// The pane's cwd — what the code panel's relative paths resolve against.
+    /// The effective fs root — what the code panel's relative paths resolve
+    /// against (the pane cwd, or the validated root-switcher override).
     #[serde(skip_serializing_if = "Option::is_none")]
     fs_root: Option<String>,
 }
@@ -227,13 +263,16 @@ fn unavailable(reason: String, fs_root: Option<String>, installable: bool) -> Js
     })
 }
 
-/// `GET /lsp/info?pane=&lang=` — can we serve LSP for this pane, and where from?
-pub async fn info(Query(q): Query<LspQuery>) -> Json<LspInfo> {
-    let fs_root = root_for(q.pane).await.display().to_string();
+/// `GET /lsp/info?pane=&lang=&root=` — can we serve LSP for this pane, and
+/// where from? `root` is the panel's root-switcher override, validated exactly
+/// like /fs: a present-but-invalid one fails the request rather than silently
+/// rooting the language server at a same-named directory.
+pub async fn info(Query(q): Query<LspQuery>) -> Result<Json<LspInfo>, StatusCode> {
+    let fs_root = root_for_req(q.pane, &q.root).await?.display().to_string();
     if resolve_server(&q.lang).await.is_none() {
         // Not resolvable. Built-in languages have a one-recipe install; other
         // languages need the packages panel + a `mymux-pkg lang` binding.
-        return match server_cmd(&q.lang) {
+        return Ok(match server_cmd(&q.lang) {
             Some((cmd, _)) => {
                 unavailable(format!("{cmd} is not installed"), Some(fs_root), true)
             }
@@ -245,9 +284,9 @@ pub async fn info(Query(q): Query<LspQuery>) -> Json<LspInfo> {
                 Some(fs_root),
                 false,
             ),
-        };
+        });
     }
-    match lsp_root(q.pane, &q.lang).await {
+    Ok(match lsp_root(q.pane, &q.lang, &q.root).await {
         Some(root) => Json(LspInfo {
             available: true,
             reason: None,
@@ -260,7 +299,7 @@ pub async fn info(Query(q): Query<LspQuery>) -> Json<LspInfo> {
             Some(fs_root),
             false,
         ),
-    }
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -274,6 +313,10 @@ pub struct InstallResp {
     #[serde(skip_serializing_if = "Option::is_none")]
     err: Option<String>,
 }
+
+/// Installs download and build, so the bound is generous — but still a bound
+/// (kill on drop): a wedged package manager must not park the handler forever.
+const INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// `POST /lsp/install {lang}` — run `mymux-pkg install --lang <lang>` (sibling
 /// binary next to mymuxd, else PATH). The daemon embeds no acquisition logic;
@@ -290,16 +333,20 @@ pub async fn install(axum::Json(req): axum::Json<InstallReq>) -> Json<InstallRes
         .and_then(|p| p.parent().map(|d| d.join("mymux-pkg")))
         .filter(|p| p.exists())
         .unwrap_or_else(|| PathBuf::from("mymux-pkg"));
-    let out = Command::new(bin)
-        .args(["install", "--lang", &req.lang])
-        .output()
-        .await;
+    let out = tokio::time::timeout(
+        INSTALL_TIMEOUT,
+        Command::new(bin)
+            .args(["install", "--lang", &req.lang])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
     match out {
-        Ok(o) if o.status.success() => Json(InstallResp {
+        Ok(Ok(o)) if o.status.success() => Json(InstallResp {
             ok: true,
             err: None,
         }),
-        Ok(o) => {
+        Ok(Ok(o)) => {
             let tail: String = String::from_utf8_lossy(&o.stderr)
                 .lines()
                 .rev()
@@ -318,14 +365,19 @@ pub async fn install(axum::Json(req): axum::Json<InstallReq>) -> Json<InstallRes
                 }),
             })
         }
-        Err(e) => Json(InstallResp {
+        Ok(Err(e)) => Json(InstallResp {
             ok: false,
             err: Some(format!("mymux-pkg is not installed: {e}")),
+        }),
+        Err(_) => Json(InstallResp {
+            ok: false,
+            err: Some("install timed out (10m) — killed".into()),
         }),
     }
 }
 
-/// `GET /lsp?pane=&lang=` — WebSocket upgrade; one language server per socket.
+/// `GET /lsp?pane=&lang=&root=` — WebSocket upgrade; one language server per
+/// socket. The validated root override feeds the same resolution as /lsp/info.
 pub async fn ws_handler(ws: WebSocketUpgrade, Query(q): Query<LspQuery>) -> Response {
     ws.on_upgrade(move |socket| handle(socket, q))
 }
@@ -334,7 +386,7 @@ async fn handle(socket: WebSocket, q: LspQuery) {
     let Some((bin, args)) = resolve_server(&q.lang).await else {
         return;
     };
-    let Some(root) = lsp_root(q.pane, &q.lang).await else {
+    let Some(root) = lsp_root(q.pane, &q.lang, &q.root).await else {
         return;
     };
 
@@ -412,4 +464,68 @@ async fn read_lsp_frame(r: &mut BufReader<ChildStdout>) -> Option<String> {
     let mut buf = vec![0u8; len?];
     r.read_exact(&mut buf).await.ok()?;
     String::from_utf8(buf).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[tokio::test]
+    async fn probe_is_bounded_and_cached() {
+        let dir = std::env::temp_dir().join(format!("mymux-lsp-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok_sh = script(&dir, "ok-server", "#!/bin/sh\nexit 0\n");
+        let bad_sh = script(&dir, "bad-server", "#!/bin/sh\nexit 1\n");
+        let hang_sh = script(&dir, "hang-server", "#!/bin/sh\nexec sleep 120\n");
+
+        assert!(probe_server(&ok_sh).await);
+        assert!(!probe_server(&bad_sh).await);
+        let t0 = std::time::Instant::now();
+        assert!(!probe_server(&hang_sh).await); // killed at the timeout, not 120s
+        assert!(t0.elapsed() < std::time::Duration::from_secs(60));
+        // Cache hits: same verdicts, instantly (a re-probe of the hung shim
+        // would cost another PROBE_TIMEOUT).
+        let t1 = std::time::Instant::now();
+        assert!(probe_server(&ok_sh).await);
+        assert!(!probe_server(&bad_sh).await);
+        assert!(!probe_server(&hang_sh).await);
+        assert!(t1.elapsed() < PROBE_TIMEOUT);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn lsp_root_uses_the_validated_override() {
+        // A real dir inside $HOME passes the same confinement /fs uses (the
+        // repo's target/tmp qualifies) and roots the marker walk there.
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(format!("target/tmp/lsp-root-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("go.mod"), "module t\n").unwrap();
+        let got = lsp_root(None, "go", &Some(dir.display().to_string())).await;
+        assert_eq!(got, dir.canonicalize().ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn lsp_root_ignores_an_override_outside_home() {
+        // /tmp is outside $HOME: the override must be refused (confinement
+        // parity with /fs) and resolution falls back to the default root.
+        let dir =
+            std::env::temp_dir().join(format!("mymux-lsp-root-escape-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("go.mod"), "module t\n").unwrap();
+        let got = lsp_root(None, "go", &Some(dir.display().to_string())).await;
+        assert_ne!(got, dir.canonicalize().ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

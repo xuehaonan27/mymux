@@ -1,14 +1,30 @@
-// Language-coverage check: open files of several types in the code panel and
-// verify CodeMirror emits STYLED spans (highlighting) — plain text would have
-// none. Screenshot each for the visual record.
+// Language-coverage check against a sandboxed daemon: open files of several
+// types in the code panel and verify CodeMirror emits STYLED spans
+// (highlighting) — plain text would have none. Screenshot each for the
+// visual record. Fixture: ~/ux-lang-test (created here).
 import { chromium } from 'playwright-core';
+import { startSandbox } from './sandbox.mjs';
 import { mkdirSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 
-const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
+const sb = await startSandbox(8064, 'langcheck');
+process.on('exit', () => sb.kill());
+const UI = process.env.UI ?? sb.ui;
 const SHOTS = new URL('./shots/', import.meta.url).pathname;
 mkdirSync(SHOTS, { recursive: true });
 
 const FILES = ['main.go', 'config.yaml', 'script.sh', 'Dockerfile', 'main.cpp', 'plain.xyz'];
+
+// Materialize the fixture (tree navigation starts at the pane's $HOME).
+execSync(`
+  mkdir -p ~/ux-lang-test
+  printf 'package main\\n\\nimport "fmt"\\n\\nfunc main() {\\n\\tfmt.Println("hi")\\n}\\n' > ~/ux-lang-test/main.go
+  printf 'name: demo\\nitems:\\n  - one\\n  - two\\nenabled: true\\n' > ~/ux-lang-test/config.yaml
+  printf '#!/bin/sh\\nset -e\\necho "hi $USER"\\n' > ~/ux-lang-test/script.sh
+  printf 'FROM alpine:3\\nRUN echo hi\\nCOPY . /app\\n' > ~/ux-lang-test/Dockerfile
+  printf '#include <cstdio>\\n\\nint main() { std::puts("hi"); return 0; }\\n' > ~/ux-lang-test/main.cpp
+  printf 'just plain text, no language\\n' > ~/ux-lang-test/plain.xyz
+`);
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
@@ -73,6 +89,7 @@ for (const f of FILES) {
   await page.screenshot({ path: `${SHOTS}lang-${f.replace(/\W+/g, '_')}.png` });
 }
 await browser.close();
+sb.kill();
 if (fails.length) {
   console.error('FAILURES:', fails.join(', '));
   process.exit(1);

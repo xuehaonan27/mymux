@@ -1,10 +1,14 @@
-// Markdown preview end-to-end: rendering, the sanitizer chain against real
-// XSS payloads, relative-resource rewriting through /fs/raw, and the
-// toggle round-trip. Non-md files don't get the button at all.
+// Markdown preview end-to-end against a sandboxed daemon: rendering, the
+// sanitizer chain against real XSS payloads, relative-resource rewriting
+// through /fs/raw, and the toggle round-trip. Non-md files don't get the
+// button at all.
 import { chromium } from 'playwright-core';
+import { startSandbox } from './sandbox.mjs';
 import { execSync } from 'node:child_process';
 
-const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
+const sb = await startSandbox(8063, 'mdcheck');
+process.on('exit', () => sb.kill());
+const UI = process.env.UI ?? sb.ui;
 const REPO = '/home/xuehaonan/ux-git-ops';
 const fails = [];
 const check = (name, cond, detail = '') => {
@@ -113,6 +117,7 @@ check('editor back after toggle off', await page.locator('.cm-content').isVisibl
 
 await page.screenshot({ path: 'shots/md-preview.png' });
 await browser.close();
+sb.kill();
 // Fixture hygiene: the add/never-commit flow leaves the index dirty otherwise.
 git('reset -q --hard origin/master');
 git('clean -fdq');

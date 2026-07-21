@@ -1,10 +1,13 @@
-// Code-panel batch checks against a live daemon:
+// Code-panel batch checks against a sandboxed daemon (own ptyd/socket/port):
 //   root switcher (↑ / ⌂ / ⎇), changes list rows (deep links into the git
 //   surface since design B — diff checks live in gitchangescheck.mjs now)
 //   — inside a throwaway git repo at ~/ux-git-test.
 import { chromium } from 'playwright-core';
+import { startSandbox } from './sandbox.mjs';
 
-const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
+const sb = await startSandbox(8061, 'codecheck');
+process.on('exit', () => sb.kill());
+const UI = process.env.UI ?? sb.ui;
 const fails = [];
 const check = (name, cond, detail = '') => {
   console.log(`${cond ? '✓' : '✗ FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
@@ -69,6 +72,7 @@ check('Changes page on top', ((await page.locator('.git-tab.on').textContent()) 
 check('workbench opened on file.txt', ((await page.locator('.git-workbench .git-detail-title').textContent()) ?? '').includes('file.txt'));
 
 await browser.close();
+sb.kill();
 if (fails.length) {
   console.error('FAILURES:', fails.join(' | '));
   process.exit(1);

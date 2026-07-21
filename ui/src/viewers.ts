@@ -8,6 +8,8 @@ export interface ViewerCtx {
   apiBase: string;
   pane: number | null;
   path: string;
+  /** The panel's root-switcher override (null = the pane's cwd). */
+  root: string | null;
   /** URL serving the file's raw bytes (optionally just a prefix). */
   rawUrl(limit?: number): string;
 }
@@ -30,15 +32,25 @@ export function viewerFor(path: string): Viewer | null {
   return registry.find((v) => v.matches(path)) ?? null;
 }
 
-export function makeCtx(apiBase: string, pane: number | null, path: string): ViewerCtx {
+export function makeCtx(
+  apiBase: string,
+  pane: number | null,
+  path: string,
+  root: string | null = null,
+): ViewerCtx {
   return {
     apiBase,
     pane,
     path,
+    root,
     rawUrl(limit?: number) {
       const paneQ = pane != null ? `&pane=${pane}` : '';
+      // Like every other code-panel read: the root override rides along, or
+      // the daemon resolves path against the pane cwd (P1-07 — a same-named
+      // file there would serve the WRONG bytes).
+      const rootQ = root ? `&root=${encodeURIComponent(root)}` : '';
       const lim = limit != null ? `&limit=${limit}` : '';
-      return `${apiBase}/fs/raw?path=${encodeURIComponent(path)}${paneQ}${lim}`;
+      return `${apiBase}/fs/raw?path=${encodeURIComponent(path)}${paneQ}${rootQ}${lim}`;
     },
   };
 }

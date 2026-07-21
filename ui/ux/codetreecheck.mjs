@@ -1,4 +1,4 @@
-// Code-panel tree UX checks against the live dev daemon (8099):
+// Code-panel tree UX checks against a sandboxed daemon (own ptyd/socket/port):
 //   #1 tree expansion survives panel close/reopen (per-session memory),
 //   #3 the ▸ all / ▾ all toggle (expand-all skips dependency forests),
 //   #4 side-panel search in name AND content modes (daemon walk skips
@@ -7,9 +7,12 @@
 //      host strip off AND forced on.
 // Fixture: ~/ux-code-tree (created here).
 import { chromium } from 'playwright-core';
+import { startSandbox } from './sandbox.mjs';
 import { execSync } from 'node:child_process';
 
-const UI = process.env.UI ?? 'http://127.0.0.1:5173/?port=8099';
+const sb = await startSandbox(8062, 'codetree');
+process.on('exit', () => sb.kill());
+const UI = process.env.UI ?? sb.ui;
 const fails = [];
 const check = (name, cond, detail = '') => {
   console.log(`${cond ? '✓' : '✗ FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
@@ -152,6 +155,7 @@ await page.evaluate(() => {
 await page.keyboard.press('Control+e').catch(() => {});
 await page.screenshot({ path: 'shots/codetree.png' });
 await browser.close();
+sb.kill();
 if (fails.length) {
   console.error('FAILURES:', fails.join(' | '));
   process.exit(1);

@@ -122,12 +122,19 @@ async function fsWrite(
   content: string,
   root: string | null = null,
 ): Promise<boolean> {
-  const r = await fetch(`${apiBase()}/fs/write`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ path, content, pane: pane ?? undefined, root: root ?? undefined }),
-  });
-  return r.ok;
+  try {
+    const r = await fetch(`${apiBase()}/fs/write`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path, content, pane: pane ?? undefined, root: root ?? undefined }),
+    });
+    return r.ok;
+  } catch {
+    // A dropped connection REJECTS fetch — that is a save failure too, and
+    // the caller must see it (an unhandled rejection used to vanish into
+    // the keymap's `void save()`).
+    return false;
+  }
 }
 async function gitStatus(
   pane: number | null,
@@ -166,6 +173,11 @@ interface BlameGroup {
 /** Blame view lives in a Compartment so toggling never rebuilds the buffer's
  * state (undo history survives); the snapshot in Buffer.state carries it. */
 const blameSlot = new Compartment();
+
+/** LSP lives in a Compartment for the same reason: it attaches
+ * asynchronously AFTER the text mounts (a slow /lsp/info probe may never hold
+ * content hostage), and folding it in must not rebuild the state. */
+const lspSlot = new Compartment();
 
 const relDate = (t: number) => {
   const sec = Math.max(1, Date.now() / 1000 - t);
@@ -597,6 +609,8 @@ type Buffer =
       savedDoc: string; // last saved contents (dirty = editor doc differs)
       state: EditorState; // doc + history + selection
       dirty: boolean; // cached for background buffers; live one uses isDirty()
+      /** In-flight write chain — saves of one buffer serialize on it. */
+      writing?: Promise<void>;
       /** Non-null while the blame gutter is on for this buffer. */
       blame?: BlameGroup[] | null;
       /** True while the markdown PREVIEW is showing (md buffers). */
@@ -609,6 +623,10 @@ interface Session {
   root: string | null;
   path: string | null; // buffer currently in the editor, or null
   buffers: Map<string, Buffer>;
+  /** Latest-open-wins token: every openFile entry bumps it, each async step
+   * re-checks it — two files share a session, so a slow read for A may not
+   * commit after a later click on B. */
+  openGen: number;
   /** Tree dirs the user has opened — the session outlives panel close/reopen,
    * so a reopened panel rebuilds the same expansion instead of collapsing
    * everything back to the root. */
@@ -769,7 +787,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     const k = keyOf(p, root);
     let s = sessions.get(k);
     if (!s) {
-      s = { pane: p, root, path: null, buffers: new Map(), expanded: new Set() };
+      s = { pane: p, root, path: null, buffers: new Map(), expanded: new Set(), openGen: 0 };
       sessions.set(k, s);
     }
     return s;
@@ -1106,7 +1124,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     });
   })();
 
-  function fileState(path: string, doc: string, lsp: Extension | null): EditorState {
+  function fileState(path: string, doc: string): EditorState {
     return EditorState.create({
       doc,
       extensions: [
@@ -1115,7 +1133,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
         themed(),
         langFor(path),
         blameSlot.of([]), // the blame gutter toggles in here, never a rebuild
-        ...(lsp ? [lsp] : []),
+        lspSlot.of([]), // LSP folds in here asynchronously (attachLsp)
         jumpLinkExt,
         keymap.of([
           { key: 'Mod-s', preventDefault: true, run: () => (void save(), true) },
@@ -1169,7 +1187,7 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     pathEl.textContent = `${path} — ${v.name}`;
     pathEl.style.color = '';
     viewerEl.replaceChildren();
-    void v.render(makeCtx(apiBase(), s.pane, path), viewerEl);
+    void v.render(makeCtx(apiBase(), s.pane, path, s.root), viewerEl);
     editorParent.style.display = 'none';
     mdpEl.style.display = 'none';
     phEl.style.display = '';
@@ -1204,30 +1222,58 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     const s = current;
     const b = curBuf();
     if (!b || b.kind !== 'text') return;
+    // Capture EVERYTHING before the first await (P0-01): switching files
+    // mid-write must not leak the newly shown file's state into this buffer —
+    // the shared editor and the mutable session re-read AFTER the await were
+    // storing B's EditorState in A's buffer (the next "save A" then wrote B's
+    // content into A on disk).
+    const path = s.path!; // the entry guard pinned current.path
+    const pane = s.pane;
+    const root = s.root;
     const doc = editor.state.doc.toString();
-    const ok = await fsWrite(s.pane, s.path!, doc, s.root);
+    // Writes serialize per buffer: a second ⌘S queues behind the in-flight
+    // one, so an older request can never complete after a newer one.
+    const prev = b.writing ?? Promise.resolve();
+    const run: Promise<boolean> = prev.then(() => fsWrite(pane, path, doc, root));
+    b.writing = run.then(
+      () => undefined,
+      () => undefined, // fsWrite already eats network errors; keep the chain alive
+    );
+    const ok = await run;
     if (ok) {
+      // The write landed for the CAPTURED path: update only that buffer.
       b.savedDoc = doc;
-      b.dirty = false;
-      b.state = editor.state;
-      // The disk now matches the buffer: let the language server know
-      // (rust-analyzer runs cargo check off didSave → compiler-tier errors).
-      notifySaved(editor);
-      const p = s.path;
-      pathEl.textContent = `${p}   ✓ saved`;
+      // The visible editor/LSP/header are touched only while that buffer is
+      // still the mounted one.
+      const live = current === s && s.path === path ? editor : null;
+      if (live) b.state = live.state; // newest snapshot (incl. post-submit edits)
+      b.dirty = b.state.doc.toString() !== doc; // edits after the submit re-dirty it
       renderBufs();
-      void loadChanges(); // the write flips porcelain state — badges + tree colors
-      setTimeout(() => {
-        if (current === s && current.path === p) renderHeader();
-      }, 1200);
-    } else {
-      pathEl.textContent = `${s.path}   ✗ save failed`;
+      if (live) {
+        // The disk now matches the buffer: let the language server know
+        // (rust-analyzer runs cargo check off didSave → compiler-tier errors).
+        notifySaved(live);
+        pathEl.textContent = `${path}   ✓ saved`;
+        void loadChanges(); // the write flips porcelain state — badges + tree colors
+        setTimeout(() => {
+          if (current === s && current.path === path) renderHeader();
+        }, 1200);
+      }
+    } else if (current === s && s.path === path) {
+      pathEl.textContent = `${path}   ✗ save failed`;
     }
   }
 
   async function openFile(path: string) {
     if (!current) return;
     const s = current;
+    // Latest open wins: every entry bumps the session's open generation and
+    // each async step re-checks it (P1-05 — two files share a session, so a
+    // slow read for A may not commit after a later click on B). The root is
+    // captured with the generation (P1-06).
+    const gen = ++s.openGen;
+    const root = s.root;
+    const alive = () => current === s && s.openGen === gen;
     const existing = s.buffers.get(path);
     // Viewer buffers re-render fresh (they hold no local state worth keeping).
     if (existing?.kind === 'viewer') {
@@ -1251,9 +1297,9 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     // Clean (or new) buffers read the disk so agent-made edits show up.
     let content: string;
     try {
-      content = await fsRead(s.pane, path, s.root);
+      content = await fsRead(s.pane, path, root);
     } catch (e) {
-      if (current !== s) return;
+      if (!alive()) return;
       const status = (e as { status?: number }).status;
       if (status === 415 || status === 400) {
         // Binary / too large → a viewer (pdf, image, hex) — and a real tab,
@@ -1270,25 +1316,42 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       }
       return;
     }
-    if (current !== s) return; // switched panes mid-read
+    if (!alive()) return; // a newer open won while we read
     stash();
     if (existing && content === existing.savedDoc) {
       // Disk unchanged: restore the old state (keeps undo history).
       s.path = path;
       mount(existing.state);
     } else {
-      // Language smarts when available; absent/failed → plain editor. (No
-      // auto-nagging about missing servers — the packages panel is where
-      // installs live, at the user's initiative.)
-      const lsp = await lspExtensionFor(apiBase(), s.pane, path);
-      if (current !== s) return;
+      // Plain text mounts FIRST; language smarts fold in asynchronously via
+      // attachLsp — a slow or hung /lsp/info probe can no longer hold the
+      // editor's open path hostage (C-31).
       s.path = path;
-      const state = fileState(path, content, lsp);
+      const state = fileState(path, content);
       s.buffers.set(path, { kind: 'text', savedDoc: content, state, dirty: false });
       mount(state);
+      void attachLsp(s, path, root, gen);
     }
     renderHeader();
     editor!.focus();
+  }
+
+  /** Fold the LSP extension into an opened buffer, OFF the open path (panel
+   * I/O discipline): the live editor reconfigures in place (undo history
+   * survives the compartment swap); a backgrounded buffer's stored state is
+   * updated for its next remount. Absent/failed servers leave a plain
+   * editor — no auto-nagging, installs live in the packages panel. */
+  async function attachLsp(s: Session, path: string, root: string | null, gen: number) {
+    const lsp = await lspExtensionFor(apiBase(), s.pane, path, root);
+    if (!lsp) return;
+    const b = s.buffers.get(path);
+    if (!b || b.kind !== 'text') return;
+    if (current === s && s.path === path && s.openGen === gen && editor) {
+      editor.dispatch({ effects: lspSlot.reconfigure(lsp) });
+      b.state = editor.state;
+    } else {
+      b.state = b.state.update({ effects: lspSlot.reconfigure(lsp) }).state;
+    }
   }
 
   /** The git decoration class for one tree row (empty string when clean or
@@ -1524,9 +1587,14 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
   let treeRetryTimer: number | undefined;
   let treeFailCount = 0;
   const TREE_RETRY_MAX = 4;
+  // Refresh lanes guard REQUEST ORDER, not just the session (C-22): an older
+  // fetch in the same session may not commit after a newer one.
+  let treeGen = 0;
+  let changesGen = 0;
 
   async function loadTree() {
     const s = current;
+    const gen = ++treeGen;
     void refreshSubmodules(s);
     // Sync the fold button from the session set UP FRONT: remembered dirs
     // render expanded from the kept/preserved rows instantly, so a mid-fetch
@@ -1539,13 +1607,13 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
     try {
       items = await fsList(s?.pane ?? null, '', s?.root ?? null);
     } catch (e) {
-      if (current !== s) return;
+      if (current !== s || gen !== treeGen) return;
       treeFailCount += 1;
       if (treeFailCount <= TREE_RETRY_MAX) {
         treeEl.replaceChildren(treeStat(`⚠ ${fsErrText(e)} — retry ${treeFailCount}/${TREE_RETRY_MAX} in 2.5s…`, 0));
         window.clearTimeout(treeRetryTimer);
         treeRetryTimer = window.setTimeout(() => {
-          if (current === s) void loadTree();
+          if (current === s && gen === treeGen) void loadTree();
         }, 2500);
       } else {
         treeFailCount = 0;
@@ -1553,12 +1621,15 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       }
       return;
     }
-    if (current !== s) return; // switched panes mid-fetch
+    if (current !== s || gen !== treeGen) return; // switched panes mid-fetch, or a newer refresh won
     treeFailCount = 0;
     window.clearTimeout(treeRetryTimer);
+    // Rebuilding the rows may not drop the user's place (C-22).
+    const scroll = treeEl.scrollTop;
     treeEl.replaceChildren();
     if (!items.length) treeEl.appendChild(treeStat('(empty directory)', 0));
     for (const c of items) treeEl.appendChild(treeItem(c.name, c.name, c.dir, 0));
+    treeEl.scrollTop = scroll;
     syncFoldBtn();
     decorateTree(); // rows were rebuilt — bring the git colors back
   }
@@ -1803,10 +1874,11 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
 
   async function loadChanges() {
     const s = current;
+    const gen = ++changesGen;
     // One fetch feeds BOTH the changes list and the tree decorations — the
     // two never disagree about what git sees.
     const files = await gitStatus(s?.pane ?? null, s?.root ?? null, true);
-    if (current !== s) return;
+    if (current !== s || gen !== changesGen) return;
 
     // Decoration maps, root-relative (status paths are prefix-relative too,
     // so keys match the tree rows directly; ../ rows live outside the view).
@@ -1924,7 +1996,12 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
       const paneQ = s.pane != null ? `pane=${s.pane}&` : '';
       const rootQ = s.root ? `root=${encodeURIComponent(s.root)}&` : '';
       void fetch(`${apiBase()}/fs/root?${paneQ}${rootQ}`)
-        .then((r) => r.json())
+        .then((r) => {
+          // 403/404 (invalid override / stale pane) has an empty body — fail
+          // fast instead of json-parsing it; the last good fsRoot stays.
+          if (!r.ok) throw new Error(String(r.status));
+          return r.json();
+        })
         .then((j: { root?: string }) => {
           if (j.root && current === s) {
             s.fsRoot = j.root;
