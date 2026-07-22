@@ -123,7 +123,11 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
         rows.push(note('the mymux catalog — curated, pinned upstream releases'));
         render(api, rows);
       } catch {
-        if (!h.catalog && open && my === seq && api !== opts.getApiBase()) {
+        // Same-host, no-cache failure must surface the error (mirrors the
+        // success guard at the top of the try: render only for the CURRENT
+        // host). The inverted `!==` here left an unreachable daemon stuck on
+        // "loading…" forever and could paint a switched-away host's error.
+        if (!h.catalog && open && my === seq && api === opts.getApiBase()) {
           render(api, [note('could not reach the daemon')]);
         }
       } finally {

@@ -18,6 +18,7 @@ const check = (name, cond, detail = '') => {
 
 let installed = false;
 let catalogCalls = 0;
+let catalogFails = false; // when set, the catalog fetch is unreachable
 const catalog = () => [
   {
     name: 'fake-server',
@@ -35,6 +36,7 @@ const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 page.on('pageerror', (e) => console.error('[pageerror]', e.message));
 await page.route('**/pkgs/catalog', async (route) => {
+  if (catalogFails) return route.abort('connectionrefused');
   catalogCalls++;
   await route.fulfill({ json: catalog() });
 });
@@ -78,6 +80,22 @@ await page.waitForFunction(
 );
 check('remove triggered a catalog refetch', catalogCalls > before, `calls=${catalogCalls}`);
 check('button settles on Install after remove', (await cardBtn.textContent()) === 'Install', await cardBtn.textContent());
+
+// Unreachable daemon, no cache (#33 regression guard): install nulls the
+// catalog cache, then the refetch fails — the panel MUST surface the error,
+// not sit on "loading…" forever. (An inverted same-host guard did the latter.)
+catalogFails = true;
+await cardBtn.click(); // install → cache=null → refetch aborts → catch path
+await page.waitForFunction(
+  () => (document.querySelector('.pkgs-panel')?.textContent ?? '').includes('could not reach the daemon'),
+  undefined,
+  { timeout: 8000 },
+);
+check(
+  'unreachable daemon surfaces the error (not stuck on loading…)',
+  ((await page.locator('.pkgs-panel').textContent()) ?? '').includes('could not reach the daemon'),
+);
+catalogFails = false;
 
 await page.screenshot({ path: 'shots/pkgs-mut.png' });
 await browser.close();
