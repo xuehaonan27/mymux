@@ -46,6 +46,12 @@ struct ConnState {
     /// Host ids with a meta refresh probe currently in flight — the dedup
     /// guard for the UI's TTL-driven `host_meta_refresh`.
     meta_inflight: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Host ids with a daemon_update in flight. The push+installer restarts
+    /// mymuxd, which flaps the tunnel and re-renders the host card — that
+    /// resurrects an enabled Update button mid-update, so a second click
+    /// would race two installers on the same $BINS/.prev/$DIST. Reject the
+    /// concurrent call instead.
+    update_inflight: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 /// A host's post-connect audit, refreshed on every Connected transition and
@@ -367,7 +373,15 @@ async fn daemon_update(
     host_id: String,
 ) -> Result<String, String> {
     let master = hook_master(&state, &host_id)?;
-    let out = mymux_connect::push_daemon_update(&master).await?;
+    // One update per host at a time: the restart flaps the tunnel and
+    // re-renders the card (a fresh, enabled Update button), so a second click
+    // would race two installers on the same binaries/backups.
+    if !state.update_inflight.lock().unwrap().insert(host_id.clone()) {
+        return Err("an update is already running for this host".into());
+    }
+    let result = mymux_connect::push_daemon_update(&master).await;
+    state.update_inflight.lock().unwrap().remove(&host_id);
+    let out = result?;
     refresh_host_meta(&state.conns, &state.metas, &app, &host_id, &master).await;
     Ok(out)
 }

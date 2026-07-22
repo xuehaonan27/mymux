@@ -598,6 +598,7 @@ fn http_json(url: &str) -> Result<serde_json::Value, String> {
 fn http_json_t(url: &str, max_secs: u32) -> Result<serde_json::Value, String> {
     let out = curl_cmd()
         .args(["-fsSL", "--max-time", &max_secs.to_string()])
+        .arg("--") // never let a '-'-leading URL become a curl option
         .arg(url)
         .output()
         .map_err(|_| "`curl` is not installed".to_string())?;
@@ -799,11 +800,18 @@ fn cmd_lang(args: &[String]) -> i32 {
 /// Download `url` (via the system curl — ubiquitous on servers, and TLS just
 /// works), verify its sha256, return the bytes.
 fn download_verified(url: &str, sha256: &str) -> Result<Vec<u8>, String> {
+    // Index/overlay-supplied URL: the embedded index is test-pinned to github
+    // https, but a user overlay bypasses that check — require https here so an
+    // overlay can't point downloads at http/file/other schemes.
+    if !url.starts_with("https://") {
+        return Err(format!("refusing a non-https download URL: {url}"));
+    }
     eprintln!("  fetching {url}");
     let tmp = std::env::temp_dir().join(format!("mymux-pkg-{}.dl", std::process::id()));
     let st = curl_cmd()
         .args(["-fsSL", "--max-time", "600", "-o"])
         .arg(&tmp)
+        .arg("--") // never let a '-'-leading URL become a curl option
         .arg(url)
         .status()
         .map_err(|_| "`curl` is not installed".to_string())?;
