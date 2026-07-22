@@ -167,8 +167,12 @@ Reproduced (30×4 grid, 12 colored lines): the replay was missing `L06,L07,L08` 
 it jumped from `L05` straight to the visible `L09`. On a real ~50-row terminal
 that is a **full screen of scrollback destroyed per window switch**, compounding
 with each switch. **Fix:** scroll the leftover visible history into scrollback
-before clearing — emit `\x1b[<rows>S` (or `rows` line feeds) after the history and
-before painting the dump — instead of `\x1b[2J` erasing it. Confidence **high**.
+before clearing — move to the bottom row and emit `leftover` **line feeds**
+(`\n`) after the history, instead of `\x1b[2J` erasing it. Confidence **high**.
+**NB (fixed 17623fd):** the leftover MUST be pushed with bottom-row linefeeds,
+NOT SU (`\x1b[<n>S`) — xterm.js's `scrollUp` splices the scrolled-off line out
+and discards it (no scrollback growth), so SU re-loses the history on the real
+client even though an avt round-trip test passes (avt's SU keeps the lines).
 
 _Related (tmux panes):_ `snapshot_pane` uses `capture-pane -e -p` **without
 `-S`** (`tmux.rs:1234`), so a reseed of a tmux pane restores only the visible
@@ -550,13 +554,37 @@ pathspec matches nothing), but those files can't be managed from the panel.
 
 ---
 
-## Pending (re-dispatched audits — findings to be appended)
+## Fix-batch review (2026-07-21, commits `e238e82..09ca481`)
 
-1. **connect-layer adjacency** — task-leak audit of forwarders/keepalives/probes,
-   supervisor state-machine edges neighbouring #1/#2 (re-dispatched).
-2. **post-audit regression sweep** — the `2f66e2c` panel paint-from-cache
-   refactor and the canvas add/withdraw pair (re-dispatched).
+All findings above were addressed by a fix batch (7 commits). Each fix was
+re-reviewed against the code on both sides. Outcome: **fixes correct, with two
+defects caught and corrected during review.**
 
-_Code panel + LSP audit returned — folded in above as #24-#31._
-_Git + pkgs audit returned — folded in above as #32-#37._
-_mymuxd Hub (`tmux.rs`) audited inline — no findings; see Verified solid._
+| Commit | Findings | Verdict |
+|---|---|---|
+| `e238e82` ptyd | #38, #39, #3-#7, #19-#22, C-30 | #38 correct; ptyd concurrency (Arc-identity reader remove, drop-outside-lock, `entry` spawn, orphan `retain`, blocking writer thread, clamps, SO_PEERCRED) all correct. **#39 was wrong** (see below) → fixed `17623fd`. |
+| `b02bcea` terminal | #11, #15, #39 tmux | Correct. Native panes now preserved (hidden, still fed) across window/zoom switches → no reseed on switch; tmux reseed faithful via `capture-pane -S`; focus-steal guard + scroll-chip fixed. |
+| `88d64f6` mymuxd | #8, #28, #31, #32, #35, #37 | Correct. Atomic write = same-dir temp + rename, mode preserved; symlink leaf rejected; `#32` truncate-panic fixed with char-boundary-safe `lossy_capped`; `#37` `-z` NUL parsing correct, same JSON shape. |
+| `f5b9c3c` editor | #24, #25, #27, #29, #30 | Correct. `#24` (data corruption) fixed by the `live = current===s && s.path===path` guard on the post-await `b.state` write + pre-await `doc` capture; escalation path closed; viewer root threaded; LSP key gains `lang`; per-segment URI encode. |
+| `839048f` connect | #1, #2, #14 | Correct. `#1`: listener bound in `connect()` before the port is returned; the tunnel holds it for life (no realloc to an unpublished port). `#2`: new `Status::Note` folds into the `why` of the current phase (never terminal), so transient notes no longer `settleAttempt` — zero-touch install opens a workspace. |
+| `c45b688` panels | #9, #10, #12, #13, #16, #33, #36 | 6/7 correct. **New regression**: inverted same-host guard in the pkgs catalog catch left an unreachable daemon stuck on "loading…" → fixed `c8306b8`. |
+| `a1540ea`/`09ca481` ci | P1-18/20, manifest | CI/manifest handoff — not deep-reviewed (low risk). |
+
+### Defects caught during review (both fixed)
+
+- **`17623fd` — #39 used SU, which xterm.js discards.** The reseed-history fix
+  scrolled leftover visible lines into scrollback with SU (`\x1b[<n>S`). avt's
+  `scroll_up` grows the buffer (keeps them), so the avt round-trip test passed —
+  but xterm.js's `scrollUp` splices the top line out and **discards** it, so the
+  ≈`rows` newest history lines were still lost on the real client. Fixed to
+  bottom-row **linefeeds** (the only op that grows xterm.js scrollback; also maps
+  to avt's), with a `contains_su()` regression guard the avt replay alone can't
+  provide.
+- **`c8306b8` — pkgs catalog error hidden by an inverted guard.** `c45b688`'s
+  same-host guard on the catch path used `api !== opts.getApiBase()` (renders the
+  error only when the host CHANGED) instead of `===`. An unreachable daemon with
+  no cache sat on "loading…" forever. Flipped to match the success guard; added
+  an unreachable-daemon leg to `pkgsmutcheck`.
+
+_Verified inline (no findings): mymuxd Hub (`tmux.rs`) concurrency & funnels;
+git injection surface; ptyd framing. See Verified solid._
