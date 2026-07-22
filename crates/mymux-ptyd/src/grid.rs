@@ -44,17 +44,17 @@ pub struct PaneGrid {
     resized_while_alt: bool,
 }
 
-/// The four complete alt-screen sequences we track (all exactly 8 bytes).
-/// Only 1047/1049 switch buffers; DEC 1048 (save/restore cursor) must not
-/// flip this state (C-30).
-const ALT_SEQS: [(&[u8], bool); 4] = [
-    (b"\x1b[?1047h", true),
-    (b"\x1b[?1047l", false),
-    (b"\x1b[?1049h", true),
-    (b"\x1b[?1049l", false),
-];
-/// Sequences are 8 bytes: only the trailing 7 can sit incomplete at a cut.
-const ALT_CARRY: usize = 7;
+/// Screen-buffer DEC private modes: 47 (legacy), 1047, and 1049 all switch to
+/// the alternate screen; 1048 (save/restore cursor) does NOT (C-30). We parse
+/// them out of any private-mode set/reset — see [`PaneGrid::track_alt`] — so
+/// legacy `?47`, multi-parameter DECSET (`?6;1047h`) and 8-bit C1 CSI all count
+/// the same as the plain forms (audit #18), matching avt's own parser.
+const ALT_MODES: [&[u8]; 3] = [b"47", b"1047", b"1049"];
+/// Longest tail that can sit incomplete at a chunk cut and still start an
+/// alt-mode sequence we must re-see: `ESC [ ? <params> h` with room for a few
+/// combined params. Re-scanning a complete sequence inside the carry is
+/// idempotent (later modes always sit closer to the end than earlier ones).
+const ALT_CARRY: usize = 24;
 
 impl PaneGrid {
     pub fn new(cols: u16, rows: u16) -> Self {
@@ -79,28 +79,51 @@ impl PaneGrid {
         self.alt
     }
 
-    /// Fold any complete alt-screen sequences into `alt`. The whole buffer
-    /// (tail + chunk) is scanned and matches apply in byte order; keeping
-    /// the trailing 7 bytes as the next tail means a boundary-straddling
-    /// sequence is re-seen (harmlessly — events are idempotent in order).
+    /// Fold alt-screen set/reset out of the raw stream into `alt`. A private
+    /// DEC-mode sequence — 7-bit `ESC [ ? <params> h|l` or 8-bit C1 `\x9b ? …` —
+    /// switches the alternate screen when any parameter is 47/1047/1049. Parsing
+    /// (not literal matching) means legacy `?47`, multi-param `?6;1047h`, and the
+    /// C1 form all register, and `?1048` (cursor save/restore) correctly does
+    /// not. The trailing [`ALT_CARRY`] bytes carry to the next feed so a
+    /// boundary-straddling sequence is re-seen (idempotent in order).
     fn track_alt(&mut self, bytes: &[u8]) {
         let mut buf = std::mem::take(&mut self.alt_tail);
         buf.extend_from_slice(bytes);
-        let mut events: Vec<(usize, bool)> = Vec::new();
-        for (seq, on) in ALT_SEQS {
-            let mut pos = 0;
-            while let Some(i) = buf[pos..]
-                .windows(seq.len())
-                .position(|w| w == seq)
-                .map(|x| x + pos)
+        let mut i = 0;
+        while i < buf.len() {
+            // A private-mode intro, 7-bit `ESC [ ?` or 8-bit C1 `\x9b ?`.
+            let params_start = if buf[i] == 0x1b
+                && buf.get(i + 1) == Some(&b'[')
+                && buf.get(i + 2) == Some(&b'?')
             {
-                events.push((i, on));
-                pos = i + 1;
+                i + 3
+            } else if buf[i] == 0x9b && buf.get(i + 1) == Some(&b'?') {
+                i + 2
+            } else {
+                i += 1;
+                continue;
+            };
+            // Parameter bytes: digits and ';' separators.
+            let mut j = params_start;
+            while buf.get(j).is_some_and(|b| b.is_ascii_digit() || *b == b';') {
+                j += 1;
             }
-        }
-        events.sort_unstable_by_key(|e| e.0);
-        for (_, on) in events {
-            self.alt = on;
+            match buf.get(j) {
+                Some(b'h') | Some(b'l') => {
+                    let on = buf[j] == b'h';
+                    if buf[params_start..j]
+                        .split(|&b| b == b';')
+                        .any(|p| ALT_MODES.contains(&p))
+                    {
+                        self.alt = on;
+                    }
+                    i = j + 1;
+                }
+                // Some other private CSI (e.g. `?25h` show-cursor) — skip past it.
+                Some(_) => i = j + 1,
+                // Incomplete at the buffer end — leave it for the carry.
+                None => break,
+            }
         }
         let keep = buf.len().saturating_sub(ALT_CARRY);
         self.alt_tail = buf[keep..].to_vec();
@@ -528,6 +551,42 @@ mod tests {
         assert!(!g.alt_screen());
         g.feed(b"\x1b[?1048l");
         assert!(!g.alt_screen());
+    }
+
+    #[test]
+    fn alt_tracked_for_legacy_multiparam_and_c1_forms() {
+        // #18: parsing (not literal matching) means these all register the same
+        // as plain `?1049h`, matching avt's own parser.
+        // Legacy ?47.
+        let mut g = PaneGrid::new(40, 10);
+        g.feed(b"\x1b[?47h");
+        assert!(g.alt_screen(), "legacy ?47h");
+        g.feed(b"\x1b[?47l");
+        assert!(!g.alt_screen(), "legacy ?47l");
+        // Multi-parameter DECSET (the alt mode is not the only/first param).
+        g.feed(b"\x1b[?6;1047h");
+        assert!(g.alt_screen(), "multi-param ?6;1047h");
+        g.feed(b"\x1b[?1047;25l");
+        assert!(!g.alt_screen(), "multi-param ?1047;25l");
+        // 8-bit C1 CSI (0x9b) intro.
+        g.feed(b"\x9b?1049h");
+        assert!(g.alt_screen(), "C1 CSI ?1049h");
+        g.feed(b"\x9b?1049l");
+        assert!(!g.alt_screen(), "C1 CSI ?1049l");
+        // An unrelated private mode must not flip alt (e.g. ?25 show-cursor).
+        g.feed(b"\x1b[?25h\x1b[?2004h");
+        assert!(!g.alt_screen(), "unrelated private modes");
+    }
+
+    #[test]
+    fn alt_mode_split_across_chunks_registers() {
+        // A multi-param alt sequence cut mid-stream still folds once its tail
+        // arrives (the carry re-sees it).
+        let mut g = PaneGrid::new(40, 10);
+        g.feed(b"before\x1b[?6;10");
+        assert!(!g.alt_screen());
+        g.feed(b"49h");
+        assert!(g.alt_screen(), "split ?6;1049h completed");
     }
 
     #[test]
