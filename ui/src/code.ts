@@ -2291,6 +2291,14 @@ export function initCodePanel(opts: CodePanelOpts): CodePanel {
         // there is nothing to discard here.
         closeQuickOpen();
         open = false;
+        // Release DOM focus BEFORE hiding. `.code-panel` hides via
+        // `display:none`, and WebKit keeps a display:none subtree's element as
+        // document.activeElement — so CodeMirror's contenteditable would keep
+        // swallowing keystrokes after close (the terminal gets nothing, and the
+        // typed text CORRUPTS the file buffer). Blur while still displayed so
+        // focus falls to <body>; the caller then focuses the terminal.
+        const ae = document.activeElement as HTMLElement | null;
+        if (ae && panel.contains(ae)) ae.blur();
         panel.classList.remove('show');
         return;
       }

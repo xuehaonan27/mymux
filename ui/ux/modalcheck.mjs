@@ -50,8 +50,22 @@ const browser = await chromium.launch();
   check('Esc#1 closes settings (top), code survives', await page.evaluate(
     () => !document.querySelector('.settings-panel.show') && !!document.querySelector('.code-panel.show'),
   ));
+  // Put DOM focus INSIDE the panel (the dangerous case): a real editor's
+  // contenteditable if one is mounted, else any focusable in the panel.
+  await page.evaluate(() => {
+    const el = document.querySelector('.code-panel .cm-content, .code-panel input, .code-panel [tabindex]');
+    if (el && 'focus' in el) el.focus();
+  });
   await page.keyboard.press('Escape');
   check('Esc#2 closes code', await page.evaluate(() => !document.querySelector('.code-panel.show')));
+  // Closing MUST release focus out of the panel. `.code-panel` hides via
+  // display:none, and WebKit keeps a display:none subtree's element as
+  // document.activeElement — a still-focused contenteditable then swallows
+  // keystrokes and the typed text corrupts the file buffer (blur-on-close in
+  // code.ts toggle()). Focus must not remain trapped in the hidden panel.
+  check('closing code releases focus from the panel', await page.evaluate(
+    () => !document.querySelector('.code-panel')?.contains(document.activeElement),
+  ));
   await page.close();
 }
 
