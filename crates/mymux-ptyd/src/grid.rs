@@ -193,10 +193,13 @@ impl PaneGrid {
                 "\x1b[90m┄┄ mymux: alt-screen panes restore only this page — older TUI history lives in the raw log (⇧ older output / termhist) ┄┄\x1b[0m\r\n"
                     .as_bytes(),
             );
-            // SU (scroll up): pushes the hint INTO the reconnecting client's
-            // scrollback, above the live alt page — visible on demand instead
-            // of stealing a row of the user's live frame.
-            out.extend_from_slice(b"\x1b[S");
+            // Push the hint into the primary buffer's scrollback so it sits
+            // above the live alt page (visible on demand, not stealing a row).
+            // Must be a BOTTOM-ROW LINEFEED, not SU (`CSI S`): xterm.js's SU
+            // splices the scrolled-off line out and DISCARDS it — only a
+            // bottom-row LF grows its scrollback (see the #39 note below).
+            let (_, rows) = self.vt.size();
+            out.extend_from_slice(format!("\x1b[{rows}H\n").as_bytes());
         } else {
             let (_, rows) = self.vt.size();
             let lines: Vec<&Line> = self.vt.lines().collect();
@@ -216,15 +219,27 @@ impl PaneGrid {
                     out.extend_from_slice(s.as_bytes());
                     out.extend_from_slice(b"\r\n");
                 }
-                // Push the replayed lines still sitting in the client's
-                // VISIBLE region into its scrollback before painting the
-                // dump — the `\x1b[2J` here used to erase them instead, so
-                // every reseed ate the ≈rows newest history lines (#39).
-                // After replaying n lines from home, min(n, rows-1) remain
-                // visible (the cursor's own row is blank).
+                // Push the replayed lines still sitting in the client's VISIBLE
+                // region into its scrollback before painting the dump — the
+                // `\x1b[2J` here used to erase them, so every reseed ate the
+                // ≈rows newest history lines (#39).
+                //
+                // This MUST be bottom-row LINEFEEDS, not SU (`\x1b[<n>S`):
+                // xterm.js's SU (`scrollUp`) splices the scrolled-off line out
+                // and DISCARDS it (no `ybase` growth), so SU re-loses exactly
+                // those lines on the real client. Only a linefeed at the bottom
+                // margin grows xterm.js scrollback. (avt's SU keeps the lines,
+                // which is why an avt-only round-trip can't tell SU from LF —
+                // don't "simplify" this back to SU.) After replaying n lines
+                // from home the cursor sits at row min(n, rows-1) and
+                // min(n, rows-1) history lines remain visible; move to the
+                // bottom row first so every LF actually scrolls.
                 let leftover = acc.len().min(rows.saturating_sub(1));
                 if leftover > 0 {
-                    out.extend_from_slice(format!("\x1b[{leftover}S").as_bytes());
+                    out.extend_from_slice(format!("\x1b[{rows}H").as_bytes());
+                    for _ in 0..leftover {
+                        out.push(b'\n');
+                    }
                 }
                 out.extend_from_slice(b"\x1b[0m\x1b[H");
             }
@@ -553,6 +568,16 @@ mod tests {
         for i in 0..12 {
             g.feed(format!("L{i:02}\r\n").as_bytes());
         }
+        let snap = String::from_utf8(g.snapshot()).unwrap();
+        // The history push must be LINEFEEDS, not SU (`CSI <n> S`): avt keeps
+        // SU-scrolled lines but xterm.js DISCARDS them, so an SU here re-loses
+        // the history on the real client while this avt round-trip stays green.
+        // Guard against a regression back to SU (which this test alone can't
+        // otherwise detect).
+        assert!(
+            !contains_su(&snap),
+            "snapshot uses SU (CSI S) to scroll history — xterm.js discards those lines; use LF: {snap:?}"
+        );
         let vt2 = replay(&g, 30, 4);
         let all: Vec<String> = vt2
             .lines()
@@ -570,6 +595,28 @@ mod tests {
             );
         }
     }
+
+    /// True if `s` contains an SU control sequence (`ESC [ <params> S`).
+    fn contains_su(s: &str) -> bool {
+        let b = s.as_bytes();
+        let mut i = 0;
+        while i + 1 < b.len() {
+            if b[i] == 0x1b && b[i + 1] == b'[' {
+                let mut j = i + 2;
+                while j < b.len() && (0x30..=0x3f).contains(&b[j]) {
+                    j += 1; // param / intermediate bytes (digits, ';', ':', '?')
+                }
+                if j < b.len() && b[j] == b'S' {
+                    return true;
+                }
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+        false
+    }
+
 
     #[test]
     fn snapshot_normalizes_truecolor_to_semicolon_form() {
