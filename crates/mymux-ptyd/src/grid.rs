@@ -260,9 +260,7 @@ impl PaneGrid {
                 let leftover = acc.len().min(rows.saturating_sub(1));
                 if leftover > 0 {
                     out.extend_from_slice(format!("\x1b[{rows}H").as_bytes());
-                    for _ in 0..leftover {
-                        out.push(b'\n');
-                    }
+                    out.extend(std::iter::repeat_n(b'\n', leftover));
                 }
                 out.extend_from_slice(b"\x1b[0m\x1b[H");
             }
