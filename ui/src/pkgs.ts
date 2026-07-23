@@ -330,6 +330,12 @@ export function initPkgsPanel(opts: { getApiBase: () => string }): PkgsPanel {
     isOpen: () => open,
     toggle() {
       open = !open;
+      if (!open) {
+        // Blur BEFORE hiding — a display:none subtree can keep focus on
+        // WebKit (the search box would swallow post-close keystrokes).
+        const ae = document.activeElement as HTMLElement | null;
+        if (ae && panel.contains(ae)) ae.blur();
+      }
       panel.classList.toggle('show', open);
       if (open) void load();
     },

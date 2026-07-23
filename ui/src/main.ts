@@ -943,6 +943,16 @@ async function ensureCode(): Promise<CodePanel> {
 const codePanel = {
   isOpen: () => codeReal?.isOpen() ?? false,
   toggle: () => {
+    // Synchronous once the chunk has landed: callers read isOpen() IMMEDIATELY
+    // after toggling (⌘E close → refocus, the panel arbiter). The always-async
+    // version let a close's refocus check run BEFORE the real toggle — it saw
+    // "still open", never fired, and focus stayed on <body>/the button: the
+    // terminal went deaf (and pre-blur engines polluted the hidden buffer).
+    if (codeReal) {
+      codeReal.toggle();
+      noteModal('code', codeReal.isOpen());
+      return;
+    }
     // Rejection already toasted inside ensureCode — swallow here, don't wedge.
     void ensureCode().then((c) => {
       c.toggle();
@@ -1019,6 +1029,12 @@ async function ensureGit(): Promise<import('./gitgraph').GitGraphPanel> {
 const gitPanel = {
   isOpen: () => gitReal?.isOpen() ?? false,
   toggle: () => {
+    // Synchronous once loaded — same close/refocus contract as codePanel.
+    if (gitReal) {
+      gitReal.toggle();
+      noteModal('gitgraph', gitReal.isOpen());
+      return;
+    }
     // The rejection path (chunk failed) is toasted in ensureGit — swallow.
     void ensureGit().then((g) => {
       g.toggle();
@@ -1062,6 +1078,7 @@ function toggleGitGraph() {
   closeOtherPanels('git');
   gitPanel.toggle();
   if (gitReal) noteModal('gitgraph', gitReal.isOpen());
+  if (!gitPanel.isOpen()) active()?.refocusActive();
   setLeader(false);
 }
 registerModal('gitgraph', { isOpen: () => gitPanel.isOpen(), close: () => toggleGitGraph() });
@@ -1122,18 +1139,24 @@ function toggleCode() {
   // codeReal is null while the chunk loads — the stack entry lands in the
   // wrapper's .then above; here we only keep a LOADED panel's record exact.
   if (codeReal) noteModal('code', codeReal.isOpen());
+  // A close must land focus back on the terminal: the toolbar-button path
+  // otherwise leaves it on the button, and a blur-miss engine on the hidden
+  // editor — either way the terminal goes deaf.
+  if (!codePanel.isOpen()) active()?.refocusActive();
   setLeader(false);
 }
 function toggleProc() {
   closeOtherPanels('proc');
   procPanel.toggle();
   noteModal('proc', procPanel.isOpen());
+  if (!procPanel.isOpen()) active()?.refocusActive();
   setLeader(false);
 }
 function togglePlugins() {
   closeOtherPanels('pkgs');
   pkgsPanel.toggle();
   noteModal('pkgs', pkgsPanel.isOpen());
+  if (!pkgsPanel.isOpen()) active()?.refocusActive();
   setLeader(false);
 }
 registerModal('code', {

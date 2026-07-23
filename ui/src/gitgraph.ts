@@ -1435,6 +1435,13 @@ export function initGitGraph(opts: GitGraphOpts): GitGraphPanel {
     toggle() {
       open = !open;
       closeMenu();
+      if (!open) {
+        // Blur BEFORE hiding — WebKit keeps a display:none subtree's element
+        // as document.activeElement and it keeps swallowing real keystrokes
+        // (the commit box would eat everything typed after close).
+        const ae = document.activeElement as HTMLElement | null;
+        if (ae && panel.contains(ae)) ae.blur();
+      }
       panel.classList.toggle('show', open);
       if (open) {
         // No page forcing: a fresh surface lands on the History graph (the
